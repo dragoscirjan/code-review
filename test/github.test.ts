@@ -142,6 +142,9 @@ test("creates a managed comment when none exists", async () => {
   assert.equal(result.id, 3);
   assert.equal(requests[1]?.init?.method, "POST");
   assert.match(requests[1]?.url ?? "", /issues\/7\/comments$/);
+  assert.deepEqual(JSON.parse(String(requests[1]?.init?.body)), {
+    body: `new ${marker}`,
+  });
 });
 
 test("parses a pull request event", () => {
