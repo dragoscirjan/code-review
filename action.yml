@@ -1,0 +1,46 @@
+name: OpenCode pull request review
+description: Review a pull request with a free OpenCode model and publish one managed comment
+author: Dragos Cirjan
+
+inputs:
+  github-token:
+    description: Personal access token used to read the pull request and publish the review
+    required: true
+  container-engine:
+    description: Allowlisted container engine used for the OpenCode sandbox
+    required: false
+    default: podman
+  model:
+    description: OpenCode model identifier. The POC supports only opencode/big-pickle
+    required: false
+    default: opencode/big-pickle
+  prompt:
+    description: Trusted review guidance appended to the fixed security prompt
+    required: false
+    default: Focus on correctness, security, regressions, and missing tests.
+  opencode-version:
+    description: Exact opencode-ai npm package version
+    required: false
+    default: 1.18.31
+  max-diff-bytes:
+    description: Maximum UTF-8 diff size sent to OpenCode
+    required: false
+    default: "120000"
+  timeout-seconds:
+    description: Maximum OpenCode execution time
+    required: false
+    default: "600"
+
+outputs:
+  comment-url:
+    description: URL of the created or updated review comment
+  diff-truncated:
+    description: Whether the pull request diff exceeded max-diff-bytes
+
+runs:
+  using: node20
+  main: dist/index.js
+
+branding:
+  icon: code
+  color: purple
