@@ -14,10 +14,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
         with:
-          node-version: 20
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
           cache: npm
       - run: npm ci
       - run: npm run validate
@@ -38,4 +40,6 @@ jobs:
             docker.io/library/node:20.19.5-bookworm-slim@sha256:d08621e478133b0492bd661ceee5d13a22b8c55297f3dbbb57f1c15d0c214942 \
             node --version
       - name: Verify bundled action
-        run: git diff --exit-code -- dist/index.js
+        run: |
+          git ls-files --error-unmatch dist/index.js
+          git diff --exit-code -- dist/index.js

@@ -5,7 +5,7 @@
   "description": "GitHub Action that reviews pull requests with OpenCode",
   "license": "MIT",
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist/index.js",
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node24 --format=cjs --outfile=dist/index.js",
     "test": "tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "validate": "npm run typecheck && npm test && npm run build"

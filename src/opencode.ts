@@ -325,9 +325,13 @@ async function runProcess(
     };
 
     const append = (current: string, chunk: Buffer): string => {
+      if (failure) {
+        return current;
+      }
       const next = current + chunk.toString("utf8");
       if (Buffer.byteLength(next, "utf8") > MAX_PROCESS_OUTPUT_BYTES) {
         stop(new Error("OpenCode process output exceeded 5000000 bytes"));
+        return current;
       }
       return next;
     };
