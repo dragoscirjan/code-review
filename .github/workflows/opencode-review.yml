@@ -1,0 +1,27 @@
+name: OpenCode pull request review
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+permissions: {}
+
+concurrency:
+  group: opencode-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Review pull request
+        uses: dragoscirjan/code-review@dd53c9336b55e5b9b24f8088e4b2f93ceecb9ea8
+        with:
+          github-token: ${{ secrets.GH_TOKEN }}
+          container-engine: podman
