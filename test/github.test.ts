@@ -90,6 +90,60 @@ test("updates only the managed comment owned by the PAT actor", async () => {
   assert.match(requests[1]?.url ?? "", /issues\/comments\/2$/);
 });
 
+test("creates a managed comment when none exists", async () => {
+  const requests: Array<{ url: string; init?: RequestInit }> = [];
+  const created: GitHubComment = {
+    id: 3,
+    body: `new ${marker}`,
+    html_url: "https://example.test/3",
+    user: { id: 20, login: "bot" },
+  };
+  const responses = [
+    new Response("[]", {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+    new Response(JSON.stringify(created), {
+      status: 201,
+      headers: { "Content-Type": "application/json" },
+    }),
+  ];
+  const client = new GitHubClient(
+    "token",
+    "https://api.example.test",
+    async (input, init) => {
+      requests.push({ url: String(input), init });
+      const response = responses.shift();
+      assert.ok(response);
+      return response;
+    },
+  );
+  const context = parsePullRequestEvent({
+    number: 7,
+    repository: { full_name: "owner/repository" },
+    pull_request: {
+      number: 7,
+      title: "Change",
+      body: "",
+      html_url: "https://github.com/owner/repository/pull/7",
+      base: { sha: "base" },
+      head: { sha: "head" },
+      user: { login: "contributor" },
+    },
+  });
+
+  const result = await client.upsertManagedComment(
+    context,
+    { id: 20, login: "bot" },
+    marker,
+    `new ${marker}`,
+  );
+
+  assert.equal(result.id, 3);
+  assert.equal(requests[1]?.init?.method, "POST");
+  assert.match(requests[1]?.url ?? "", /issues\/7\/comments$/);
+});
+
 test("parses a pull request event", () => {
   const context = parsePullRequestEvent({
     number: 7,
