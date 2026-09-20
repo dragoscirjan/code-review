@@ -1,38 +1,65 @@
-import type { ModelConnection } from "./model";
-import type { ReviewBackend } from "./review";
+import type { ModelConnection } from './model';
+import type { ReviewBackend } from './review';
 
 export function buildHarnessConfig(connection: ModelConnection, backend: ReviewBackend): object {
-  if (backend === "pi") {
-    return { providers: { "review-provider": {
-      api: connection.api,
-      baseUrl: connection.baseUrl,
-      // This fixed reference is resolved once by Pi, never taken from user input.
-      apiKey: "$REVIEW_MODEL_TOKEN",
-      models: [{ id: connection.modelId, input: ["text"], reasoning: false,
-        contextWindow: connection.contextWindow, maxTokens: connection.maxOutputTokens,
-        ...(connection.api === "openai-completions" ? { compat: {
-          supportsDeveloperRole: false, supportsReasoningEffort: false,
-          supportsStore: false, maxTokensField: "max_tokens",
-        } } : {}),
-      }],
-    } } };
+  if (backend === 'pi') {
+    return {
+      providers: {
+        'review-provider': {
+          api: connection.api,
+          baseUrl: connection.baseUrl,
+          // This fixed reference is resolved once by Pi, never taken from user input.
+          apiKey: '$REVIEW_MODEL_TOKEN',
+          models: [
+            {
+              id: connection.modelId,
+              input: ['text'],
+              reasoning: false,
+              contextWindow: connection.contextWindow,
+              maxTokens: connection.maxOutputTokens,
+              ...(connection.api === 'openai-completions'
+                ? {
+                    compat: {
+                      supportsDeveloperRole: false,
+                      supportsReasoningEffort: false,
+                      supportsStore: false,
+                      maxTokensField: 'max_tokens',
+                    },
+                  }
+                : {}),
+            },
+          ],
+        },
+      },
+    };
   }
-  const npm = connection.api === "anthropic-messages" ? "@ai-sdk/anthropic" :
-    connection.api === "openai-responses" ? "@ai-sdk/openai" : "@ai-sdk/openai-compatible";
+  const npm =
+    connection.api === 'anthropic-messages'
+      ? '@ai-sdk/anthropic'
+      : connection.api === 'openai-responses'
+        ? '@ai-sdk/openai'
+        : '@ai-sdk/openai-compatible';
   return {
-    permission: { "*": "deny" },
-    enabled_providers: ["review-provider"],
-    model: "review-provider/review-model",
-    small_model: "review-provider/review-model",
-    share: "disabled",
-    provider: { "review-provider": {
-      npm,
-      options: { baseURL: connection.api === "anthropic-messages" ? `${connection.baseUrl}/v1` : connection.baseUrl },
-      models: { "review-model": { id: connection.modelId, name: "Review model",
-        limit: { context: connection.contextWindow, output: connection.maxOutputTokens },
-        reasoning: false, tool_call: false,
-      } },
-    } },
+    permission: { '*': 'deny' },
+    enabled_providers: ['review-provider'],
+    model: 'review-provider/review-model',
+    small_model: 'review-provider/review-model',
+    share: 'disabled',
+    provider: {
+      'review-provider': {
+        npm,
+        options: { baseURL: connection.api === 'anthropic-messages' ? `${connection.baseUrl}/v1` : connection.baseUrl },
+        models: {
+          'review-model': {
+            id: connection.modelId,
+            name: 'Review model',
+            limit: { context: connection.contextWindow, output: connection.maxOutputTokens },
+            reasoning: false,
+            tool_call: false,
+          },
+        },
+      },
+    },
   };
 }
 

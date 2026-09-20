@@ -4,9 +4,20 @@
 
 Use GitHub Issues for defects, features, and acceptance criteria. Put product requirements and design decisions in the GitHub Wiki. Link implementation pull requests to both when applicable.
 
-The repository is in its bootstrap phase. The POC uses npm, TypeScript, esbuild, and Node's test runner through `tsx`. Do not add a second package manager, task runner, formatter, or test framework without an accepted design change. Follow `package-lock.json` and the scripts in `package.json`.
+The repository is in its bootstrap phase. The POC uses npm, TypeScript, esbuild, Vitest, and the shared Tempel ESLint and Prettier configurations. Mise manages tool versions and project tasks. Do not add a second package manager, task runner, formatter, or test framework without an accepted design change. Follow `package-lock.json`, `mise.toml`, and the scripts in `package.json`.
 
 The current milestone supports the GitHub Action, OpenCode and Pi, configured existing model endpoints, GitHub-hosted runners, and PAT publication. `model-config` selects an explicitly permitted remote/private provider endpoint and model; `model-credentials` supplies separate named bearer or API-key credentials. See the Wiki's Provider-neutral-model-configuration page and issue #12. Both backends run in the fixed container sandbox without checkout, host mounts, or GitHub credentials. Generate native harness configuration inside the container and pass only the selected provider credential. Reject arbitrary native config, commands, headers, and ambient environment references. Podman is the default and Docker is the only fallback. Managed local-runtime lifecycle, enforced-egress gateway, self-hosted runner support and additional forges remain separate work.
+
+## Set up the repository
+
+Mise installs Node.js 24 and Python 3.12, and npm is the only supported package manager.
+
+```bash
+mise trust
+mise run deps:sync
+```
+
+Run `mise tasks` to list the available tasks. Use `mise run <task>` when a task exists. Dependency installation also configures Husky hooks: staged files are linted and formatted before commits, and the test suite runs before pushes.
 
 ## Before starting
 
@@ -58,7 +69,11 @@ Use these test levels:
 
 Tests must use temporary directories and repositories. They must not modify the contributor's checkout. Network tests must be opt-in and clearly named.
 
-Before pushing, run every formatting, type-checking, linting, and test command defined by the repository. The initial bootstrap pull request must add one documented validation command that runs the required local checks.
+Before pushing, run every formatting, type-checking, linting, and test command defined by the repository:
+
+```bash
+mise run validate
+```
 
 ## Security review
 
@@ -90,13 +105,13 @@ Update documentation in the same pull request when behavior or configuration cha
 
 ## Commits
 
-Use Conventional Commits, for example:
+Use Conventional Commits with the linked GitHub issue number as the scope. The Husky `commit-msg` hook enforces this format:
 
 ```text
-feat: add GitHub App credential provider
-fix: reject comments outside changed lines
-docs: document PAT review identity
-test: cover renamed files in diff mapping
+feat(#21): add GitHub App credential provider
+fix(#22): reject comments outside changed lines
+docs(#23): document PAT review identity
+test(#24): cover renamed files in diff mapping
 ```
 
 Keep commits reviewable. A commit should build and pass the relevant tests unless the pull request documents why an intermediate commit cannot do so.

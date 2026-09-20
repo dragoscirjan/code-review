@@ -1,0 +1,4 @@
+mise run lint-staged
+mise run duplicate-check
+mise run build
+git add dist/index.js

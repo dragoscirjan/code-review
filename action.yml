@@ -47,11 +47,11 @@ inputs:
   max-diff-bytes:
     description: Maximum UTF-8 diff size sent to the review backend
     required: false
-    default: "120000"
+    default: '120000'
   timeout-seconds:
     description: Maximum review backend execution time
     required: false
-    default: "600"
+    default: '600'
 
 outputs:
   comment-url:

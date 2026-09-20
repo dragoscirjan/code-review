@@ -10,10 +10,11 @@ The provider-specific `openrouter-api-key` and `model` inputs have been removed.
 2. Create a GitHub Actions repository secret named **`REVIEW_MODEL_CREDENTIALS`**. Its value is this JSON, replacing the placeholder with your existing OpenRouter API key:
 
    ```json
-   {"review-provider":{"type":"bearer","value":"YOUR_OPENROUTER_API_KEY"}}
+   { "review-provider": { "type": "bearer", "value": "YOUR_OPENROUTER_API_KEY" } }
    ```
 
    You can reuse the key currently stored in `OPENROUTER_API_KEY`; you do not need a new OpenRouter account or key. Never commit this JSON with a real token.
+
 3. Use the workflow below, replacing `REPLACE_WITH_COMMIT_SHA` with an immutable trusted commit **containing this change**. Do not pass the new inputs to an older action revision.
 
 ```yaml
@@ -66,26 +67,26 @@ Do not add checkout or execute PR code in this `pull_request_target` job. Never 
 
 One invocation selects one provider/model. Use workflow matrices or separate invocations for more. Non-secret configuration can be inline workflow JSON or `${{ vars.REVIEW_MODEL_CONFIG }}`. Secrets belong only in `model-credentials`.
 
-| Field | Meaning |
-| --- | --- |
-| `version` | Required; `1`. |
-| `provider.api` | Required; one of the protocols below. |
-| `provider.baseUrl` | Required API base URL; no URL credentials, query, fragment, or interpolation. |
-| `provider.network` | Required; `remote` explicitly permits sending source to a public HTTPS provider; `private` explicitly permits a private-network endpoint (HTTP allowed). |
-| `provider.credential` | Optional reference into `model-credentials`; never an environment variable or token. |
-| `model.id` | Required exact provider model ID, not a Pi/OpenCode selector. |
-| `model.contextWindow` | Positive integer, default `128000`, maximum `2000000`. Set to the model's actual capability. |
-| `model.maxOutputTokens` | Positive integer, default `8192`, strictly below `contextWindow`. |
+| Field                   | Meaning                                                                                                                                                  |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `version`               | Required; `1`.                                                                                                                                           |
+| `provider.api`          | Required; one of the protocols below.                                                                                                                    |
+| `provider.baseUrl`      | Required API base URL; no URL credentials, query, fragment, or interpolation.                                                                            |
+| `provider.network`      | Required; `remote` explicitly permits sending source to a public HTTPS provider; `private` explicitly permits a private-network endpoint (HTTP allowed). |
+| `provider.credential`   | Optional reference into `model-credentials`; never an environment variable or token.                                                                     |
+| `model.id`              | Required exact provider model ID, not a Pi/OpenCode selector.                                                                                            |
+| `model.contextWindow`   | Positive integer, default `128000`, maximum `2000000`. Set to the model's actual capability.                                                             |
+| `model.maxOutputTokens` | Positive integer, default `8192`, strictly below `contextWindow`.                                                                                        |
 
 Unknown fields are rejected. Each JSON input is capped at 32,000 UTF-8 bytes; at most 16 credentials, with tokens limited to 8,192 printable non-whitespace ASCII characters. References/model IDs use letters, digits, `.`, `_`, `:`, `/`, `-` (maximum 200 characters, starting with a letter/digit).
 
 ### Protocols and authentication
 
-| API | Base URL example | Credential type |
-| --- | --- | --- |
+| API                  | Base URL example                                                      | Credential type                                  |
+| -------------------- | --------------------------------------------------------------------- | ------------------------------------------------ |
 | `openai-completions` | `https://openrouter.ai/api/v1` or an OpenAI-compatible `/v1` endpoint | `bearer`, or omit credential for keyless servers |
-| `openai-responses` | `https://api.openai.com/v1` | `bearer`, or keyless compatible server |
-| `anthropic-messages` | `https://api.anthropic.com` (**without `/v1`**) | Required `api-key` (Anthropic `x-api-key`) |
+| `openai-responses`   | `https://api.openai.com/v1`                                           | `bearer`, or keyless compatible server           |
+| `anthropic-messages` | `https://api.anthropic.com` (**without `/v1`**)                       | Required `api-key` (Anthropic `x-api-key`)       |
 
 For Anthropic, use `{"review-provider":{"type":"api-key","value":"YOUR_ANTHROPIC_API_KEY"}}` as the secret. The adapter accounts for the harnesses' different Anthropic base URL conventions. A bearer credential may be an API key or an already-issued access token; the action does not log in, refresh OAuth tokens, or run credential commands. Anthropic OAuth tokens containing `sk-ant-oat` are rejected because Pi would reinterpret them as OAuth rather than `x-api-key` authentication.
 
@@ -117,21 +118,21 @@ Omit `model-credentials` for keyless servers. The harness adapters use a non-sec
 
 ## Inputs
 
-| Input | Default | Description |
-| --- | --- | --- |
-| `github-token` | Required | PAT for PR API access and publication. |
-| `model-config` | Required | Provider/model JSON above. |
-| `model-credentials` | `{}` | Secret JSON credential map; only the selected credential enters the backend. |
-| `backend` | `opencode` | `opencode` or `pi`. |
-| `container-engine` | `podman` | `podman` or validated `docker` fallback. |
-| `prompt` | Correctness and security review | Additional trusted review guidance. |
-| `opencode-version` | `1.18.31` | Exact npm package version. |
-| `pi-version` | `0.85.1` | Exact npm package version. |
-| `code-indexer` | `none` | `none`, `cgc` or `gitnexus`; exact base revision only. |
-| `code-index-cache-key` | `code-review-index-v1` | Cache key prefix. |
-| `code-index-cache-ttl` | `24h` | Maximum cache age (`ms`, `s`, `m`, `h`, `d`). |
-| `max-diff-bytes` | `120000` | Maximum UTF-8 diff bytes. |
-| `timeout-seconds` | `600` | Backend timeout. |
+| Input                  | Default                         | Description                                                                  |
+| ---------------------- | ------------------------------- | ---------------------------------------------------------------------------- |
+| `github-token`         | Required                        | PAT for PR API access and publication.                                       |
+| `model-config`         | Required                        | Provider/model JSON above.                                                   |
+| `model-credentials`    | `{}`                            | Secret JSON credential map; only the selected credential enters the backend. |
+| `backend`              | `opencode`                      | `opencode` or `pi`.                                                          |
+| `container-engine`     | `podman`                        | `podman` or validated `docker` fallback.                                     |
+| `prompt`               | Correctness and security review | Additional trusted review guidance.                                          |
+| `opencode-version`     | `1.18.31`                       | Exact npm package version.                                                   |
+| `pi-version`           | `0.85.1`                        | Exact npm package version.                                                   |
+| `code-indexer`         | `none`                          | `none`, `cgc` or `gitnexus`; exact base revision only.                       |
+| `code-index-cache-key` | `code-review-index-v1`          | Cache key prefix.                                                            |
+| `code-index-cache-ttl` | `24h`                           | Maximum cache age (`ms`, `s`, `m`, `h`, `d`).                                |
+| `max-diff-bytes`       | `120000`                        | Maximum UTF-8 diff bytes.                                                    |
+| `timeout-seconds`      | `600`                           | Backend timeout.                                                             |
 
 Outputs: `comment-url`, `diff-truncated`, `code-indexer`, `code-index-cache-hit`.
 

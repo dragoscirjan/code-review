@@ -1,16 +1,14 @@
-export function buildOpenCodeCommand(input: {
-  version: string;
-}): string[] {
+export function buildOpenCodeCommand(input: { version: string }): string[] {
   return [
-    "npx",
-    "--yes",
+    'npx',
+    '--yes',
     `opencode-ai@${input.version}`,
-    "run",
-    "--pure",
-    "--model",
-    "review-provider/review-model",
-    "--format",
-    "json",
+    'run',
+    '--pure',
+    '--model',
+    'review-provider/review-model',
+    '--format',
+    'json',
   ];
 }
 
@@ -28,32 +26,30 @@ export function parseOpenCodeJson(output: string): string {
       continue;
     }
 
-    if (typeof event !== "object" || event === null) {
+    if (typeof event !== 'object' || event === null) {
       continue;
     }
     const record = event as Record<string, unknown>;
-    if (record.type === "error") {
-      throw new Error(
-        "OpenCode reported a provider error; backend details suppressed",
-      );
+    if (record.type === 'error') {
+      throw new Error('OpenCode reported a provider error; backend details suppressed');
     }
-    if (record.type !== "text") {
+    if (record.type !== 'text') {
       continue;
     }
 
     const part = record.part;
-    if (typeof part !== "object" || part === null) {
+    if (typeof part !== 'object' || part === null) {
       continue;
     }
     const value = (part as Record<string, unknown>).text;
-    if (typeof value === "string" && value.trim()) {
+    if (typeof value === 'string' && value.trim()) {
       textParts.push(value.trim());
     }
   }
 
-  const review = textParts.join("\n\n").trim();
+  const review = textParts.join('\n\n').trim();
   if (!review) {
-    throw new Error("OpenCode returned no review text");
+    throw new Error('OpenCode returned no review text');
   }
   return review;
 }
