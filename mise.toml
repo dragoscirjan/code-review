@@ -1,0 +1,62 @@
+[settings]
+lockfile = true
+
+[tools]
+node = "24"
+python = "3.12"
+
+[tasks.build]
+description = "Build the bundled GitHub Action"
+run = "npm run build"
+
+[tasks.typecheck]
+description = "Check TypeScript types"
+run = "npm run typecheck"
+
+[tasks.test]
+description = "Run the Vitest suite"
+run = "npm test"
+
+[tasks.lint]
+description = "Lint and fix the repository"
+run = "npm run lint"
+
+[tasks."lint:check"]
+description = "Check linting without modifying files"
+run = "npm run lint:check"
+
+[tasks."duplicate-check"]
+description = "Check source code for duplication"
+run = "npm run duplicate-check"
+
+[tasks.format]
+description = "Format repository files"
+run = "npm run format"
+
+[tasks."format:check"]
+description = "Check formatting without modifying files"
+run = "npm run format:check"
+
+[tasks.audit]
+description = "Audit dependencies for known vulnerabilities"
+run = "npm run audit"
+
+[tasks.validate]
+description = "Run the local validation pipeline"
+run = [
+  "mise run format:check",
+  "mise run lint:check",
+  "mise run typecheck",
+  "mise run test",
+  "mise run duplicate-check",
+  "mise run audit",
+  "mise run build",
+]
+
+[tasks."deps:sync"]
+description = "Install mise tools and project dependencies"
+run = ["mise install --yes", "npm ci"]
+
+[tasks."deps:clean"]
+description = "Remove installed dependencies and quality reports"
+run = "rm -rf node_modules coverage .jscpd"

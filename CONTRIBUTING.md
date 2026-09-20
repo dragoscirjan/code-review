@@ -4,9 +4,20 @@
 
 Use GitHub Issues for defects, features, and acceptance criteria. Put product requirements and design decisions in the GitHub Wiki. Link implementation pull requests to both when applicable.
 
-The repository is in its bootstrap phase. The POC uses npm, TypeScript, esbuild, and Node's test runner through `tsx`. Do not add a second package manager, task runner, formatter, or test framework without an accepted design change. Follow `package-lock.json` and the scripts in `package.json`.
+The repository is in its bootstrap phase. The POC uses npm, TypeScript, esbuild, Vitest, and the shared Tempel ESLint and Prettier configurations. Mise manages tool versions and project tasks. Do not add a second package manager, task runner, formatter, or test framework without an accepted design change. Follow `package-lock.json`, `mise.toml`, and the scripts in `package.json`.
 
 The current milestone supports the GitHub Action, OpenCode and Pi, configured existing model endpoints, GitHub-hosted runners, and PAT publication. `model-config` selects an explicitly permitted remote/private provider endpoint and model; `model-credentials` supplies separate named bearer or API-key credentials. See the Wiki's Provider-neutral-model-configuration page and issue #12. Both backends run in the fixed container sandbox without checkout, host mounts, or GitHub credentials. Generate native harness configuration inside the container and pass only the selected provider credential. Reject arbitrary native config, commands, headers, and ambient environment references. Podman is the default and Docker is the only fallback. Managed local-runtime lifecycle, enforced-egress gateway, self-hosted runner support and additional forges remain separate work.
+
+## Set up the repository
+
+Mise installs Node.js 24 and Python 3.12, and npm is the only supported package manager.
+
+```bash
+mise trust
+mise run deps:sync
+```
+
+Run `mise tasks` to list the available tasks. Use `mise run <task>` when a task exists.
 
 ## Before starting
 
@@ -58,7 +69,11 @@ Use these test levels:
 
 Tests must use temporary directories and repositories. They must not modify the contributor's checkout. Network tests must be opt-in and clearly named.
 
-Before pushing, run every formatting, type-checking, linting, and test command defined by the repository. The initial bootstrap pull request must add one documented validation command that runs the required local checks.
+Before pushing, run every formatting, type-checking, linting, and test command defined by the repository:
+
+```bash
+mise run validate
+```
 
 ## Security review
 

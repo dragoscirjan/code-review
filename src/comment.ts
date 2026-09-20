@@ -1,7 +1,7 @@
-import type { ReviewBackend } from "./review";
+import type { ReviewBackend } from './review';
 
 function backendLabel(backend: ReviewBackend): string {
-  return backend === "opencode" ? "OpenCode" : "Pi";
+  return backend === 'opencode' ? 'OpenCode' : 'Pi';
 }
 
 export function renderComment(input: {
@@ -14,9 +14,7 @@ export function renderComment(input: {
   originalDiffBytes: number;
   marker: string;
 }): string {
-  const truncation = input.diffTruncated
-    ? `\n\n> Diff input was truncated from ${input.originalDiffBytes} bytes.`
-    : "";
+  const truncation = input.diffTruncated ? `\n\n> Diff input was truncated from ${input.originalDiffBytes} bytes.` : '';
   return `## Code Review (\`${input.model}\` via ${backendLabel(input.backend)})
 
 - Head: \`${input.headSha.slice(0, 12)}\`

@@ -1,37 +1,27 @@
-import assert from "node:assert/strict";
-import test from "node:test";
-import {
-  buildOpenCodeCommand,
-  parseOpenCodeJson,
-} from "../src/opencode";
+import assert from 'node:assert/strict';
+import { test } from 'vitest';
+import { buildOpenCodeCommand, parseOpenCodeJson } from '../src/opencode';
 
-test("extracts text events from OpenCode JSON output", () => {
+test('extracts text events from OpenCode JSON output', () => {
   const output = [
-    "npx informational notice",
-    JSON.stringify({ type: "step_start" }),
-    JSON.stringify({ type: "text", part: { text: "First" } }),
-    JSON.stringify({ type: "text", part: { text: "Second" } }),
-  ].join("\n");
-  assert.equal(parseOpenCodeJson(output), "First\n\nSecond");
+    'npx informational notice',
+    JSON.stringify({ type: 'step_start' }),
+    JSON.stringify({ type: 'text', part: { text: 'First' } }),
+    JSON.stringify({ type: 'text', part: { text: 'Second' } }),
+  ].join('\n');
+  assert.equal(parseOpenCodeJson(output), 'First\n\nSecond');
 });
 
-test("rejects output without review text", () => {
-  assert.throws(() => parseOpenCodeJson("not json"), /no review text/);
-  assert.throws(
-    () => parseOpenCodeJson(JSON.stringify({ type: "step_finish" })),
-    /no review text/,
-  );
+test('rejects output without review text', () => {
+  assert.throws(() => parseOpenCodeJson('not json'), /no review text/);
+  assert.throws(() => parseOpenCodeJson(JSON.stringify({ type: 'step_finish' })), /no review text/);
 });
 
-test("builds a pure OpenCode command for only the configured model", () => {
+test('builds a pure OpenCode command for only the configured model', () => {
   const command = buildOpenCodeCommand({
-    version: "1.18.31",
+    version: '1.18.31',
   });
-  assert.deepEqual(command.slice(0, 3), [
-    "npx",
-    "--yes",
-    "opencode-ai@1.18.31",
-  ]);
-  assert.ok(command.includes("--pure"));
-  assert.ok(command.includes("review-provider/review-model"));
+  assert.deepEqual(command.slice(0, 3), ['npx', '--yes', 'opencode-ai@1.18.31']);
+  assert.ok(command.includes('--pure'));
+  assert.ok(command.includes('review-provider/review-model'));
 });

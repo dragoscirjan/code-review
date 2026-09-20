@@ -1,31 +1,16 @@
-import { spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
-import {
-  lstat,
-  mkdir,
-  readFile,
-  readdir,
-  rm,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import {
-  DEFAULT_CGC_VERSION,
-  DEFAULT_GITNEXUS_VERSION,
-  type CodeIndexer,
-} from "./config";
-import type {
-  GitHubClient,
-  PullRequestContext,
-  PullRequestDiff,
-} from "./github";
+import { spawn } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
+import { lstat, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DEFAULT_CGC_VERSION, DEFAULT_GITNEXUS_VERSION, type CodeIndexer } from './config';
+import type { GitHubClient, PullRequestContext, PullRequestDiff } from './github';
 
 const MAX_COMMAND_OUTPUT_BYTES = 5_000_000;
 const MAX_INDEX_CONTEXT_BYTES = 50_000;
 const INDEX_COMMAND_TIMEOUT_MS = 20 * 60_000;
 const INSTALL_COMMAND_TIMEOUT_MS = 10 * 60_000;
-const CACHE_SCHEMA = "index-v1";
+const CACHE_SCHEMA = 'index-v1';
 
 export interface CommandOptions {
   cwd: string;
@@ -42,16 +27,12 @@ export type CommandRunner = (
 
 export interface CacheAdapter {
   isAvailable(): boolean;
-  restore(
-    paths: string[],
-    primaryKey: string,
-    restoreKeys: string[],
-  ): Promise<string | undefined>;
+  restore(paths: string[], primaryKey: string, restoreKeys: string[]): Promise<string | undefined>;
   save(paths: string[], key: string): Promise<number>;
 }
 
 export interface CodeIndexRequest {
-  indexer: Exclude<CodeIndexer, "none">;
+  indexer: Exclude<CodeIndexer, 'none'>;
   cacheKey: string;
   cacheTtlMs: number;
   github: GitHubClient;
@@ -65,14 +46,14 @@ export interface CodeIndexRequest {
 }
 
 export interface CodeIndexResult {
-  indexer: Exclude<CodeIndexer, "none">;
+  indexer: Exclude<CodeIndexer, 'none'>;
   context: string;
   cacheHit: boolean;
 }
 
 interface CacheMetadata {
   createdAt: string;
-  indexer: Exclude<CodeIndexer, "none">;
+  indexer: Exclude<CodeIndexer, 'none'>;
   version: string;
   repository: string;
   baseSha: string;
@@ -82,37 +63,33 @@ interface CacheMetadata {
 }
 
 const defaultCache: CacheAdapter = {
-  isAvailable: () =>
-    Boolean(process.env.ACTIONS_CACHE_URL || process.env.ACTIONS_RESULTS_URL),
+  isAvailable: () => Boolean(process.env.ACTIONS_CACHE_URL || process.env.ACTIONS_RESULTS_URL),
   restore: async (paths, primaryKey, restoreKeys) => {
-    const actionsCache = await import("@actions/cache");
+    const actionsCache = await import('@actions/cache');
     return actionsCache.restoreCache(paths, primaryKey, restoreKeys);
   },
   save: async (paths, key) => {
-    const actionsCache = await import("@actions/cache");
+    const actionsCache = await import('@actions/cache');
     return actionsCache.saveCache(paths, key);
   },
 };
 
-function cleanEnvironment(
-  source: NodeJS.ProcessEnv,
-  home: string,
-): NodeJS.ProcessEnv {
+function cleanEnvironment(source: NodeJS.ProcessEnv, home: string): NodeJS.ProcessEnv {
   const allowed = [
-    "PATH",
-    "USER",
-    "LOGNAME",
-    "SHELL",
-    "SYSTEMROOT",
-    "COMSPEC",
-    "PATHEXT",
-    "TMPDIR",
-    "TEMP",
-    "TMP",
-    "SSL_CERT_FILE",
-    "NODE_EXTRA_CA_CERTS",
-    "LD_LIBRARY_PATH",
-    "NIX_LD_LIBRARY_PATH",
+    'PATH',
+    'USER',
+    'LOGNAME',
+    'SHELL',
+    'SYSTEMROOT',
+    'COMSPEC',
+    'PATHEXT',
+    'TMPDIR',
+    'TEMP',
+    'TMP',
+    'SSL_CERT_FILE',
+    'NODE_EXTRA_CA_CERTS',
+    'LD_LIBRARY_PATH',
+    'NIX_LD_LIBRARY_PATH',
   ];
   const environment: NodeJS.ProcessEnv = {};
   for (const name of allowed) {
@@ -124,13 +101,13 @@ function cleanEnvironment(
   if (!environment.LD_LIBRARY_PATH && environment.NIX_LD_LIBRARY_PATH) {
     environment.LD_LIBRARY_PATH = environment.NIX_LD_LIBRARY_PATH;
   }
-  environment.CI = "true";
-  environment.NO_COLOR = "1";
+  environment.CI = 'true';
+  environment.NO_COLOR = '1';
   return environment;
 }
 
 function processGroupExists(child: ReturnType<typeof spawn>): boolean {
-  if (!child.pid || process.platform === "win32") {
+  if (!child.pid || process.platform === 'win32') {
     return false;
   }
   try {
@@ -141,15 +118,12 @@ function processGroupExists(child: ReturnType<typeof spawn>): boolean {
   }
 }
 
-function terminateProcessGroup(
-  child: ReturnType<typeof spawn>,
-  signal: NodeJS.Signals,
-): void {
+function terminateProcessGroup(child: ReturnType<typeof spawn>, signal: NodeJS.Signals): void {
   if (!child.pid) {
     return;
   }
   try {
-    if (process.platform === "win32") {
+    if (process.platform === 'win32') {
       child.kill(signal);
     } else {
       process.kill(-child.pid, signal);
@@ -159,20 +133,16 @@ function terminateProcessGroup(
   }
 }
 
-export const runCommand: CommandRunner = async (
-  command,
-  args,
-  options,
-) =>
+export const runCommand: CommandRunner = async (command, args, options) =>
   new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: options.environment,
-      detached: process.platform !== "win32",
-      stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== 'win32',
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
-    let stdout = "";
-    let stderr = "";
+    let stdout = '';
+    let stderr = '';
     let settled = false;
     let failure: Error | undefined;
     let killTimer: NodeJS.Timeout | undefined;
@@ -191,7 +161,7 @@ export const runCommand: CommandRunner = async (
       if (settled || !failure) {
         return;
       }
-      terminateProcessGroup(child, "SIGKILL");
+      terminateProcessGroup(child, 'SIGKILL');
       settled = true;
       clearTimers();
       reject(failure);
@@ -201,30 +171,27 @@ export const runCommand: CommandRunner = async (
         return;
       }
       failure = error;
-      terminateProcessGroup(child, "SIGTERM");
-      killTimer = setTimeout(
-        rejectAfterKill,
-        options.killGraceMs ?? 5_000,
-      );
+      terminateProcessGroup(child, 'SIGTERM');
+      killTimer = setTimeout(rejectAfterKill, options.killGraceMs ?? 5_000);
     };
     const append = (current: string, chunk: Buffer): string => {
       if (failure) {
         return current;
       }
-      const next = current + chunk.toString("utf8");
-      if (Buffer.byteLength(next, "utf8") > MAX_COMMAND_OUTPUT_BYTES) {
+      const next = current + chunk.toString('utf8');
+      if (Buffer.byteLength(next, 'utf8') > MAX_COMMAND_OUTPUT_BYTES) {
         stop(new Error(`${command} output exceeded 5000000 bytes`));
         return current;
       }
       return next;
     };
-    child.stdout.on("data", (chunk: Buffer) => {
+    child.stdout.on('data', (chunk: Buffer) => {
       stdout = append(stdout, chunk);
     });
-    child.stderr.on("data", (chunk: Buffer) => {
+    child.stderr.on('data', (chunk: Buffer) => {
       stderr = append(stderr, chunk);
     });
-    child.on("error", (error) => {
+    child.on('error', (error) => {
       if (settled || (failure && processGroupExists(child))) {
         return;
       }
@@ -232,7 +199,7 @@ export const runCommand: CommandRunner = async (
       clearTimers();
       reject(failure ?? error);
     });
-    child.on("close", (code, signal) => {
+    child.on('close', (code, signal) => {
       if (settled) {
         return;
       }
@@ -243,7 +210,7 @@ export const runCommand: CommandRunner = async (
       if (!failure && code !== 0) {
         const details = `${stdout}\n${stderr}`.trim().slice(-4_000);
         const error = new Error(
-          `${command} exited with code ${code ?? "null"} and signal ${signal ?? "none"}: ${details}`,
+          `${command} exited with code ${code ?? 'null'} and signal ${signal ?? 'none'}: ${details}`,
         );
         if (processGroupExists(child)) {
           stop(error);
@@ -261,23 +228,15 @@ export const runCommand: CommandRunner = async (
     });
   });
 
-function versionFor(indexer: Exclude<CodeIndexer, "none">): string {
-  return indexer === "cgc"
-    ? DEFAULT_CGC_VERSION
-    : DEFAULT_GITNEXUS_VERSION;
+function versionFor(indexer: Exclude<CodeIndexer, 'none'>): string {
+  return indexer === 'cgc' ? DEFAULT_CGC_VERSION : DEFAULT_GITNEXUS_VERSION;
 }
 
 function safeRepositoryId(pullRequest: PullRequestContext): string {
-  return createHash("sha256")
-    .update(`${pullRequest.owner}/${pullRequest.repository}`)
-    .digest("hex")
-    .slice(0, 16);
+  return createHash('sha256').update(`${pullRequest.owner}/${pullRequest.repository}`).digest('hex').slice(0, 16);
 }
 
-function cacheKeys(
-  request: CodeIndexRequest,
-  now: number,
-): { primary: string; restore: string[] } {
+function cacheKeys(request: CodeIndexRequest, now: number): { primary: string; restore: string[] } {
   const version = versionFor(request.indexer);
   const prefix = `${request.cacheKey}-${CACHE_SCHEMA}-${request.indexer}-${version}-${process.platform}-${process.arch}-${safeRepositoryId(request.pullRequest)}-`;
   const bucket = Math.floor(now / request.cacheTtlMs);
@@ -299,15 +258,12 @@ async function cacheIsFresh(
   now: number,
 ): Promise<CacheMetadata | undefined> {
   try {
-    const metadata = JSON.parse(
-      await readFile(metadataPath, "utf8"),
-    ) as Partial<CacheMetadata>;
-    const createdAt = Date.parse(metadata.createdAt ?? "");
+    const metadata = JSON.parse(await readFile(metadataPath, 'utf8')) as Partial<CacheMetadata>;
+    const createdAt = Date.parse(metadata.createdAt ?? '');
     const valid =
       metadata.indexer === request.indexer &&
       metadata.version === versionFor(request.indexer) &&
-      metadata.repository ===
-        `${request.pullRequest.owner}/${request.pullRequest.repository}` &&
+      metadata.repository === `${request.pullRequest.owner}/${request.pullRequest.repository}` &&
       metadata.baseSha === request.pullRequest.baseSha &&
       metadata.platform === process.platform &&
       metadata.architecture === process.arch &&
@@ -347,28 +303,23 @@ async function containsRegularFile(path: string): Promise<boolean> {
   return false;
 }
 
-async function databaseHasContent(
-  indexer: Exclude<CodeIndexer, "none">,
-  databasePath: string,
-): Promise<boolean> {
-  if (indexer === "cgc") {
-    return containsRegularFile(join(databasePath, "graph"));
+async function databaseHasContent(indexer: Exclude<CodeIndexer, 'none'>, databasePath: string): Promise<boolean> {
+  if (indexer === 'cgc') {
+    return containsRegularFile(join(databasePath, 'graph'));
   }
   const required = [
-    join(databasePath, "graph", "gitnexus.json"),
-    join(databasePath, "graph", "lbug"),
-    join(databasePath, "home", ".gitnexus", "registry.json"),
+    join(databasePath, 'graph', 'gitnexus.json'),
+    join(databasePath, 'graph', 'lbug'),
+    join(databasePath, 'home', '.gitnexus', 'registry.json'),
   ];
-  return (await Promise.all(required.map((path) => containsRegularFile(path)))).every(
-    Boolean,
-  );
+  return (await Promise.all(required.map((path) => containsRegularFile(path)))).every(Boolean);
 }
 
 function changedPaths(diff: PullRequestDiff): string[] {
   const paths = new Set<string>();
   for (const line of diff.text.split(/\r?\n/)) {
     const match = /^\+\+\+ b\/(.+)$/.exec(line);
-    if (match?.[1] && match[1] !== "/dev/null") {
+    if (match?.[1] && match[1] !== '/dev/null') {
       paths.add(match[1]);
     }
     if (paths.size >= 20) {
@@ -378,37 +329,27 @@ function changedPaths(diff: PullRequestDiff): string[] {
   return [...paths];
 }
 
-export function buildIndexSearchQuery(
-  pullRequest: PullRequestContext,
-  diff: PullRequestDiff,
-): string {
+export function buildIndexSearchQuery(pullRequest: PullRequestContext, diff: PullRequestDiff): string {
   const files = changedPaths(diff);
-  return [`Pull request review: ${pullRequest.title}`, ...files]
-    .join(" ")
-    .slice(0, 1_000);
+  return [`Pull request review: ${pullRequest.title}`, ...files].join(' ').slice(0, 1_000);
 }
 
 function stripAnsi(value: string): string {
-  return value.replaceAll(/\u001B\[[0-?]*[ -/]*[@-~]/g, "");
+  // eslint-disable-next-line no-control-regex -- ANSI escape sequences begin with ESC.
+  return value.replaceAll(/\u001B\[[0-?]*[ -/]*[@-~]/g, '');
 }
 
 export function limitIndexContext(value: string): string {
-  const bytes = Buffer.from(stripAnsi(value).trim(), "utf8");
+  const bytes = Buffer.from(stripAnsi(value).trim(), 'utf8');
   if (bytes.length <= MAX_INDEX_CONTEXT_BYTES) {
-    return bytes.toString("utf8");
+    return bytes.toString('utf8');
   }
-  const trailer = Buffer.from("\n[index context truncated]", "utf8");
-  let content = new TextDecoder().decode(
-    bytes.subarray(0, MAX_INDEX_CONTEXT_BYTES - trailer.length),
-  );
-  while (
-    content.length > 0 &&
-    Buffer.byteLength(content, "utf8") + trailer.length >
-      MAX_INDEX_CONTEXT_BYTES
-  ) {
+  const trailer = Buffer.from('\n[index context truncated]', 'utf8');
+  let content = new TextDecoder().decode(bytes.subarray(0, MAX_INDEX_CONTEXT_BYTES - trailer.length));
+  while (content.length > 0 && Buffer.byteLength(content, 'utf8') + trailer.length > MAX_INDEX_CONTEXT_BYTES) {
     content = content.slice(0, -1);
   }
-  return `${content}${trailer.toString("utf8")}`;
+  return `${content}${trailer.toString('utf8')}`;
 }
 
 async function validateSourceTree(sourcePath: string): Promise<void> {
@@ -438,84 +379,69 @@ async function validateSourceTree(sourcePath: string): Promise<void> {
       files += 1;
       bytes += details.size;
       if (files > 100_000) {
-        throw new Error("Base-revision source exceeds 100000 files");
+        throw new Error('Base-revision source exceeds 100000 files');
       }
       if (details.size > 20_000_000) {
         throw new Error(`Base-revision file exceeds 20000000 bytes: ${path}`);
       }
       if (bytes > 2_000_000_000) {
-        throw new Error("Base-revision source exceeds 2000000000 bytes");
+        throw new Error('Base-revision source exceeds 2000000000 bytes');
       }
     }
   }
 }
 
 function parseGitNexusQuery(output: string): string {
-  const start = output.indexOf("{");
-  const end = output.lastIndexOf("}");
+  const start = output.indexOf('{');
+  const end = output.lastIndexOf('}');
   if (start < 0 || end < start) {
-    throw new Error("GitNexus returned no query JSON");
+    throw new Error('GitNexus returned no query JSON');
   }
   let value: unknown;
   try {
     value = JSON.parse(output.slice(start, end + 1)) as unknown;
   } catch {
-    throw new Error("GitNexus returned malformed query JSON");
+    throw new Error('GitNexus returned malformed query JSON');
   }
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error("GitNexus query JSON must be an object");
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('GitNexus query JSON must be an object');
   }
   return JSON.stringify(value, null, 2);
 }
 
-async function installCgc(
-  toolsPath: string,
-  options: CommandOptions,
-  runner: CommandRunner,
-): Promise<string> {
-  const venv = join(toolsPath, "cgc");
-  await runner("python3", ["-m", "venv", venv], options);
-  const python = join(venv, "bin", "python");
+async function installCgc(toolsPath: string, options: CommandOptions, runner: CommandRunner): Promise<string> {
+  const venv = join(toolsPath, 'cgc');
+  await runner('python3', ['-m', 'venv', venv], options);
+  const python = join(venv, 'bin', 'python');
   await runner(
     python,
-    [
-      "-m",
-      "pip",
-      "install",
-      "--disable-pip-version-check",
-      "--no-input",
-      `codegraphcontext==${DEFAULT_CGC_VERSION}`,
-    ],
+    ['-m', 'pip', 'install', '--disable-pip-version-check', '--no-input', `codegraphcontext==${DEFAULT_CGC_VERSION}`],
     options,
   );
-  return join(venv, "bin", "cgc");
+  return join(venv, 'bin', 'cgc');
 }
 
-async function installGitNexus(
-  toolsPath: string,
-  options: CommandOptions,
-  runner: CommandRunner,
-): Promise<string> {
-  const prefix = join(toolsPath, "gitnexus");
+async function installGitNexus(toolsPath: string, options: CommandOptions, runner: CommandRunner): Promise<string> {
+  const prefix = join(toolsPath, 'gitnexus');
   const environment = {
     ...options.environment,
-    GITNEXUS_SKIP_OPTIONAL_GRAMMARS: "1",
+    GITNEXUS_SKIP_OPTIONAL_GRAMMARS: '1',
   };
   await runner(
-    "npm",
+    'npm',
     [
-      "install",
-      "--prefix",
+      'install',
+      '--prefix',
       prefix,
-      "--no-save",
-      "--no-audit",
-      "--no-fund",
-      "--loglevel=error",
+      '--no-save',
+      '--no-audit',
+      '--no-fund',
+      '--loglevel=error',
       `gitnexus@${DEFAULT_GITNEXUS_VERSION}`,
     ],
     { ...options, environment },
   );
-  return join(prefix, "node_modules", ".bin", "gitnexus");
+  return join(prefix, 'node_modules', '.bin', 'gitnexus');
 }
 
 async function indexWithCgc(
@@ -529,59 +455,30 @@ async function indexWithCgc(
 ): Promise<string> {
   const environment = {
     ...options.environment,
-    CGC_EMBEDDED_BUFFER_POOL_MB: "512",
+    CGC_EMBEDDED_BUFFER_POOL_MB: '512',
   };
-  const indexArgs = [
-    "--database",
-    "kuzudb",
-    "--path",
-    databasePath,
-    "index",
-    sourcePath,
-    "--no-progress",
-  ];
+  const indexArgs = ['--database', 'kuzudb', '--path', databasePath, 'index', sourcePath, '--no-progress'];
   if (!cacheHit) {
-    indexArgs.push("--force");
+    indexArgs.push('--force');
   }
   await runner(executable, indexArgs, { ...options, environment });
   const result = await runner(
     executable,
-    [
-      "--database",
-      "kuzudb",
-      "--path",
-      databasePath,
-      "find",
-      "content",
-      searchQuery,
-    ],
+    ['--database', 'kuzudb', '--path', databasePath, 'find', 'content', searchQuery],
     { ...options, environment },
   );
   return result.stdout;
 }
 
-async function rewriteGitNexusRegistry(
-  databasePath: string,
-  sourcePath: string,
-): Promise<void> {
-  const registryPath = join(
-    databasePath,
-    "..",
-    "home",
-    ".gitnexus",
-    "registry.json",
-  );
-  const value = JSON.parse(await readFile(registryPath, "utf8")) as unknown;
+async function rewriteGitNexusRegistry(databasePath: string, sourcePath: string): Promise<void> {
+  const registryPath = join(databasePath, '..', 'home', '.gitnexus', 'registry.json');
+  const value = JSON.parse(await readFile(registryPath, 'utf8')) as unknown;
   if (!Array.isArray(value)) {
-    throw new Error("GitNexus cache registry must be an array");
+    throw new Error('GitNexus cache registry must be an array');
   }
   let found = false;
   const entries = value.map((entry) => {
-    if (
-      typeof entry !== "object" ||
-      entry === null ||
-      (entry as Record<string, unknown>).name !== "code-review-base"
-    ) {
+    if (typeof entry !== 'object' || entry === null || (entry as Record<string, unknown>).name !== 'code-review-base') {
       return entry;
     }
     found = true;
@@ -592,16 +489,14 @@ async function rewriteGitNexusRegistry(
     };
   });
   if (!found) {
-    throw new Error("GitNexus cache registry has no code-review-base entry");
+    throw new Error('GitNexus cache registry has no code-review-base entry');
   }
-  await writeFile(registryPath, `${JSON.stringify(entries, null, 2)}\n`, "utf8");
+  await writeFile(registryPath, `${JSON.stringify(entries, null, 2)}\n`, 'utf8');
 
-  for (const name of ["gitnexus.json", "meta.json"]) {
+  for (const name of ['gitnexus.json', 'meta.json']) {
     const metadataPath = join(databasePath, name);
-    const metadata = JSON.parse(
-      await readFile(metadataPath, "utf8"),
-    ) as unknown;
-    if (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)) {
+    const metadata = JSON.parse(await readFile(metadataPath, 'utf8')) as unknown;
+    if (typeof metadata !== 'object' || metadata === null || Array.isArray(metadata)) {
       throw new Error(`GitNexus ${name} must contain an object`);
     }
     await writeFile(
@@ -615,7 +510,7 @@ async function rewriteGitNexusRegistry(
         null,
         2,
       )}\n`,
-      "utf8",
+      'utf8',
     );
   }
 }
@@ -629,72 +524,46 @@ async function indexWithGitNexus(
   options: CommandOptions,
   runner: CommandRunner,
 ): Promise<string> {
-  const gitNexusHome = join(databasePath, "..", "home");
+  const gitNexusHome = join(databasePath, '..', 'home');
   await mkdir(gitNexusHome, { recursive: true });
   const environment = {
     ...options.environment,
     HOME: gitNexusHome,
     GITNEXUS_STORAGE_PATH: databasePath,
-    GITNEXUS_CONTENT_RETENTION: "symbol",
-    GITNEXUS_SKIP_OPTIONAL_GRAMMARS: "1",
+    GITNEXUS_CONTENT_RETENTION: 'symbol',
+    GITNEXUS_SKIP_OPTIONAL_GRAMMARS: '1',
   };
   if (cacheHit) {
     await rewriteGitNexusRegistry(databasePath, sourcePath);
   } else {
-    await runner(
-      executable,
-      [
-        "analyze",
-        sourcePath,
-        "--index-only",
-        "--skip-git",
-        "--name",
-        "code-review-base",
-      ],
-      { ...options, environment },
-    );
+    await runner(executable, ['analyze', sourcePath, '--index-only', '--skip-git', '--name', 'code-review-base'], {
+      ...options,
+      environment,
+    });
   }
-  const result = await runner(
-    executable,
-    [
-      "query",
-      searchQuery,
-      "--repo",
-      "code-review-base",
-      "--limit",
-      "5",
-    ],
-    { ...options, environment },
-  );
+  const result = await runner(executable, ['query', searchQuery, '--repo', 'code-review-base', '--limit', '5'], {
+    ...options,
+    environment,
+  });
   return parseGitNexusQuery(result.stdout);
 }
 
-export async function runCodeIndexer(
-  request: CodeIndexRequest,
-): Promise<CodeIndexResult> {
+export async function runCodeIndexer(request: CodeIndexRequest): Promise<CodeIndexResult> {
   const now = request.now?.() ?? Date.now();
   const root = request.temporaryRoot ?? process.env.RUNNER_TEMP ?? tmpdir();
   await mkdir(root, { recursive: true });
-  const workspace = join(
-    root,
-    "code-review-index",
-    safeRepositoryId(request.pullRequest),
-    request.indexer,
-  );
+  const workspace = join(root, 'code-review-index', safeRepositoryId(request.pullRequest), request.indexer);
   await rm(workspace, { recursive: true, force: true });
   await mkdir(workspace, { recursive: true });
-  const sourcePath = join(workspace, "source");
-  const toolsPath = join(workspace, "tools");
-  const databasePath = join(workspace, "database");
-  const metadataPath = join(databasePath, "code-review-cache.json");
-  const archivePath = join(workspace, "base.tar.gz");
-  const homePath = join(workspace, "home");
+  const sourcePath = join(workspace, 'source');
+  const toolsPath = join(workspace, 'tools');
+  const databasePath = join(workspace, 'database');
+  const metadataPath = join(databasePath, 'code-review-cache.json');
+  const archivePath = join(workspace, 'base.tar.gz');
+  const homePath = join(workspace, 'home');
   const runner = request.commandRunner ?? runCommand;
   const cache = request.cache ?? defaultCache;
-  const environment = cleanEnvironment(
-    request.environment ?? process.env,
-    homePath,
-  );
+  const environment = cleanEnvironment(request.environment ?? process.env, homePath);
   const installOptions: CommandOptions = {
     cwd: workspace,
     environment,
@@ -719,33 +588,20 @@ export async function runCodeIndexer(
 
     if (cache.isAvailable()) {
       try {
-        restoredKey = await cache.restore(
-          [databasePath],
-          keys.primary,
-          keys.restore,
-        );
+        restoredKey = await cache.restore([databasePath], keys.primary, keys.restore);
         restoredMetadata =
-          restoredKey === undefined
-            ? undefined
-            : await cacheIsFresh(
-                databasePath,
-                metadataPath,
-                request,
-                now,
-              );
+          restoredKey === undefined ? undefined : await cacheIsFresh(databasePath, metadataPath, request, now);
         cacheHit = restoredMetadata !== undefined;
         if (restoredKey && !cacheHit) {
-          console.log("Ignoring stale code index cache");
+          console.log('Ignoring stale code index cache');
           await rm(databasePath, { recursive: true, force: true });
         }
       } catch (error) {
         await rm(databasePath, { recursive: true, force: true });
-        console.warn(
-          `Unable to restore code index cache: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        console.warn(`Unable to restore code index cache: ${error instanceof Error ? error.message : String(error)}`);
       }
     } else {
-      console.log("GitHub Actions cache service is unavailable; indexing without cache");
+      console.log('GitHub Actions cache service is unavailable; indexing without cache');
     }
 
     await mkdir(databasePath, { recursive: true });
@@ -756,44 +612,25 @@ export async function runCodeIndexer(
     );
     console.log(`Downloaded ${archiveBytes} base-revision archive bytes`);
     await runner(
-      "tar",
-      [
-        "-xzf",
-        archivePath,
-        "-C",
-        sourcePath,
-        "--strip-components=1",
-        "--no-same-owner",
-        "--no-same-permissions",
-      ],
+      'tar',
+      ['-xzf', archivePath, '-C', sourcePath, '--strip-components=1', '--no-same-owner', '--no-same-permissions'],
       installOptions,
     );
 
     await validateSourceTree(sourcePath);
 
     const executable =
-      request.indexer === "cgc"
+      request.indexer === 'cgc'
         ? await installCgc(toolsPath, installOptions, runner)
         : await installGitNexus(toolsPath, installOptions, runner);
-    const searchQuery = buildIndexSearchQuery(
-      request.pullRequest,
-      request.diff,
-    );
+    const searchQuery = buildIndexSearchQuery(request.pullRequest, request.diff);
     const performIndex = async (): Promise<string> =>
-      request.indexer === "cgc"
-        ? indexWithCgc(
-            executable,
-            sourcePath,
-            join(databasePath, "graph"),
-            searchQuery,
-            cacheHit,
-            indexOptions,
-            runner,
-          )
+      request.indexer === 'cgc'
+        ? indexWithCgc(executable, sourcePath, join(databasePath, 'graph'), searchQuery, cacheHit, indexOptions, runner)
         : indexWithGitNexus(
             executable,
             sourcePath,
-            join(databasePath, "graph"),
+            join(databasePath, 'graph'),
             searchQuery,
             cacheHit,
             indexOptions,
@@ -826,19 +663,14 @@ export async function runCodeIndexer(
       architecture: process.arch,
       schema: CACHE_SCHEMA,
     };
-    await writeFile(metadataPath, `${JSON.stringify(metadata)}\n`, "utf8");
+    await writeFile(metadataPath, `${JSON.stringify(metadata)}\n`, 'utf8');
 
     if (cache.isAvailable() && !cacheHit) {
-      const saveKey =
-        restoredKey === keys.primary
-          ? `${keys.primary}-repair-${randomUUID()}`
-          : keys.primary;
+      const saveKey = restoredKey === keys.primary ? `${keys.primary}-repair-${randomUUID()}` : keys.primary;
       try {
         await cache.save([databasePath], saveKey);
       } catch (error) {
-        console.warn(
-          `Unable to save code index cache: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        console.warn(`Unable to save code index cache: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
