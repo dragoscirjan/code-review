@@ -39,7 +39,49 @@ jobs:
             --user 65534:65534 \
             docker.io/library/node:24.14.0-bookworm-slim@sha256:4bd6219054c8bebcd26a66bfd8ca0bd6e1024b4b97474c59bb7ee3bbcbef4fe8 \
             node --version
+      - name: Verify Docker sandbox flags
+        run: |
+          docker --version
+          docker run --rm \
+            --network bridge \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --pids-limit 256 \
+            --memory 2g \
+            --cpus 2 \
+            --tmpfs /tmp:rw,exec,nosuid,nodev,size=1536m \
+            --workdir /tmp \
+            --user 65534:65534 \
+            docker.io/library/node:24.14.0-bookworm-slim@sha256:4bd6219054c8bebcd26a66bfd8ca0bd6e1024b4b97474c59bb7ee3bbcbef4fe8 \
+            node --version
       - name: Verify bundled action
         run: |
           git ls-files --error-unmatch dist/index.js
           git diff --exit-code -- dist/index.js
+
+  indexer-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        indexer: [cgc, gitnexus]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-python@v6
+        if: matrix.indexer == 'cgc'
+        with:
+          python-version: "3.12"
+      - run: npm ci
+      - name: Install and run ${{ matrix.indexer }}
+        env:
+          CODE_INDEXER: ${{ matrix.indexer }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: npm run test:indexers

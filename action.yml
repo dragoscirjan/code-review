@@ -33,6 +33,18 @@ inputs:
     description: Exact @earendil-works/pi-coding-agent npm package version
     required: false
     default: 0.85.1
+  code-indexer:
+    description: Code indexer installed for base-revision context. Accepted values are none, cgc, and gitnexus
+    required: false
+    default: none
+  code-index-cache-key:
+    description: Cache key prefix for the selected indexer's database
+    required: false
+    default: code-review-index-v1
+  code-index-cache-ttl:
+    description: Maximum cache age before the action rebuilds the code index
+    required: false
+    default: 24h
   max-diff-bytes:
     description: Maximum UTF-8 diff size sent to the review backend
     required: false
@@ -47,6 +59,10 @@ outputs:
     description: URL of the created or updated review comment
   diff-truncated:
     description: Whether the pull request diff exceeded max-diff-bytes
+  code-index-cache-hit:
+    description: Whether a fresh code index database cache was restored
+  code-indexer:
+    description: Selected code indexer
 
 runs:
   using: node24

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   DEFAULT_BACKEND,
+  DEFAULT_CODE_INDEX_CACHE_KEY,
   DEFAULT_MODEL,
   getActionInput,
   loadActionConfig,
@@ -29,6 +30,9 @@ test("loads safe OpenRouter defaults", () => {
   assert.equal(config.backend, DEFAULT_BACKEND);
   assert.equal(config.containerEngine, "podman");
   assert.equal(config.model, DEFAULT_MODEL);
+  assert.equal(config.codeIndexer, "none");
+  assert.equal(config.codeIndexCacheKey, DEFAULT_CODE_INDEX_CACHE_KEY);
+  assert.equal(config.codeIndexCacheTtlMs, 86_400_000);
   assert.equal(config.maxDiffBytes, 120_000);
   assert.equal(config.timeoutMs, 600_000);
 });
@@ -60,6 +64,42 @@ test("accepts only the two POC backends", () => {
   assert.throws(
     () => loadActionConfig({ ...base, INPUT_BACKEND: "bash" }),
     /backend must be opencode or pi/,
+  );
+});
+
+test("accepts only supported code indexers and cache settings", () => {
+  const base = {
+    INPUT_GITHUB_TOKEN: "github-secret",
+    INPUT_OPENROUTER_API_KEY: "provider-secret",
+  };
+  const config = loadActionConfig({
+    ...base,
+    INPUT_CODE_INDEXER: "gitnexus",
+    INPUT_CODE_INDEX_CACHE_KEY: "team-review-index",
+    INPUT_CODE_INDEX_CACHE_TTL: "7d",
+  });
+  assert.equal(config.codeIndexer, "gitnexus");
+  assert.equal(config.codeIndexCacheKey, "team-review-index");
+  assert.equal(config.codeIndexCacheTtlMs, 604_800_000);
+  assert.throws(
+    () => loadActionConfig({ ...base, INPUT_CODE_INDEXER: "both" }),
+    /must be none, cgc, or gitnexus/,
+  );
+  assert.throws(
+    () =>
+      loadActionConfig({
+        ...base,
+        INPUT_CODE_INDEX_CACHE_KEY: "bad cache key",
+      }),
+    /code-index-cache-key/,
+  );
+  assert.throws(
+    () =>
+      loadActionConfig({
+        ...base,
+        INPUT_CODE_INDEX_CACHE_TTL: "forever",
+      }),
+    /must be a duration/,
   );
 });
 
