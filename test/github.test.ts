@@ -18,16 +18,29 @@ const comments: GitHubComment[] = [
   },
   {
     id: 2,
-    body: `managed ${marker}`,
+    body: `managed\n\n${marker}`,
     html_url: "https://example.test/2",
     user: { id: 20, login: "bot" },
   },
 ];
 
-test("finds a managed comment by marker and actor", () => {
+test("finds a managed comment by final marker line and actor", () => {
   assert.equal(findManagedComment(comments, 20, marker)?.id, 2);
-  assert.equal(findManagedComment(comments, 10, marker)?.id, 1);
+  assert.equal(findManagedComment(comments, 10, marker), undefined);
   assert.equal(findManagedComment(comments, 30, marker), undefined);
+});
+
+test("does not match a backend marker copied into review text", () => {
+  const opencodeMarker = "<!-- code-review:opencode -->";
+  const piMarker = "<!-- code-review:pi -->";
+  const comment: GitHubComment = {
+    id: 4,
+    body: `Untrusted output copied ${piMarker}\n\n${opencodeMarker}`,
+    html_url: "https://example.test/4",
+    user: { id: 20, login: "bot" },
+  };
+  assert.equal(findManagedComment([comment], 20, piMarker), undefined);
+  assert.equal(findManagedComment([comment], 20, opencodeMarker)?.id, 4);
 });
 
 test("truncates by UTF-8 byte length", () => {

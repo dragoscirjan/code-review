@@ -132,10 +132,13 @@ export function findManagedComment(
   actorId: number,
   marker: string,
 ): GitHubComment | undefined {
-  return comments.find(
-    (comment) =>
-      comment.user?.id === actorId && comment.body?.includes(marker) === true,
-  );
+  return comments.find((comment) => {
+    if (comment.user?.id !== actorId || typeof comment.body !== "string") {
+      return false;
+    }
+    const finalLine = comment.body.trimEnd().split(/\r?\n/).at(-1);
+    return finalLine === marker;
+  });
 }
 
 export class GitHubClient {

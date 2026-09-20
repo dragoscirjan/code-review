@@ -2,11 +2,12 @@
   "name": "code-review-action",
   "version": "0.0.0",
   "private": true,
-  "description": "GitHub Action that reviews pull requests with OpenCode",
+  "description": "GitHub Action that reviews pull requests with OpenCode or Pi",
   "license": "MIT",
   "scripts": {
     "build": "esbuild src/index.ts --bundle --platform=node --target=node24 --format=cjs --outfile=dist/index.js",
     "test": "tsx --test test/*.test.ts",
+    "test:integration": "RUN_LLM_INTEGRATION=1 tsx --test test/integration.test.ts",
     "typecheck": "tsc --noEmit",
     "validate": "npm run typecheck && npm test && npm run build"
   },

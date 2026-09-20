@@ -15,13 +15,15 @@
 
 - Ship a GitHub Action only.
 - Run on GitHub-hosted runners only.
-- Use OpenCode only.
-- Use `opencode/big-pickle` as the only supported model.
+- Support OpenCode and Pi as review backends.
+- Use OpenRouter and `z-ai/glm-5.3-flash` as the only model path.
 - Publish through the `GH_TOKEN` personal access token secret.
-- Do not implement Pi, local model runtimes, inline comments, or Forgejo and Gitea adapters in the POC.
+- Pass `OPENROUTER_API_KEY` only to the selected backend container.
+- Do not implement local model runtimes, inline comments, or Forgejo and Gitea adapters in the POC.
 - Use `pull_request_target` only with an action pinned to an immutable trusted commit. Never check out or execute pull request code in that workflow.
-- Run OpenCode in the fixed digest-pinned container sandbox. Use Podman by default and allow Docker only as a validated fallback. Pass the bounded diff as untrusted prompt data. Do not pass secrets or mount host files.
-- The free OpenCode model rejects custom permission configuration. Do not weaken the container boundary to work around that restriction.
+- Run each backend in the fixed digest-pinned container sandbox. Use Podman by default and allow Docker only as a validated fallback. Pass the bounded diff as untrusted prompt data. Do not mount host files.
+- Deny all OpenCode tools. Disable all Pi tools and project resource discovery.
+- The POC uses Pi's non-interactive CLI inside the container. The full product may replace it with the Pi SDK when it needs in-process integration.
 
 ## Product scope
 
