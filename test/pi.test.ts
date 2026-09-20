@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
-import { buildPiCommand, parsePiJson } from '../src/pi';
+import { buildPiCommand, extractPiAssistantText } from '../src/pi';
 
 test('extracts the final assistant text from Pi JSON output', () => {
   const output = [
@@ -18,18 +18,33 @@ test('extracts the final assistant text from Pi JSON output', () => {
       },
     }),
   ].join('\n');
-  assert.equal(parsePiJson(output), 'Pi review');
+  assert.equal(extractPiAssistantText(output), 'Pi review');
+});
+
+test('preserves a JSON contract split across assistant text parts', () => {
+  const output = JSON.stringify({
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      stopReason: 'stop',
+      content: [
+        { type: 'text', text: '{"version":1,' },
+        { type: 'text', text: '"outcome":"clean","findings":[]}' },
+      ],
+    },
+  });
+  assert.equal(extractPiAssistantText(output), '{"version":1,"outcome":"clean","findings":[]}');
 });
 
 test('rejects output without review text', () => {
-  assert.throws(() => parsePiJson('not json'), /no review text/);
-  assert.throws(() => parsePiJson(JSON.stringify({ type: 'agent_end' })), /no review text/);
+  assert.throws(() => extractPiAssistantText('not json'), /no review text/);
+  assert.throws(() => extractPiAssistantText(JSON.stringify({ type: 'agent_end' })), /no review text/);
 });
 
 test('surfaces Pi provider errors', () => {
   assert.throws(
     () =>
-      parsePiJson(
+      extractPiAssistantText(
         JSON.stringify({
           type: 'message_end',
           message: {

@@ -5,12 +5,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { PullRequestContext, PullRequestDiff } from './github';
 import { redactSecrets, validateModelEndpoint, type ModelConnection } from './model';
-import { buildOpenCodeCommand, parseOpenCodeJson } from './opencode';
-import { buildPiCommand, parsePiJson } from './pi';
+import { buildOpenCodeCommand, extractOpenCodeAssistantText } from './opencode';
+import { extractPiAssistantText, buildPiCommand } from './pi';
+import { parseReviewResult, type ReviewResultV1 } from './review-contract';
 import { buildHarnessConfig, SANDBOX_BOOTSTRAP } from './sandbox';
 
 const MAX_PROCESS_OUTPUT_BYTES = 5_000_000;
-const MAX_REVIEW_BYTES = 60_000;
 export const SANDBOX_IMAGE =
   'docker.io/library/node:24.14.0-bookworm-slim@sha256:4bd6219054c8bebcd26a66bfd8ca0bd6e1024b4b97474c59bb7ee3bbcbef4fe8';
 
@@ -60,11 +60,27 @@ Security rules:
 
 Review rules:
 - Report concrete correctness, security, regression, and test coverage problems.
-- For each finding, propose the smallest practical fix. Include a patch or code example when the supplied context is sufficient; otherwise describe the exact change needed.
+- For each finding, propose the smallest practical fix. Include a code example only when the supplied context is sufficient; otherwise describe the exact change needed.
 - Do not report style preferences or speculative concerns.
-- Cite the file and changed line when the diff provides them.
-- If there are no material findings, say: No material findings.
-- Return concise GitHub-flavored Markdown with a summary followed by findings ordered by severity.
+- Every finding must cite one changed line from the supplied diff. Use RIGHT for an added line and LEFT for a deleted line.
+
+Output contract:
+- Return exactly one JSON document and no Markdown fences, prose, or additional text.
+- The only supported contract version is 1.
+- The root object has exactly: version, outcome, findings.
+- A clean review is exactly {"version":1,"outcome":"clean","findings":[]}.
+- A review with findings uses outcome "findings" and 1 to 10 findings.
+- Each finding has exactly: category, severity, confidence, location, evidence, explanation, fix.
+- category is one of: correctness, security, regression, testing.
+- severity is one of: critical, high, medium, low.
+- confidence is a JSON number from 0 through 1 inclusive.
+- location has exactly: path, side, line. side is LEFT or RIGHT and line is a positive integer.
+- path is nonblank and at most 1024 UTF-8 bytes.
+- evidence and explanation are nonblank and at most 1000 UTF-8 bytes each.
+- fix is nonblank and at most 2000 UTF-8 bytes.
+- Keep the combined path, evidence, explanation, and fix content concise; its publication-safe encoded form must be at most 55000 UTF-8 bytes.
+- The complete JSON document must be at most 60000 UTF-8 bytes.
+- Do not add fields, omit fields, use null, or invent a newer contract version.
 
 Trusted review guidance:
 ${customPrompt}
@@ -366,15 +382,26 @@ function redactError(error: unknown, secret: string): Error {
   return new Error(redactSecrets(message, [secret]));
 }
 
-export function limitReview(review: string): string {
-  const bytes = Buffer.from(review, 'utf8');
-  if (bytes.length <= MAX_REVIEW_BYTES) {
-    return review;
+export function redactReviewSecrets(review: ReviewResultV1, secrets: readonly string[]): ReviewResultV1 {
+  const activeSecrets = [...new Set(secrets)].filter(Boolean);
+  if (review.findings.some((finding) => activeSecrets.some((secret) => finding.location.path.includes(secret)))) {
+    throw new Error('Review result location contains forbidden secret data');
   }
-  return `${new TextDecoder().decode(bytes.subarray(0, MAX_REVIEW_BYTES))}\n\n[review truncated by code-review action]`;
+  if (review.outcome === 'clean') return review;
+  return parseReviewResult(
+    JSON.stringify({
+      ...review,
+      findings: review.findings.map((finding) => ({
+        ...finding,
+        evidence: redactSecrets(finding.evidence, activeSecrets),
+        explanation: redactSecrets(finding.explanation, activeSecrets),
+        fix: redactSecrets(finding.fix, activeSecrets),
+      })),
+    }),
+  );
 }
 
-export async function runReview(request: ReviewRequest): Promise<string> {
+export async function runReview(request: ReviewRequest): Promise<ReviewResultV1> {
   await validateModelEndpoint(request.connection);
   const temporaryRoot = process.env.RUNNER_TEMP ?? tmpdir();
   await mkdir(temporaryRoot, { recursive: true });
@@ -403,9 +430,12 @@ export async function runReview(request: ReviewRequest): Promise<string> {
         timeoutMs: request.timeoutMs,
         killGraceMs: request.killGraceMs ?? 5_000,
       });
-      const review = request.backend === 'opencode' ? parseOpenCodeJson(result.stdout) : parsePiJson(result.stdout);
-      const redactedReview = redactSecrets(review, [request.connection.credential?.value ?? '']);
-      return limitReview(redactedReview);
+      const assistantText =
+        request.backend === 'opencode'
+          ? extractOpenCodeAssistantText(result.stdout)
+          : extractPiAssistantText(result.stdout);
+      const review = parseReviewResult(assistantText);
+      return redactReviewSecrets(review, [request.connection.credential?.value ?? '']);
     } catch (error) {
       const cleanup = await removeContainer(request.containerEngine, containerName, workspace, environment);
       if (!cleanup.ok) {

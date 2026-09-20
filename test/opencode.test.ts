@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
-import { buildOpenCodeCommand, parseOpenCodeJson } from '../src/opencode';
+import { buildOpenCodeCommand, extractOpenCodeAssistantText } from '../src/opencode';
 
 test('extracts text events from OpenCode JSON output', () => {
   const output = [
@@ -9,12 +9,20 @@ test('extracts text events from OpenCode JSON output', () => {
     JSON.stringify({ type: 'text', part: { text: 'First' } }),
     JSON.stringify({ type: 'text', part: { text: 'Second' } }),
   ].join('\n');
-  assert.equal(parseOpenCodeJson(output), 'First\n\nSecond');
+  assert.equal(extractOpenCodeAssistantText(output), 'FirstSecond');
+});
+
+test('preserves a JSON contract split across text events', () => {
+  const output = [
+    JSON.stringify({ type: 'text', part: { text: '{"version":1,' } }),
+    JSON.stringify({ type: 'text', part: { text: '"outcome":"clean","findings":[]}' } }),
+  ].join('\n');
+  assert.equal(extractOpenCodeAssistantText(output), '{"version":1,"outcome":"clean","findings":[]}');
 });
 
 test('rejects output without review text', () => {
-  assert.throws(() => parseOpenCodeJson('not json'), /no review text/);
-  assert.throws(() => parseOpenCodeJson(JSON.stringify({ type: 'step_finish' })), /no review text/);
+  assert.throws(() => extractOpenCodeAssistantText('not json'), /no review text/);
+  assert.throws(() => extractOpenCodeAssistantText(JSON.stringify({ type: 'step_finish' })), /no review text/);
 });
 
 test('builds a pure OpenCode command for only the configured model', () => {

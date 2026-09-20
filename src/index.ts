@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { appendFile } from 'node:fs/promises';
-import { renderComment } from './comment';
 import { getActionInput, loadActionConfig, managedCommentMarkers } from './config';
 import { GitHubClient, loadPullRequestEvent } from './github';
 import { runCodeIndexer } from './indexer';
 import { redactSecrets } from './model';
 import { runReview } from './review';
+import { executeAndPublishReview } from './review-publication';
 
 function workflowCommandValue(value: string): string {
   return value.replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
@@ -66,31 +66,31 @@ async function main(): Promise<void> {
     );
   }
 
-  const review = await runReview({
-    backend: config.backend,
-    containerEngine: config.containerEngine,
-    connection: config.connection,
-    opencodeVersion: config.opencodeVersion,
-    piVersion: config.piVersion,
-    customPrompt: config.prompt,
-    timeoutMs: config.timeoutMs,
-    pullRequest,
-    diff,
-    codeIndexContext,
-  });
   const markers = managedCommentMarkers(config.backend);
-  const marker = markers[0];
-  const body = renderComment({
-    review: redactSecrets(review, secrets),
+  const comment = await executeAndPublishReview({
+    executeReview: () =>
+      runReview({
+        backend: config.backend,
+        containerEngine: config.containerEngine,
+        connection: config.connection,
+        opencodeVersion: config.opencodeVersion,
+        piVersion: config.piVersion,
+        customPrompt: config.prompt,
+        timeoutMs: config.timeoutMs,
+        pullRequest,
+        diff,
+        codeIndexContext,
+      }),
+    client,
+    pullRequest,
+    actor,
+    markers,
     backend: config.backend,
     model: config.connection.modelId,
-    headSha: pullRequest.headSha,
-    actor: actor.login,
+    secrets,
     diffTruncated: diff.truncated,
     originalDiffBytes: diff.originalBytes,
-    marker,
   });
-  const comment = await client.upsertManagedComment(pullRequest, actor, markers, body);
 
   await setOutput('comment-url', comment.html_url);
   await setOutput('diff-truncated', String(diff.truncated));

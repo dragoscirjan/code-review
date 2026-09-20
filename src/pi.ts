@@ -19,7 +19,7 @@ export function buildPiCommand(input: { version: string; model: string }): strin
   ];
 }
 
-export function parsePiJson(output: string): string {
+export function extractPiAssistantText(output: string): string {
   let review = '';
   for (const line of output.split(/\r?\n/)) {
     if (!line.trim()) {
@@ -65,10 +65,9 @@ export function parsePiJson(output: string): string {
           (part as Record<string, unknown>).type === 'text' &&
           typeof (part as Record<string, unknown>).text === 'string',
       )
-      .map((part) => part.text.trim())
-      .filter(Boolean)
-      .join('\n\n');
-    if (text) {
+      .map((part) => part.text)
+      .join('');
+    if (text.trim()) {
       review = text;
     }
   }
@@ -78,3 +77,5 @@ export function parsePiJson(output: string): string {
   }
   return review;
 }
+
+export const parsePiJson = extractPiAssistantText;

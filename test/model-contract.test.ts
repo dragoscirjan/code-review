@@ -5,7 +5,7 @@ import type { ModelApi } from '../src/model';
 import { runReview } from '../src/review';
 
 const enabled = process.env.RUN_MODEL_CONTRACT === '1';
-const answer = 'No material findings.';
+const answer = '{"version":1,"outcome":"clean","findings":[]}';
 
 function stream(api: ModelApi): string {
   if (api === 'openai-completions') {
@@ -161,7 +161,7 @@ for (const backend of ['opencode', 'pi'] as const) {
             },
             diff: { text: '+const value = 1;', originalBytes: 17, truncated: false },
           });
-          assert.match(review, /No material findings/);
+          assert.deepEqual(review, { version: 1, outcome: 'clean', findings: [] });
           assert.ok(received.length > 0);
           const endpoint =
             api === 'anthropic-messages'
