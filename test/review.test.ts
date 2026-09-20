@@ -8,6 +8,7 @@ import {
   buildContainerArguments,
   buildContainerEnvironment,
   buildReviewPrompt,
+  limitReview,
   runReview,
   SANDBOX_IMAGE,
   type ReviewBackend,
@@ -112,6 +113,11 @@ test("passes only the model credential to each backend", () => {
   assert.equal(pi.PI_SKIP_VERSION_CHECK, "1");
 });
 
+test("limits oversized review output", () => {
+  const review = limitReview("x".repeat(60_001));
+  assert.match(review, /\[review truncated by code-review action\]$/);
+});
+
 for (const backend of ["opencode", "pi"] as const) {
   test(`runs the ${backend} backend with the prompt on stdin`, async () => {
     const directory = await mkdtemp(join(tmpdir(), `code-review-${backend}-`));
@@ -144,51 +150,63 @@ esac
   });
 }
 
-test("redacts the OpenRouter key from successful review output", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "code-review-output-redact-"));
-  const fakePodman = join(directory, "podman");
-  await writeFile(
-    fakePodman,
-    `#!/bin/sh
-printf '%s\\n' '{"type":"text","part":{"text":"provider-secret"}}'
+for (const backend of ["opencode", "pi"] as const) {
+  test(`redacts the OpenRouter key from ${backend} output`, async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), `code-review-${backend}-output-redact-`),
+    );
+    const fakePodman = join(directory, "podman");
+    const output =
+      backend === "opencode"
+        ? '{"type":"text","part":{"text":"provider-secret"}}'
+        : '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"provider-secret"}]}}';
+    await writeFile(
+      fakePodman,
+      `#!/bin/sh
+printf '%s\\n' '${output}'
 `,
-  );
-  await chmod(fakePodman, 0o755);
+    );
+    await chmod(fakePodman, 0o755);
 
-  try {
-    const review = await runReview(request("opencode", directory));
-    assert.equal(review, "[REDACTED]");
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
+    try {
+      const review = await runReview(request(backend, directory));
+      assert.equal(review, "[REDACTED]");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+}
 
-test("redacts the OpenRouter key from backend errors", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "code-review-redact-"));
-  const fakePodman = join(directory, "podman");
-  await writeFile(
-    fakePodman,
-    `#!/bin/sh
+for (const backend of ["opencode", "pi"] as const) {
+  test(`redacts the OpenRouter key from ${backend} errors`, async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), `code-review-${backend}-redact-`),
+    );
+    const fakePodman = join(directory, "podman");
+    await writeFile(
+      fakePodman,
+      `#!/bin/sh
 if [ "$1" = "rm" ]; then
   exit 0
 fi
 printf '%s\\n' 'provider-secret' >&2
 exit 7
 `,
-  );
-  await chmod(fakePodman, 0o755);
+    );
+    await chmod(fakePodman, 0o755);
 
-  try {
-    await assert.rejects(runReview(request("opencode", directory)), (error) => {
-      assert.ok(error instanceof Error);
-      assert.doesNotMatch(error.message, /provider-secret/);
-      assert.match(error.message, /\[REDACTED\]/);
-      return true;
-    });
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
+    try {
+      await assert.rejects(runReview(request(backend, directory)), (error) => {
+        assert.ok(error instanceof Error);
+        assert.doesNotMatch(error.message, /provider-secret/);
+        assert.match(error.message, /\[REDACTED\]/);
+        return true;
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+}
 
 test("force-removes the named container after a timeout", async () => {
   const directory = await mkdtemp(join(tmpdir(), "code-review-timeout-"));

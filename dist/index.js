@@ -203,15 +203,23 @@ function truncateUtf8(value, maximumBytes) {
     truncated: true
   };
 }
+function hasFinalMarker(comment, marker) {
+  if (typeof comment.body !== "string") {
+    return false;
+  }
+  return comment.body.trimEnd().split(/\r?\n/).at(-1) === marker;
+}
 function findManagedComment(comments, actorId, markers) {
   const acceptedMarkers = typeof markers === "string" ? [markers] : markers;
-  return comments.find((comment) => {
-    if (comment.user?.id !== actorId || typeof comment.body !== "string") {
-      return false;
+  for (const marker of acceptedMarkers) {
+    const match = comments.find(
+      (comment) => comment.user?.id === actorId && hasFinalMarker(comment, marker)
+    );
+    if (match) {
+      return match;
     }
-    const finalLine = comment.body.trimEnd().split(/\r?\n/).at(-1);
-    return finalLine !== void 0 && acceptedMarkers.includes(finalLine);
-  });
+  }
+  return void 0;
 }
 var GitHubClient = class {
   constructor(token, apiUrl = "https://api.github.com", fetchImplementation = fetch) {
@@ -238,6 +246,9 @@ var GitHubClient = class {
       throw new Error(
         `GitHub API ${init.method ?? "GET"} ${path} failed with ${response.status}: ${message}`
       );
+    }
+    if (response.status === 204) {
+      return void 0;
     }
     return await response.json();
   }
@@ -277,18 +288,19 @@ var GitHubClient = class {
   }
   async upsertManagedComment(context, actor, markers, body) {
     const comments = await this.listComments(context);
-    const existing = findManagedComment(comments, actor.id, markers);
-    if (existing) {
-      return this.request(
-        `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/issues/comments/${existing.id}`,
-        {
-          method: "PATCH",
-          body: JSON.stringify({ body }),
-          headers: { "Content-Type": "application/json" }
-        }
-      );
-    }
-    return this.request(
+    const acceptedMarkers = typeof markers === "string" ? [markers] : [...markers];
+    const matching = comments.filter(
+      (comment) => comment.user?.id === actor.id && acceptedMarkers.some((marker) => hasFinalMarker(comment, marker))
+    );
+    const existing = findManagedComment(comments, actor.id, acceptedMarkers);
+    const published = existing ? await this.request(
+      `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/issues/comments/${existing.id}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ body }),
+        headers: { "Content-Type": "application/json" }
+      }
+    ) : await this.request(
       `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/issues/${context.number}/comments`,
       {
         method: "POST",
@@ -296,6 +308,16 @@ var GitHubClient = class {
         headers: { "Content-Type": "application/json" }
       }
     );
+    for (const duplicate of matching) {
+      if (duplicate.id === existing?.id) {
+        continue;
+      }
+      await this.request(
+        `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/issues/comments/${duplicate.id}`,
+        { method: "DELETE" }
+      );
+    }
+    return published;
   }
 };
 

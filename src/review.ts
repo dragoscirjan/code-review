@@ -368,7 +368,7 @@ function redactError(error: unknown, secret: string): Error {
   return new Error(message.replaceAll(secret, "[REDACTED]"));
 }
 
-function limitReview(review: string): string {
+export function limitReview(review: string): string {
   const bytes = Buffer.from(review, "utf8");
   if (bytes.length <= MAX_REVIEW_BYTES) {
     return review;

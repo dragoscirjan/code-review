@@ -42,6 +42,26 @@ test("matches an exact legacy marker during migration", () => {
   assert.equal(findManagedComment([comment], 20, [current, legacy])?.id, 5);
 });
 
+test("prefers the current marker over an older matching comment", () => {
+  const legacy = "<!-- code-review:opencode-poc:v1 -->";
+  const current = "<!-- code-review:opencode:openrouter-poc:v2 -->";
+  const candidates: GitHubComment[] = [
+    {
+      id: 5,
+      body: `Legacy review\n\n${legacy}`,
+      html_url: "https://example.test/5",
+      user: { id: 20, login: "bot" },
+    },
+    {
+      id: 6,
+      body: `Current review\n\n${current}`,
+      html_url: "https://example.test/6",
+      user: { id: 20, login: "bot" },
+    },
+  ];
+  assert.equal(findManagedComment(candidates, 20, [current, legacy])?.id, 6);
+});
+
 test("does not match a backend marker copied into review text", () => {
   const opencodeMarker = "<!-- code-review:opencode -->";
   const piMarker = "<!-- code-review:pi -->";
@@ -113,6 +133,72 @@ test("updates only the managed comment owned by the PAT actor", async () => {
   assert.equal(updated.id, 2);
   assert.equal(requests[1]?.init?.method, "PATCH");
   assert.match(requests[1]?.url ?? "", /issues\/comments\/2$/);
+});
+
+test("deletes an older duplicate after updating the current comment", async () => {
+  const legacy = "<!-- code-review:opencode-poc:v1 -->";
+  const current = "<!-- code-review:opencode:openrouter-poc:v2 -->";
+  const candidates: GitHubComment[] = [
+    {
+      id: 5,
+      body: `Legacy review\n\n${legacy}`,
+      html_url: "https://example.test/5",
+      user: { id: 20, login: "bot" },
+    },
+    {
+      id: 6,
+      body: `Current review\n\n${current}`,
+      html_url: "https://example.test/6",
+      user: { id: 20, login: "bot" },
+    },
+  ];
+  const requests: Array<{ url: string; init?: RequestInit }> = [];
+  const responses = [
+    new Response(JSON.stringify(candidates), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+    new Response(JSON.stringify(candidates[1]), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+    new Response(null, { status: 204 }),
+  ];
+  const client = new GitHubClient(
+    "token",
+    "https://api.example.test",
+    async (input, init) => {
+      requests.push({ url: String(input), init });
+      const response = responses.shift();
+      assert.ok(response);
+      return response;
+    },
+  );
+  const context = parsePullRequestEvent({
+    number: 7,
+    repository: { full_name: "owner/repository" },
+    pull_request: {
+      number: 7,
+      title: "Change",
+      body: "",
+      html_url: "https://github.com/owner/repository/pull/7",
+      base: { sha: "base" },
+      head: { sha: "head" },
+      user: { login: "contributor" },
+    },
+  });
+
+  await client.upsertManagedComment(
+    context,
+    { id: 20, login: "bot" },
+    [current, legacy],
+    `Updated review\n\n${current}`,
+  );
+
+  assert.equal(requests[1]?.init?.method, "PATCH");
+  assert.match(requests[1]?.url ?? "", /issues\/comments\/6$/);
+  assert.equal(requests[2]?.init?.method, "DELETE");
+  assert.match(requests[2]?.url ?? "", /issues\/comments\/5$/);
 });
 
 test("creates a managed comment when none exists", async () => {

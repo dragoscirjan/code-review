@@ -26,10 +26,6 @@ on:
 
 permissions: {}
 
-concurrency:
-  group: code-review-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
-
 jobs:
   review:
     if: github.event.pull_request.draft == false
@@ -39,6 +35,9 @@ jobs:
       fail-fast: false
       matrix:
         backend: [opencode, pi]
+    concurrency:
+      group: code-review-${{ matrix.backend }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     steps:
       - uses: dragoscirjan/code-review@REPLACE_WITH_COMMIT_SHA
         with:

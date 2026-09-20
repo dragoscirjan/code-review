@@ -127,19 +127,29 @@ export function truncateUtf8(value: string, maximumBytes: number): PullRequestDi
   };
 }
 
+function hasFinalMarker(comment: GitHubComment, marker: string): boolean {
+  if (typeof comment.body !== "string") {
+    return false;
+  }
+  return comment.body.trimEnd().split(/\r?\n/).at(-1) === marker;
+}
+
 export function findManagedComment(
   comments: GitHubComment[],
   actorId: number,
   markers: string | readonly string[],
 ): GitHubComment | undefined {
   const acceptedMarkers = typeof markers === "string" ? [markers] : markers;
-  return comments.find((comment) => {
-    if (comment.user?.id !== actorId || typeof comment.body !== "string") {
-      return false;
+  for (const marker of acceptedMarkers) {
+    const match = comments.find(
+      (comment) =>
+        comment.user?.id === actorId && hasFinalMarker(comment, marker),
+    );
+    if (match) {
+      return match;
     }
-    const finalLine = comment.body.trimEnd().split(/\r?\n/).at(-1);
-    return finalLine !== undefined && acceptedMarkers.includes(finalLine);
-  });
+  }
+  return undefined;
 }
 
 export class GitHubClient {
@@ -172,6 +182,9 @@ export class GitHubClient {
       );
     }
 
+    if (response.status === 204) {
+      return undefined as T;
+    }
     return (await response.json()) as T;
   }
 
@@ -224,25 +237,41 @@ export class GitHubClient {
     body: string,
   ): Promise<GitHubComment> {
     const comments = await this.listComments(context);
-    const existing = findManagedComment(comments, actor.id, markers);
-    if (existing) {
-      return this.request<GitHubComment>(
-        `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/issues/comments/${existing.id}`,
-        {
-          method: "PATCH",
-          body: JSON.stringify({ body }),
-          headers: { "Content-Type": "application/json" },
-        },
+    const acceptedMarkers =
+      typeof markers === "string" ? [markers] : [...markers];
+    const matching = comments.filter(
+      (comment) =>
+        comment.user?.id === actor.id &&
+        acceptedMarkers.some((marker) => hasFinalMarker(comment, marker)),
+    );
+    const existing = findManagedComment(comments, actor.id, acceptedMarkers);
+    const published = existing
+      ? await this.request<GitHubComment>(
+          `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/issues/comments/${existing.id}`,
+          {
+            method: "PATCH",
+            body: JSON.stringify({ body }),
+            headers: { "Content-Type": "application/json" },
+          },
+        )
+      : await this.request<GitHubComment>(
+          `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/issues/${context.number}/comments`,
+          {
+            method: "POST",
+            body: JSON.stringify({ body }),
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+
+    for (const duplicate of matching) {
+      if (duplicate.id === existing?.id) {
+        continue;
+      }
+      await this.request<void>(
+        `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/issues/comments/${duplicate.id}`,
+        { method: "DELETE" },
       );
     }
-
-    return this.request<GitHubComment>(
-      `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/issues/${context.number}/comments`,
-      {
-        method: "POST",
-        body: JSON.stringify({ body }),
-        headers: { "Content-Type": "application/json" },
-      },
-    );
+    return published;
   }
 }
