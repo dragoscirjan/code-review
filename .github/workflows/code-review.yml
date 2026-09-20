@@ -1,4 +1,4 @@
-name: OpenCode pull request review
+name: Code pull request review
 
 on:
   pull_request_target:
@@ -11,7 +11,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: opencode-review-${{ github.event.pull_request.number }}
+  group: code-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
@@ -21,7 +21,24 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Review pull request
-        uses: dragoscirjan/code-review@dd53c9336b55e5b9b24f8088e4b2f93ceecb9ea8
+        uses: dragoscirjan/code-review@f931037fb9dc59b9f989b500237fd5acd1f6930b
         with:
           github-token: ${{ secrets.GH_TOKEN }}
           container-engine: podman
+          backend: opencode
+          model-config: |
+            {
+              "version": 1,
+              "provider": {
+                "api": "openai-completions",
+                "baseUrl": "https://openrouter.ai/api/v1",
+                "network": "remote",
+                "credential": "review-provider"
+              },
+              "model": {
+                "id": "z-ai/glm-5.3-flash",
+                "contextWindow": 131072,
+                "maxOutputTokens": 8192
+              }
+            }
+          model-credentials: ${{ secrets.REVIEW_MODEL_CREDENTIALS }}
