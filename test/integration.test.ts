@@ -48,6 +48,7 @@ for (const backend of ['opencode', 'pi'] as const) {
         truncated: false,
       },
     });
-    assert.match(review, /subtract|subtraction/i);
+    assert.equal(review.outcome, 'findings');
+    assert.match(JSON.stringify(review.findings), /subtract|subtraction/i);
   });
 }

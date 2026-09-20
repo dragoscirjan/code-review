@@ -12,7 +12,7 @@ export function buildOpenCodeCommand(input: { version: string }): string[] {
   ];
 }
 
-export function parseOpenCodeJson(output: string): string {
+export function extractOpenCodeAssistantText(output: string): string {
   const textParts: string[] = [];
   for (const line of output.split(/\r?\n/)) {
     if (!line.trim()) {
@@ -42,14 +42,16 @@ export function parseOpenCodeJson(output: string): string {
       continue;
     }
     const value = (part as Record<string, unknown>).text;
-    if (typeof value === 'string' && value.trim()) {
-      textParts.push(value.trim());
+    if (typeof value === 'string') {
+      textParts.push(value);
     }
   }
 
-  const review = textParts.join('\n\n').trim();
-  if (!review) {
+  const review = textParts.join('');
+  if (!review.trim()) {
     throw new Error('OpenCode returned no review text');
   }
   return review;
 }
+
+export const parseOpenCodeJson = extractOpenCodeAssistantText;
