@@ -1,14 +1,17 @@
 name: Code Review
-description: Review a pull request with OpenCode or Pi through OpenRouter and publish one managed comment
+description: Review a pull request with OpenCode or Pi through a configured model endpoint and publish one managed comment
 author: Dragos Cirjan
 
 inputs:
   github-token:
     description: Personal access token used to read the pull request and publish the review
     required: true
-  openrouter-api-key:
-    description: OpenRouter API key used only inside the selected review backend sandbox
+  model-config:
+    description: Version 1 JSON selecting provider API, baseUrl, remote/private network permission and model; see README
     required: true
+  model-credentials:
+    description: Secret JSON mapping credential references to bearer or api-key tokens; only the selected credential enters the sandbox
+    required: false
   backend:
     description: Review backend. Accepted values are opencode and pi
     required: false
@@ -17,10 +20,6 @@ inputs:
     description: Allowlisted container engine used for the review sandbox
     required: false
     default: podman
-  model:
-    description: OpenRouter model identifier. The POC supports only z-ai/glm-5.3-flash
-    required: false
-    default: z-ai/glm-5.3-flash
   prompt:
     description: Trusted review guidance appended to the fixed security prompt
     required: false

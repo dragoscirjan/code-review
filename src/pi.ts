@@ -15,7 +15,7 @@ export function buildPiCommand(input: {
     "--no-prompt-templates",
     "--no-context-files",
     "--provider",
-    "openrouter",
+    "review-provider",
     "--model",
     input.model,
     "--offline",
@@ -54,7 +54,7 @@ export function parsePiJson(output: string): string {
     }
     if (messageRecord.stopReason === "error") {
       throw new Error(
-        `Pi reported an error: ${String(messageRecord.errorMessage ?? "unknown error").slice(0, 2_000)}`,
+        "Pi reported a provider error; backend details suppressed",
       );
     }
 

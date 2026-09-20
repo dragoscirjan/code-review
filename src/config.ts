@@ -1,8 +1,8 @@
 import ms, { type StringValue } from "ms";
 import type { ReviewBackend } from "./review";
+import { loadModelConnection, type ModelConnection } from "./model";
 
 export const DEFAULT_BACKEND: ReviewBackend = "opencode";
-export const DEFAULT_MODEL = "z-ai/glm-5.3-flash";
 export const DEFAULT_OPENCODE_VERSION = "1.18.31";
 export const DEFAULT_PI_VERSION = "0.85.1";
 export const DEFAULT_CGC_VERSION = "0.6.13";
@@ -17,10 +17,9 @@ const DEFAULT_PROMPT =
 
 export interface ActionConfig {
   githubToken: string;
-  openRouterApiKey: string;
+  connection: ModelConnection;
   backend: ReviewBackend;
   containerEngine: "podman" | "docker";
-  model: string;
   prompt: string;
   opencodeVersion: string;
   piVersion: string;
@@ -32,10 +31,11 @@ export interface ActionConfig {
 }
 
 export function managedCommentMarkers(backend: ReviewBackend): string[] {
-  const current = `<!-- code-review:${backend}:openrouter-poc:v2 -->`;
+  const current = `<!-- code-review:${backend}:v3 -->`;
+  const previous = `<!-- code-review:${backend}:openrouter-poc:v2 -->`;
   return backend === "opencode"
-    ? [current, "<!-- code-review:opencode-poc:v1 -->"]
-    : [current];
+    ? [current, previous, "<!-- code-review:opencode-poc:v1 -->"]
+    : [current, previous];
 }
 
 function inputCandidates(name: string): string[] {
@@ -107,13 +107,12 @@ export function loadActionConfig(
     throw new Error("github-token is required");
   }
 
-  const openRouterApiKey = getActionInput(
-    "openrouter-api-key",
-    environment,
-  );
-  if (!openRouterApiKey) {
-    throw new Error("openrouter-api-key is required");
+  if (getActionInput("openrouter-api-key", environment) || getActionInput("model", environment)) {
+    throw new Error("openrouter-api-key and model have been removed; migrate to model-config and model-credentials (see README)");
   }
+  const modelConfig = getActionInput("model-config", environment);
+  if (!modelConfig) throw new Error("model-config is required; see README for OpenRouter and local examples");
+  const connection = loadModelConnection(modelConfig, getActionInput("model-credentials", environment));
 
   const backend = getActionInput("backend", environment) ?? DEFAULT_BACKEND;
   if (backend !== "opencode" && backend !== "pi") {
@@ -124,11 +123,6 @@ export function loadActionConfig(
     getActionInput("container-engine", environment) ?? "podman";
   if (containerEngine !== "podman" && containerEngine !== "docker") {
     throw new Error("container-engine must be podman or docker");
-  }
-
-  const model = getActionInput("model", environment) ?? DEFAULT_MODEL;
-  if (model !== DEFAULT_MODEL) {
-    throw new Error(`The POC supports only ${DEFAULT_MODEL}`);
   }
 
   const prompt = getActionInput("prompt", environment) ?? DEFAULT_PROMPT;
@@ -184,10 +178,9 @@ export function loadActionConfig(
 
   return {
     githubToken,
-    openRouterApiKey,
+    connection,
     backend,
     containerEngine,
-    model,
     prompt,
     opencodeVersion,
     piVersion,

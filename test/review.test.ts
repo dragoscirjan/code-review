@@ -4,6 +4,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { PullRequestContext } from "../src/github";
+import type { ModelConnection } from "../src/model";
+const connection: ModelConnection = {
+  api: "openai-completions",
+  baseUrl: "http://192.168.1.20:8080/v1",
+  network: "private",
+  modelId: "local-model",
+  contextWindow: 128000,
+  maxOutputTokens: 8192,
+  credential: { type: "bearer", value: "provider-secret" },
+};
+const versions = { opencodeVersion: "1.18.31", piVersion: "0.85.1" };
 import {
   buildContainerArguments,
   buildContainerEnvironment,
@@ -30,8 +41,7 @@ function request(backend: ReviewBackend, directory: string) {
   return {
     backend,
     containerEngine: "podman" as const,
-    model: "z-ai/glm-5.3-flash",
-    openRouterApiKey: "provider-secret",
+    connection,
     opencodeVersion: "1.18.31",
     piVersion: "0.85.1",
     customPrompt: "Focus on correctness.",
@@ -74,9 +84,8 @@ test("builds locked-down mount-free invocations for both backends", () => {
   for (const backend of ["opencode", "pi"] as const) {
     const args = buildContainerArguments({
       backend,
-      model: "z-ai/glm-5.3-flash",
-      opencodeVersion: "1.18.31",
-      piVersion: "0.85.1",
+      connection,
+      containerEngine: "podman",
       containerName: `code-review-${backend}`,
     });
     assert.equal(args[0], "run");
@@ -85,7 +94,7 @@ test("builds locked-down mount-free invocations for both backends", () => {
     assert.ok(args.includes("ALL"));
     assert.ok(args.includes("no-new-privileges:true"));
     assert.ok(args.includes(SANDBOX_IMAGE));
-    assert.ok(args.includes("OPENROUTER_API_KEY"));
+    assert.ok(args.includes("REVIEW_MODEL_TOKEN"));
     assert.ok(!args.includes("--mount"));
     assert.ok(!args.some((argument) => argument.includes("provider-secret")));
     assert.ok(!args.some((argument) => argument.includes("GH_TOKEN")));
@@ -103,20 +112,21 @@ test("passes only the model credential to each backend", () => {
   };
   const opencode = buildContainerEnvironment(
     source,
-    "provider-secret",
+    connection,
     "opencode",
+    versions,
   );
-  const pi = buildContainerEnvironment(source, "provider-secret", "pi");
+  const pi = buildContainerEnvironment(source, connection, "pi", versions);
 
   for (const child of [opencode, pi]) {
-    assert.equal(child.OPENROUTER_API_KEY, "provider-secret");
+    assert.equal(child.REVIEW_MODEL_TOKEN, "provider-secret");
     assert.equal(child.GH_TOKEN, undefined);
     assert.equal(child.GITHUB_TOKEN, undefined);
     assert.equal(child.INPUT_GITHUB_TOKEN, undefined);
     assert.equal(child.HTTPS_PROXY, undefined);
     assert.equal(child.HTTP_PROXY, undefined);
   }
-  assert.match(opencode.OPENCODE_CONFIG_CONTENT ?? "", /"\*":"deny"/);
+  assert.match(opencode.REVIEW_HARNESS_CONFIG ?? "", /"\*":"deny"/);
   assert.equal(pi.PI_TELEMETRY, "0");
   assert.equal(pi.PI_SKIP_VERSION_CHECK, "1");
 });
@@ -138,7 +148,7 @@ for (const backend of ["opencode", "pi"] as const) {
       fakePodman,
       `#!/bin/sh
 input=$(cat)
-if [ "$OPENROUTER_API_KEY" != "provider-secret" ] || [ -n "$GH_TOKEN" ]; then
+if [ "$REVIEW_MODEL_TOKEN" != "provider-secret" ] || [ -n "$GH_TOKEN" ]; then
   exit 8
 fi
 case "$input" in
@@ -210,7 +220,7 @@ printf '%s\\n' '${output}'
       await assert.rejects(runReview(request(backend, directory)), (error) => {
         assert.ok(error instanceof Error);
         assert.doesNotMatch(error.message, /provider-secret/);
-        assert.match(error.message, /\[REDACTED\]/);
+        assert.match(error.message, /backend details suppressed/);
         return true;
       });
     } finally {

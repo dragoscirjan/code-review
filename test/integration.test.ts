@@ -15,8 +15,9 @@ for (const backend of ["opencode", "pi"] as const) {
         backend: backend as ReviewBackend,
         containerEngine:
           process.env.CONTAINER_ENGINE === "docker" ? "docker" : "podman",
-        model: "z-ai/glm-5.3-flash",
-        openRouterApiKey,
+        connection: { api: "openai-completions", baseUrl: "https://openrouter.ai/api/v1", network: "remote",
+          modelId: "z-ai/glm-5.3-flash", contextWindow: 131072, maxOutputTokens: 8192,
+          credential: { type: "bearer", value: openRouterApiKey } },
         opencodeVersion: "1.18.31",
         piVersion: "0.85.1",
         customPrompt: "Identify the concrete regression.",

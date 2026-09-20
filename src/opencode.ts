@@ -1,10 +1,5 @@
-export const OPENCODE_CONFIG_CONTENT = JSON.stringify({
-  permission: { "*": "deny" },
-});
-
 export function buildOpenCodeCommand(input: {
   version: string;
-  model: string;
 }): string[] {
   return [
     "npx",
@@ -13,7 +8,7 @@ export function buildOpenCodeCommand(input: {
     "run",
     "--pure",
     "--model",
-    `openrouter/${input.model}`,
+    "review-provider/review-model",
     "--format",
     "json",
   ];
@@ -39,7 +34,7 @@ export function parseOpenCodeJson(output: string): string {
     const record = event as Record<string, unknown>;
     if (record.type === "error") {
       throw new Error(
-        `OpenCode reported an error: ${JSON.stringify(record).slice(0, 2_000)}`,
+        "OpenCode reported a provider error; backend details suppressed",
       );
     }
     if (record.type !== "text") {
