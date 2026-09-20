@@ -79,6 +79,7 @@ Security rules:
 
 Review rules:
 - Report concrete correctness, security, regression, and test coverage problems.
+- For each finding, propose the smallest practical fix. Include a patch or code example when the supplied context is sufficient; otherwise describe the exact change needed.
 - Do not report style preferences or speculative concerns.
 - Cite the file and changed line when the diff provides them.
 - If there are no material findings, say: No material findings.
