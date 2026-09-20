@@ -6,6 +6,7 @@ import { runCodeIndexer } from './indexer';
 import { redactSecrets } from './model';
 import { runReview } from './review';
 import { executeAndPublishReview } from './review-publication';
+import { acquireReviewedSnapshot, assertSnapshotFresh } from './review-snapshot';
 
 function workflowCommandValue(value: string): string {
   return value.replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
@@ -28,7 +29,7 @@ async function main(): Promise<void> {
     if (value) secrets.push(value);
   }
   const config = loadActionConfig();
-  if (config.connection.credential) secrets.push(config.connection.credential.value);
+  secrets.push(...config.modelCredentialValues);
   for (const secret of secrets) console.log(`::add-mask::${workflowCommandValue(secret)}`);
   const eventPath = process.env.GITHUB_EVENT_PATH;
   if (!eventPath) {
@@ -41,11 +42,12 @@ async function main(): Promise<void> {
   console.log(
     `Reviewing ${pullRequest.owner}/${pullRequest.repository}#${pullRequest.number} at ${pullRequest.headSha.slice(0, 12)} with ${config.backend}`,
   );
-  const [actor, diff] = await Promise.all([
-    client.getAuthenticatedActor(),
-    client.getPullRequestDiff(pullRequest, config.maxDiffBytes),
-  ]);
-  console.log(`Fetched ${diff.originalBytes} diff bytes${diff.truncated ? `; limited to ${config.maxDiffBytes}` : ''}`);
+  const snapshot = await acquireReviewedSnapshot(client, pullRequest, config.maxDiffBytes);
+  const diff = snapshot.diff;
+  const actor = await client.getAuthenticatedActor();
+  console.log(
+    `Fetched ${diff.originalBytes} diff bytes${diff.truncated ? `; safely limited to ${config.maxDiffBytes}` : ''}`,
+  );
 
   let codeIndexContext: string | undefined;
   let codeIndexCacheHit = false;
@@ -67,7 +69,7 @@ async function main(): Promise<void> {
   }
 
   const markers = managedCommentMarkers(config.backend);
-  const comment = await executeAndPublishReview({
+  const publication = await executeAndPublishReview({
     executeReview: () =>
       runReview({
         backend: config.backend,
@@ -81,22 +83,26 @@ async function main(): Promise<void> {
         diff,
         codeIndexContext,
       }),
+    assertFresh: () => assertSnapshotFresh(client, pullRequest, snapshot.revision),
     client,
     pullRequest,
+    diff,
     actor,
     markers,
     backend: config.backend,
     model: config.connection.modelId,
     secrets,
-    diffTruncated: diff.truncated,
-    originalDiffBytes: diff.originalBytes,
+    minimumConfidence: config.minimumConfidence,
+    maximumInlineComments: config.maxInlineComments,
   });
 
-  await setOutput('comment-url', comment.html_url);
+  await setOutput('comment-url', publication.comment.html_url);
+  await setOutput('review-url', publication.inlineReview?.html_url ?? '');
+  await setOutput('inline-comment-count', String(publication.assessment.counts.inlineSelected));
   await setOutput('diff-truncated', String(diff.truncated));
   await setOutput('code-indexer', config.codeIndexer);
   await setOutput('code-index-cache-hit', String(codeIndexCacheHit));
-  console.log(`Published review: ${comment.html_url}`);
+  console.log(`Published review: ${publication.comment.html_url}`);
 }
 
 main().catch((error: unknown) => {

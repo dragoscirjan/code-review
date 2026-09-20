@@ -1,6 +1,6 @@
 # Pull request code review action
 
-A GitHub Action that reviews pull requests with **OpenCode or Pi**, using a configured local/private or remote model endpoint, and publishes one managed summary per backend.
+A GitHub Action that reviews pull requests with **OpenCode or Pi**, using a configured local/private or remote model endpoint, and publishes one managed summary plus an optional bounded batch of validated inline findings per backend.
 
 ## OpenRouter setup / migration
 
@@ -131,21 +131,24 @@ Omit `model-credentials` for keyless servers. The harness adapters use a non-sec
 | `code-indexer`         | `none`                          | `none`, `cgc` or `gitnexus`; exact base revision only.                       |
 | `code-index-cache-key` | `code-review-index-v1`          | Cache key prefix.                                                            |
 | `code-index-cache-ttl` | `24h`                           | Maximum cache age (`ms`, `s`, `m`, `h`, `d`).                                |
-| `max-diff-bytes`       | `120000`                        | Maximum UTF-8 diff bytes.                                                    |
+| `max-diff-bytes`       | `120000`                        | Maximum model-visible diff bytes; only complete diff hunks are included.     |
+| `minimum-confidence`   | `0`                             | Inclusive confidence threshold from `0` through `1`.                         |
+| `max-inline-comments`  | `0`                             | Inline comment cap from `0` through `10`; `0` keeps summary-only behavior.   |
 | `timeout-seconds`      | `600`                           | Backend timeout.                                                             |
 
-Outputs: `comment-url`, `diff-truncated`, `code-indexer`, `code-index-cache-hit`.
+Outputs: `comment-url`, `review-url`, `inline-comment-count`, `diff-truncated`, `code-indexer`, `code-index-cache-hit`.
 
 ## Security and limitations
 
-- GitHub-hosted runners, GitHub PAT publication, summary comments only. Pi still uses its CLI for this milestone.
+- GitHub-hosted runners and GitHub PAT publication. Pi still uses its CLI for this milestone.
 - No PR code execution. The diff and optional bounded base-index context are untrusted prompt data.
 - The backend container is digest-pinned, mount-free, non-root, read-only, capability-dropped, resource-limited and denies added privileges. OpenCode denies all tools; Pi disables tools and resource discovery.
 - Native harness configuration is generated in container tmpfs with restrictive permissions. Fixed provider naming avoids built-in provider auto-configuration. Native interpolation syntax in credentials is handled without executing commands or loading referenced files.
-- GitHub credentials never enter the model container. Only the selected model credential is passed through environment—not arguments or prompt. Output is bounded, selected credentials are redacted, and raw provider errors are suppressed.
+- GitHub credentials never enter the model container. Only the selected model credential is passed through environment—not arguments or prompt. Every validated credential value, including unused entries, remains host-side and is masked, redacted, and included in the final publication scan. Output is bounded and raw provider errors are suppressed.
 - `network` permission and DNS/address preflight checks are **not an egress firewall**. DNS can change after checking; harness SDKs control redirects. Trust the endpoint and its redirect behavior. npm/package code also has container network access and the selected credential. A credential-isolating model gateway with enforced egress is future work.
 - Private HTTP is not encrypted. Prefer TLS and authenticated private endpoints.
-- Backends must return the strict version 1 JSON review contract; malformed, unknown-version, or oversized output is rejected, and accepted findings are rendered into a summary comment. Tool denial and structural validation do not guarantee finding correctness. Diff/evidence validation and inline publication remain future work.
+- Backends must return the strict version 1 JSON review contract; malformed, unknown-version, or oversized output is rejected without repair. The action strictly parses the model-visible unified diff, accepts only findings on exact added/deleted lines with exact changed-line evidence, removes anchor duplicates deterministically, and applies the configured confidence and inline limits. Rejected finding prose is never published.
+- The action checks the PR base/head before diff acquisition, after acquisition, immediately before publication, and again between inline and summary publication. Inline findings are submitted in one pull-request review bound to the reviewed head SHA, then the managed summary is updated. GitHub offers neither a transaction spanning those two endpoints nor an atomic create-if-marker-absent operation: if the summary update fails after inline success, the action fails and a deterministic owned marker lets a retry reuse the inline review, but two truly concurrent first-time runs can still race. Keep workflow concurrency cancellation enabled. A force-push after the final pre-write check can make the SHA-bound review outdated but cannot move it to the replacement head.
 - Managed comments require both a backend-specific hidden marker and the authenticated PAT actor. Legacy OpenRouter markers migrate to provider-neutral markers without creating a new comment. PAT comments appear as the token's owner.
 
 Optional indexing downloads only the base SHA archive and removes symlinks/non-regular files. CGC/GitNexus run on the host with a credential-stripped environment, which is **not OS isolation**. Archive size checks after extraction and transitive package dependencies retain the documented POC limitations. Index context is capped at 50 KB. Cache identity includes repository, base SHA, pinned indexer, platform and age; successful reads do not renew TTL. An unusable restore gets one clean rebuild. Cache service failures warn; explicitly selected indexer failures stop the review.

@@ -1,5 +1,5 @@
+import type { ReviewAssessment, ValidatedFinding } from './finding-validation';
 import type { ReviewBackend } from './review';
-import type { ReviewResultV1 } from './review-contract';
 import { renderModelTextLiteral } from './review-text';
 
 export const MAX_GITHUB_COMMENT_BYTES = 65_536;
@@ -8,19 +8,15 @@ function backendLabel(backend: ReviewBackend): string {
   return backend === 'opencode' ? 'OpenCode' : 'Pi';
 }
 
-function renderReview(review: ReviewResultV1): string {
-  if (review.outcome === 'clean') return 'No material findings.';
+function findingHeading(finding: ValidatedFinding): string {
+  const severity = `${finding.severity[0].toUpperCase()}${finding.severity.slice(1)}`;
+  const category = `${finding.category[0].toUpperCase()}${finding.category.slice(1)}`;
+  return `${severity} ${category}`;
+}
 
-  const severityOrder = { critical: 0, high: 1, medium: 2, low: 3 } as const;
-  const findings = review.findings
-    .map((finding, index) => ({ finding, index }))
-    .sort((left, right) => severityOrder[left.finding.severity] - severityOrder[right.finding.severity]);
-
-  return findings
-    .map(({ finding }, index) => {
-      const severity = `${finding.severity[0].toUpperCase()}${finding.severity.slice(1)}`;
-      const category = `${finding.category[0].toUpperCase()}${finding.category.slice(1)}`;
-      return `### ${index + 1}. ${severity} ${category}
+function renderFinding(finding: ValidatedFinding, index?: number): string {
+  const prefix = index === undefined ? '###' : `### ${index}.`;
+  return `${prefix} ${findingHeading(finding)}
 
 - **Line:** ${finding.location.line} (${finding.location.side})
 - **Confidence:** ${Math.round(finding.confidence * 100)}%
@@ -32,12 +28,27 @@ ${renderModelTextLiteral(finding.evidence)}
 ${renderModelTextLiteral(finding.explanation)}
 - **Suggested fix:**
 ${renderModelTextLiteral(finding.fix)}`;
-    })
-    .join('\n\n');
+}
+
+function renderAssessment(assessment: ReviewAssessment): string {
+  if (assessment.modelOutcome === 'clean') return 'The reviewer returned no findings.';
+  if (assessment.findings.length === 0) return 'No model findings passed diff and evidence validation.';
+  return assessment.findings.map((finding, index) => renderFinding(finding, index + 1)).join('\n\n');
+}
+
+function assertCommentSize(comment: string, label: string): string {
+  if (comment.length > MAX_GITHUB_COMMENT_BYTES || Buffer.byteLength(comment, 'utf8') > MAX_GITHUB_COMMENT_BYTES) {
+    throw new Error(`${label} exceeds the publication size limit`);
+  }
+  return comment;
+}
+
+export function renderInlineComment(finding: ValidatedFinding, marker: string): string {
+  return assertCommentSize(`${renderFinding(finding)}\n\n${marker}`, 'Rendered inline review comment');
 }
 
 export function renderComment(input: {
-  review: ReviewResultV1;
+  assessment: ReviewAssessment;
   backend: ReviewBackend;
   model: string;
   headSha: string;
@@ -46,17 +57,25 @@ export function renderComment(input: {
   originalDiffBytes: number;
   marker: string;
 }): string {
-  const truncation = input.diffTruncated ? `\n\n> Diff input was truncated from ${input.originalDiffBytes} bytes.` : '';
+  const { counts } = input.assessment;
+  const truncation = input.diffTruncated
+    ? `\n\n> Review context was truncated safely at complete diff-hunk boundaries from ${input.originalDiffBytes} bytes.`
+    : '';
   const comment = `## Code Review (\`${input.model}\` via ${backendLabel(input.backend)})
 
 - Head: \`${input.headSha.slice(0, 12)}\`
-- Published through: \`@${input.actor}\`${truncation}
+- Published through: \`@${input.actor}\`
+- Model findings received: ${counts.received}
+- Accepted: ${counts.accepted}
+- Rejected (evidence or secret policy): ${counts.rejected}
+- Unmapped: ${counts.unmapped}
+- Duplicates removed: ${counts.duplicates}
+- Below confidence threshold: ${counts.belowThreshold}
+- Inline comments published: ${counts.inlineSelected}
+- Accepted findings omitted from inline comments by limit: ${counts.inlineOmitted}${truncation}
 
-${renderReview(input.review)}
+${renderAssessment(input.assessment)}
 
 ${input.marker}`;
-  if (comment.length > MAX_GITHUB_COMMENT_BYTES || Buffer.byteLength(comment, 'utf8') > MAX_GITHUB_COMMENT_BYTES) {
-    throw new Error('Rendered review comment exceeds the publication size limit');
-  }
-  return comment;
+  return assertCommentSize(comment, 'Rendered review comment');
 }

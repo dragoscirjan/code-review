@@ -317,14 +317,18 @@ async function databaseHasContent(indexer: Exclude<CodeIndexer, 'none'>, databas
 
 function changedPaths(diff: PullRequestDiff): string[] {
   const paths = new Set<string>();
+  if (diff.parsed) {
+    for (const file of diff.parsed.files) {
+      if (file.apiPath) paths.add(file.apiPath);
+      if (paths.size >= 20) break;
+    }
+    return [...paths];
+  }
+  // Compatibility for callers constructing prompt-only fixtures; production diff acquisition always supplies parsed data.
   for (const line of diff.text.split(/\r?\n/)) {
     const match = /^\+\+\+ b\/(.+)$/.exec(line);
-    if (match?.[1] && match[1] !== '/dev/null') {
-      paths.add(match[1]);
-    }
-    if (paths.size >= 20) {
-      break;
-    }
+    if (match?.[1]) paths.add(match[1]);
+    if (paths.size >= 20) break;
   }
   return [...paths];
 }

@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
-import { addressAllowed, loadModelConnection, redactSecrets, validateModelEndpoint } from '../src/model';
+import {
+  addressAllowed,
+  loadModelConfiguration,
+  loadModelConnection,
+  redactSecrets,
+  validateModelEndpoint,
+} from '../src/model';
 
 const config = {
   version: 1,
@@ -28,6 +34,11 @@ test('selects only the referenced provider credential without a model allowlist'
   assert.ok(!JSON.stringify(connection).includes('unused-secret'));
   assert.equal(connection.contextWindow, 64000);
   assert.equal(connection.maxOutputTokens, 4096);
+
+  const loaded = loadModelConfiguration(JSON.stringify(config), credentials);
+  assert.deepEqual(loaded.credentialValues, ['router-secret', 'unused-secret']);
+  assert.equal(loaded.connection.credential?.value, 'router-secret');
+  assert.ok(!JSON.stringify(loaded.connection).includes('unused-secret'));
 });
 
 test('supports keyless local endpoints and explicit authentication schemes', () => {

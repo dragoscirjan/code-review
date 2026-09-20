@@ -7,8 +7,8 @@ import {
   findManagedComment,
   GitHubClient,
   parsePullRequestEvent,
-  truncateUtf8,
   type GitHubComment,
+  type PullRequestContext,
 } from '../src/github';
 
 const marker = '<!-- marker -->';
@@ -78,13 +78,56 @@ test('does not match a backend marker copied into review text', () => {
   assert.equal(findManagedComment([comment], 20, opencodeMarker)?.id, 4);
 });
 
-test('truncates by UTF-8 byte length', () => {
-  const source = 'a😀b'.repeat(20);
-  const result = truncateUtf8(source, 50);
+test('downloads, fatally decodes, parses, and safely packs the pull request diff', async () => {
+  const first = ['diff --git a/a.ts b/a.ts', '--- a/a.ts', '+++ b/a.ts', '@@ -1 +1 @@', '-old', '+new'].join('\n');
+  const second = first.replaceAll('a.ts', 'b.ts').replace('+new', `+${'x'.repeat(2_000)}`);
+  const client = new GitHubClient(
+    'token',
+    'https://api.example.test',
+    async () => new Response(`${first}\n${second}`, { status: 200 }),
+  );
+  const result = await client.getPullRequestDiff(
+    {
+      owner: 'owner',
+      repository: 'repository',
+      number: 7,
+      title: 'Change',
+      body: '',
+      url: 'https://example.test/7',
+      baseSha: 'base',
+      headSha: 'head',
+      author: 'contributor',
+    },
+    Buffer.byteLength(first, 'utf8') + 1,
+  );
+  assert.equal(result.text, first);
   assert.equal(result.truncated, true);
-  assert.equal(result.originalBytes, 120);
-  assert.ok(Buffer.byteLength(result.text, 'utf8') <= 50);
-  assert.match(result.text, /diff truncated/);
+  assert.equal(result.parsed?.files[0]?.apiPath, 'a.ts');
+});
+
+test('rejects invalid UTF-8 diff bytes instead of inserting replacement characters', async () => {
+  const client = new GitHubClient(
+    'token',
+    'https://api.example.test',
+    async () => new Response(Uint8Array.from([0xc3]), { status: 200 }),
+  );
+  await assert.rejects(
+    client.getPullRequestDiff(
+      {
+        owner: 'owner',
+        repository: 'repository',
+        number: 7,
+        title: 'Change',
+        body: '',
+        url: 'https://example.test/7',
+        baseSha: 'base',
+        headSha: 'head',
+        author: 'contributor',
+      },
+      1_000,
+    ),
+    /not valid UTF-8/,
+  );
 });
 
 test('downloads the exact base-revision archive with a size bound', async () => {
@@ -204,6 +247,139 @@ test('creates a managed comment when none exists', async () => {
   assert.deepEqual(JSON.parse(String(requests[1]?.init?.body)), {
     body: `new ${marker}`,
   });
+});
+
+test('reads the current pull request base and head revision', async () => {
+  const client = new GitHubClient(
+    'token',
+    'https://api.example.test',
+    async () =>
+      new Response(JSON.stringify({ base: { sha: 'base-now' }, head: { sha: 'head-now' }, changed_files: 2 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+  );
+  const revision = await client.getPullRequestRevision({
+    owner: 'owner',
+    repository: 'repository',
+    number: 7,
+    title: 'Change',
+    body: '',
+    url: 'https://example.test/7',
+    baseSha: 'base',
+    headSha: 'head',
+    author: 'contributor',
+  });
+  assert.deepEqual(revision, { baseSha: 'base-now', headSha: 'head-now', changedFiles: 2 });
+});
+
+test('creates one inline review batch with commit_id and line/side coordinates', async () => {
+  const requests: Array<{ url: string; init?: RequestInit }> = [];
+  const responses = [
+    new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    new Response(
+      JSON.stringify({ id: 9, body: 'review', html_url: 'https://example.test/review/9', user: { id: 20 } }),
+      { status: 201, headers: { 'Content-Type': 'application/json' } },
+    ),
+  ];
+  const client = new GitHubClient('token', 'https://api.example.test', async (url, init) => {
+    requests.push({ url: String(url), init });
+    const response = responses.shift();
+    assert.ok(response);
+    return response;
+  });
+  const context: PullRequestContext = {
+    owner: 'owner',
+    repository: 'repository',
+    number: 7,
+    title: 'Change',
+    body: '',
+    url: 'https://example.test/7',
+    baseSha: 'base',
+    headSha: 'head',
+    author: 'contributor',
+  };
+  await client.createOrReuseInlineReview(context, { id: 20, login: 'bot' }, 'head', marker, [
+    { path: 'src/a.ts', line: 3, side: 'RIGHT', body: `finding\n${marker}` },
+    { path: 'src/b.ts', line: 4, side: 'LEFT', body: `finding\n${marker}` },
+  ]);
+  const payload = JSON.parse(String(requests[1]?.init?.body)) as Record<string, unknown>;
+  assert.equal(payload.commit_id, 'head');
+  assert.equal(payload.event, 'COMMENT');
+  assert.deepEqual(payload.comments, [
+    { path: 'src/a.ts', line: 3, side: 'RIGHT', body: `finding\n${marker}` },
+    { path: 'src/b.ts', line: 4, side: 'LEFT', body: `finding\n${marker}` },
+  ]);
+  assert.equal(Object.hasOwn((payload.comments as Record<string, unknown>[])[0] ?? {}, 'position'), false);
+  assert.equal(requests[1]?.init?.method, 'POST');
+});
+
+test('suppresses GitHub write error bodies that could echo submitted secrets', async () => {
+  const responses = [
+    new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    new Response('provider-secret echoed by API', { status: 422 }),
+  ];
+  const client = new GitHubClient('token', 'https://api.example.test', async () => {
+    const response = responses.shift();
+    assert.ok(response);
+    return response;
+  });
+  await assert.rejects(
+    client.createOrReuseInlineReview(
+      {
+        owner: 'owner',
+        repository: 'repository',
+        number: 7,
+        title: 'Change',
+        body: '',
+        url: 'https://example.test/7',
+        baseSha: 'base',
+        headSha: 'head',
+        author: 'contributor',
+      },
+      { id: 20, login: 'bot' },
+      'head',
+      marker,
+      [{ path: 'a.ts', line: 1, side: 'RIGHT', body: marker }],
+    ),
+    (error: unknown) => error instanceof Error && /422/.test(error.message) && !/provider-secret/.test(error.message),
+  );
+});
+
+test('reuses only an owned inline review with the exact final marker', async () => {
+  let calls = 0;
+  const existing = {
+    id: 9,
+    body: `review\n\n${marker}`,
+    html_url: 'https://example.test/review/9',
+    user: { id: 20, login: 'bot' },
+  };
+  const client = new GitHubClient('token', 'https://api.example.test', async () => {
+    calls += 1;
+    return new Response(JSON.stringify([existing]), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  });
+  const result = await client.createOrReuseInlineReview(
+    {
+      owner: 'owner',
+      repository: 'repository',
+      number: 7,
+      title: 'Change',
+      body: '',
+      url: 'https://example.test/7',
+      baseSha: 'base',
+      headSha: 'head',
+      author: 'contributor',
+    },
+    { id: 20, login: 'bot' },
+    'head',
+    marker,
+    [{ path: 'a.ts', line: 1, side: 'RIGHT', body: marker }],
+  );
+  assert.equal(result.id, 9);
+  assert.equal(calls, 1);
 });
 
 test('parses a pull request event', () => {

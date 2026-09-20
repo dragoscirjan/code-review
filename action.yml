@@ -1,5 +1,5 @@
 name: Code Review
-description: Review a pull request with OpenCode or Pi through a configured model endpoint and publish one managed comment
+description: Review a pull request with OpenCode or Pi and publish a validated summary with optional inline comments
 author: Dragos Cirjan
 
 inputs:
@@ -45,9 +45,17 @@ inputs:
     required: false
     default: 24h
   max-diff-bytes:
-    description: Maximum UTF-8 diff size sent to the review backend
+    description: Maximum UTF-8 diff size sent to the review backend, packed at complete hunk boundaries
     required: false
     default: '120000'
+  minimum-confidence:
+    description: Inclusive minimum confidence for validated findings (0 through 1)
+    required: false
+    default: '0'
+  max-inline-comments:
+    description: Maximum validated findings published in one inline review batch (0 disables inline publication)
+    required: false
+    default: '0'
   timeout-seconds:
     description: Maximum review backend execution time
     required: false
@@ -57,7 +65,11 @@ outputs:
   comment-url:
     description: URL of the created or updated review comment
   diff-truncated:
-    description: Whether the pull request diff exceeded max-diff-bytes
+    description: Whether complete diff hunks were omitted to fit max-diff-bytes
+  review-url:
+    description: URL of the created or reused inline pull request review, empty when inline publication is disabled
+  inline-comment-count:
+    description: Number of validated inline comments selected for publication
   code-index-cache-hit:
     description: Whether a fresh code index database cache was restored
   code-indexer:

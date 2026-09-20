@@ -12,6 +12,11 @@ export interface ModelConnection {
   credential?: { type: 'bearer' | 'api-key'; value: string };
 }
 
+export interface LoadedModelConfiguration {
+  connection: ModelConnection;
+  credentialValues: readonly string[];
+}
+
 function object(value: unknown, keys?: readonly string[]): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('Model configuration must contain JSON objects');
@@ -54,7 +59,7 @@ function tokenLimit(value: unknown, fallback: number): number {
   return value;
 }
 
-export function loadModelConnection(config: string, credentials = '{}'): ModelConnection {
+export function loadModelConfiguration(config: string, credentials = '{}'): LoadedModelConfiguration {
   const root = object(parse(config, 'model-config'), ['version', 'provider', 'model']);
   if (root.version !== 1) throw new Error('model-config version must be 1');
   const provider = object(root.provider, ['api', 'baseUrl', 'network', 'credential']);
@@ -129,14 +134,21 @@ export function loadModelConnection(config: string, credentials = '{}'): ModelCo
   const maxOutputTokens = tokenLimit(model.maxOutputTokens, 8192);
   if (maxOutputTokens >= contextWindow) throw new Error('maxOutputTokens must be less than contextWindow');
   return {
-    api,
-    baseUrl: url.href.replace(/\/$/, ''),
-    network: provider.network,
-    modelId: identifier(model.id),
-    contextWindow,
-    maxOutputTokens,
-    credential,
+    connection: {
+      api,
+      baseUrl: url.href.replace(/\/$/, ''),
+      network: provider.network,
+      modelId: identifier(model.id),
+      contextWindow,
+      maxOutputTokens,
+      credential,
+    },
+    credentialValues: [...validated.values()].map((entry) => entry.value),
   };
+}
+
+export function loadModelConnection(config: string, credentials = '{}'): ModelConnection {
+  return loadModelConfiguration(config, credentials).connection;
 }
 
 const privateAddresses = new BlockList();
