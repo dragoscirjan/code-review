@@ -182,9 +182,6 @@ export class GitHubClient {
       );
     }
 
-    if (response.status === 204) {
-      return undefined as T;
-    }
     return (await response.json()) as T;
   }
 
@@ -237,41 +234,25 @@ export class GitHubClient {
     body: string,
   ): Promise<GitHubComment> {
     const comments = await this.listComments(context);
-    const acceptedMarkers =
-      typeof markers === "string" ? [markers] : [...markers];
-    const matching = comments.filter(
-      (comment) =>
-        comment.user?.id === actor.id &&
-        acceptedMarkers.some((marker) => hasFinalMarker(comment, marker)),
-    );
-    const existing = findManagedComment(comments, actor.id, acceptedMarkers);
-    const published = existing
-      ? await this.request<GitHubComment>(
-          `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/issues/comments/${existing.id}`,
-          {
-            method: "PATCH",
-            body: JSON.stringify({ body }),
-            headers: { "Content-Type": "application/json" },
-          },
-        )
-      : await this.request<GitHubComment>(
-          `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/issues/${context.number}/comments`,
-          {
-            method: "POST",
-            body: JSON.stringify({ body }),
-            headers: { "Content-Type": "application/json" },
-          },
-        );
-
-    for (const duplicate of matching) {
-      if (duplicate.id === existing?.id) {
-        continue;
-      }
-      await this.request<void>(
-        `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/issues/comments/${duplicate.id}`,
-        { method: "DELETE" },
+    const existing = findManagedComment(comments, actor.id, markers);
+    if (existing) {
+      return this.request<GitHubComment>(
+        `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/issues/comments/${existing.id}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ body }),
+          headers: { "Content-Type": "application/json" },
+        },
       );
     }
-    return published;
+
+    return this.request<GitHubComment>(
+      `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/issues/${context.number}/comments`,
+      {
+        method: "POST",
+        body: JSON.stringify({ body }),
+        headers: { "Content-Type": "application/json" },
+      },
+    );
   }
 }

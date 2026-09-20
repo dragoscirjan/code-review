@@ -247,9 +247,6 @@ var GitHubClient = class {
         `GitHub API ${init.method ?? "GET"} ${path} failed with ${response.status}: ${message}`
       );
     }
-    if (response.status === 204) {
-      return void 0;
-    }
     return await response.json();
   }
   async getAuthenticatedActor() {
@@ -288,19 +285,18 @@ var GitHubClient = class {
   }
   async upsertManagedComment(context, actor, markers, body) {
     const comments = await this.listComments(context);
-    const acceptedMarkers = typeof markers === "string" ? [markers] : [...markers];
-    const matching = comments.filter(
-      (comment) => comment.user?.id === actor.id && acceptedMarkers.some((marker) => hasFinalMarker(comment, marker))
-    );
-    const existing = findManagedComment(comments, actor.id, acceptedMarkers);
-    const published = existing ? await this.request(
-      `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/issues/comments/${existing.id}`,
-      {
-        method: "PATCH",
-        body: JSON.stringify({ body }),
-        headers: { "Content-Type": "application/json" }
-      }
-    ) : await this.request(
+    const existing = findManagedComment(comments, actor.id, markers);
+    if (existing) {
+      return this.request(
+        `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/issues/comments/${existing.id}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ body }),
+          headers: { "Content-Type": "application/json" }
+        }
+      );
+    }
+    return this.request(
       `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/issues/${context.number}/comments`,
       {
         method: "POST",
@@ -308,16 +304,6 @@ var GitHubClient = class {
         headers: { "Content-Type": "application/json" }
       }
     );
-    for (const duplicate of matching) {
-      if (duplicate.id === existing?.id) {
-        continue;
-      }
-      await this.request(
-        `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/issues/comments/${duplicate.id}`,
-        { method: "DELETE" }
-      );
-    }
-    return published;
   }
 };
 
