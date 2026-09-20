@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'vitest';
 import {
+  extractExplicitSameRepositoryIssueNumbers,
   findManagedComment,
   GitHubClient,
   parsePullRequestEvent,
@@ -130,6 +131,118 @@ test('rejects invalid UTF-8 diff bytes instead of inserting replacement characte
   );
 });
 
+test('extracts only explicit same-repository issue references in textual order', () => {
+  const context: PullRequestContext = {
+    owner: 'owner',
+    repository: 'repository',
+    number: 7,
+    title: 'Change',
+    body: '',
+    url: 'https://example.test/7',
+    baseSha: 'base',
+    headSha: 'head',
+    author: 'contributor',
+  };
+  const numbers = extractExplicitSameRepositoryIssueNumbers(
+    context,
+    'Fixes #23 and mentions #99',
+    [
+      'Closes owner/repository#24.',
+      'https://github.com/owner/repository/issues/25',
+      'https://github.com/owner/other/issues/26',
+      'https://github.com/owner/repository/pull/27',
+      'evilhttps://github.com/owner/repository/issues/31',
+      '`fixes #28`',
+      '```',
+      'closes #29',
+      '```',
+      'resolves owner/other#30',
+    ].join('\n'),
+    5,
+  );
+  assert.deepEqual(numbers, [23, 24, 25]);
+});
+
+test('reads bounded regular guidance at the exact base revision and rejects symlinks', async () => {
+  const requests: string[] = [];
+  const responses = [
+    new Response(
+      JSON.stringify({
+        type: 'file',
+        sha: 'blob-sha',
+        encoding: 'base64',
+        content: Buffer.from('rules\n'.repeat(20)).toString('base64'),
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ),
+    new Response(JSON.stringify({ type: 'file', sha: 'link-sha', encoding: 'base64', content: '', target: 'secret' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }),
+  ];
+  const client = new GitHubClient('token', 'https://api.example.test', async (url) => {
+    requests.push(String(url));
+    const response = responses.shift();
+    assert.ok(response);
+    return response;
+  });
+  const context: PullRequestContext = {
+    owner: 'owner',
+    repository: 'repository',
+    number: 7,
+    title: 'Change',
+    body: '',
+    url: 'url',
+    baseSha: 'base sha',
+    headSha: 'head',
+    author: 'author',
+  };
+  const guidance = await client.getRepositoryTextAtRevision(context, 'docs/AGENTS.md', 'base sha', 25);
+  assert.equal(guidance.status, 'found');
+  assert.equal(guidance.truncated, true);
+  assert.equal(guidance.blobSha, 'blob-sha');
+  assert.ok(Buffer.byteLength(guidance.text ?? '', 'utf8') <= 25);
+  assert.match(requests[0] ?? '', /contents\/docs\/AGENTS\.md\?ref=base%20sha$/);
+  const link = await client.getRepositoryTextAtRevision(context, 'AGENTS.md', 'base sha', 25);
+  assert.equal(link.status, 'unavailable');
+  assert.equal(link.reason, 'not-a-regular-file');
+});
+
+test('reads a bounded same-repository issue response and rejects oversized data', async () => {
+  const issue = {
+    id: 44,
+    number: 23,
+    title: 'Context',
+    body: '## Acceptance criteria\n- bounded',
+    html_url: 'https://github.com/owner/repository/issues/23',
+    updated_at: '2026-09-20T00:00:00Z',
+  };
+  const responses = [
+    new Response(JSON.stringify(issue), { status: 200 }),
+    new Response(JSON.stringify({ ...issue, body: 'x'.repeat(1_000) }), { status: 200 }),
+  ];
+  const client = new GitHubClient('token', 'https://api.example.test', async () => {
+    const response = responses.shift();
+    assert.ok(response);
+    return response;
+  });
+  const context: PullRequestContext = {
+    owner: 'owner',
+    repository: 'repository',
+    number: 7,
+    title: 'Change',
+    body: '',
+    url: 'url',
+    baseSha: 'base',
+    headSha: 'head',
+    author: 'author',
+  };
+  const result = await client.getIssueContext(context, 23, 10_000);
+  assert.equal(result.number, 23);
+  assert.equal(result.isPullRequest, false);
+  await assert.rejects(client.getIssueContext(context, 23, 100), /response limit/);
+});
+
 test('downloads the exact base-revision archive with a size bound', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'code-review-archive-'));
   const destination = join(directory, 'base.tar.gz');
@@ -157,6 +270,43 @@ test('downloads the exact base-revision archive with a size bound', async () => 
     );
     assert.equal(bytes, 13);
     assert.equal(await readFile(destination, 'utf8'), 'archive-bytes');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('aborts stalled guidance, issue, revision, diff, and archive requests', async () => {
+  const context: PullRequestContext = {
+    owner: 'owner',
+    repository: 'repository',
+    number: 7,
+    title: 'Change',
+    body: '',
+    url: 'https://example.test/7',
+    baseSha: 'base',
+    headSha: 'head',
+    author: 'contributor',
+  };
+  const client = new GitHubClient('token', 'https://api.example.test', async (_url, init) => {
+    const signal = init?.signal;
+    return new Promise<Response>((_resolve, reject) => {
+      if (signal?.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+  });
+  const directory = await mkdtemp(join(tmpdir(), 'code-review-stalled-'));
+  try {
+    const requests = [
+      client.getRepositoryTextAtRevision(context, 'AGENTS.md', 'base', 1_000, AbortSignal.timeout(5)),
+      client.getIssueContext(context, 23, 1_000, AbortSignal.timeout(5)),
+      client.getPullRequestRevision(context, AbortSignal.timeout(5)),
+      client.getPullRequestDiff(context, 1_000, AbortSignal.timeout(5)),
+      client.downloadRepositoryArchive(context, 'base', join(directory, 'archive.tar'), 1_000, AbortSignal.timeout(5)),
+    ];
+    await Promise.all(requests.map(async (request) => assert.rejects(request, /timeout|aborted/iu)));
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -254,10 +404,20 @@ test('reads the current pull request base and head revision', async () => {
     'token',
     'https://api.example.test',
     async () =>
-      new Response(JSON.stringify({ base: { sha: 'base-now' }, head: { sha: 'head-now' }, changed_files: 2 }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }),
+      new Response(
+        JSON.stringify({
+          base: { sha: 'base-now' },
+          head: { sha: 'head-now' },
+          changed_files: 2,
+          title: 'Authoritative change',
+          body: null,
+          user: { login: 'api-contributor' },
+        }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        },
+      ),
   );
   const revision = await client.getPullRequestRevision({
     owner: 'owner',
@@ -270,7 +430,44 @@ test('reads the current pull request base and head revision', async () => {
     headSha: 'head',
     author: 'contributor',
   });
-  assert.deepEqual(revision, { baseSha: 'base-now', headSha: 'head-now', changedFiles: 2 });
+  assert.deepEqual(revision, {
+    baseSha: 'base-now',
+    headSha: 'head-now',
+    changedFiles: 2,
+    title: 'Authoritative change',
+    body: '',
+    author: 'api-contributor',
+  });
+});
+
+test.each([
+  ['missing title', { body: '', user: { login: 'api-contributor' } }, /pull_request.title/],
+  ['non-null non-string body', { title: 'Change', body: 42, user: { login: 'api-contributor' } }, /body/],
+  ['missing author', { title: 'Change', body: '', user: {} }, /user.login/],
+] as const)('rejects non-authoritative pull request metadata: %s', async (_name, metadata, expected) => {
+  const client = new GitHubClient(
+    'token',
+    'https://api.example.test',
+    async () =>
+      new Response(
+        JSON.stringify({ base: { sha: 'base-now' }, head: { sha: 'head-now' }, changed_files: 2, ...metadata }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+  );
+  await assert.rejects(
+    client.getPullRequestRevision({
+      owner: 'owner',
+      repository: 'repository',
+      number: 7,
+      title: 'stale event title',
+      body: 'stale event body',
+      url: 'https://example.test/7',
+      baseSha: 'base',
+      headSha: 'head',
+      author: 'stale-event-author',
+    }),
+    expected,
+  );
 });
 
 test('creates one inline review batch with commit_id and line/side coordinates', async () => {

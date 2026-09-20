@@ -1,15 +1,18 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'vitest';
+import { packReviewContext, type ContextQueryPlan } from '../src/context-planner';
 import { GitHubClient, type PullRequestContext } from '../src/github';
 import {
   buildIndexSearchQuery,
   limitIndexContext,
-  runCodeIndexer,
+  runCodeIndexer as runCodeIndexerImplementation,
   runCommand,
   type CacheAdapter,
+  type CodeIndexRequest,
   type CommandRunner,
 } from '../src/indexer';
 
@@ -44,15 +47,23 @@ function github(): GitHubClient {
   );
 }
 
+async function fakeArchiveExtractor(
+  _archivePath: string,
+  destination: string,
+): Promise<{ files: number; bytes: number }> {
+  const content = 'export const value = true;\n';
+  await mkdir(join(destination, 'src'), { recursive: true });
+  await writeFile(join(destination, 'src', 'index.ts'), content);
+  return { files: 1, bytes: Buffer.byteLength(content) };
+}
+
+function runCodeIndexer(request: CodeIndexRequest): ReturnType<typeof runCodeIndexerImplementation> {
+  return runCodeIndexerImplementation({ ...request, archiveExtractor: fakeArchiveExtractor });
+}
+
 function fakeRunner(calls: Array<{ command: string; args: string[]; environment: NodeJS.ProcessEnv }>): CommandRunner {
   return async (command, args, options) => {
     calls.push({ command, args, environment: options.environment });
-    if (command === 'tar') {
-      const destination = args[args.indexOf('-C') + 1];
-      assert.ok(destination);
-      await mkdir(join(destination, 'src'), { recursive: true });
-      await writeFile(join(destination, 'src', 'index.ts'), 'export const value = true;\n');
-    }
     if (args.includes('index') || args.includes('analyze')) {
       const storage = options.environment.GITNEXUS_STORAGE_PATH ?? args[args.indexOf('--path') + 1];
       if (storage) {
@@ -62,7 +73,7 @@ function fakeRunner(calls: Array<{ command: string; args: string[]; environment:
     }
     if (args.includes('query')) {
       return {
-        stdout: 'GitNexus Query\n{"processes":[{"summary":"main to review"}]}\n',
+        stdout: '{"processes":[{"summary":"main to review"}]}',
         stderr: '',
       };
     }
@@ -446,6 +457,352 @@ test('terminates indexer descendants after a non-zero exit', { skip: process.pla
       }
     }
     assert.equal(alive, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('executes fixed per-kind query argument arrays in deterministic order', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'code-review-query-plan-'));
+  const calls: Array<{ command: string; args: string[]; environment: NodeJS.ProcessEnv }> = [];
+  const anchor = {
+    value: 'reviewValue',
+    kind: 'type' as const,
+    language: 'javascript-typescript',
+    path: 'src/value.ts',
+    provenance: [{ path: 'src/value.ts', side: 'RIGHT' as const, line: 1, lineKind: 'addition' as const }],
+  };
+  const queries: ContextQueryPlan[] = [
+    { id: 'q01', kind: 'definition-and-types', anchor },
+    { id: 'q02', kind: 'callers-and-tests', anchor },
+    { id: 'q03', kind: 'callees', anchor },
+    { id: 'q04', kind: 'configuration', anchor },
+  ];
+  try {
+    const result = await runCodeIndexer({
+      indexer: 'cgc',
+      cacheKey: 'query-plan',
+      cacheTtlMs: 86_400_000,
+      github: github(),
+      pullRequest,
+      queries,
+      cache: cacheAdapter().adapter,
+      commandRunner: fakeRunner(calls),
+      temporaryRoot: root,
+    });
+    const queryCalls = calls
+      .filter(
+        (call) => call.args.includes('find') || (call.args.includes('analyze') && !call.args.includes('--index-only')),
+      )
+      .map((call) => call.args.slice(call.args.indexOf(join(root, 'code-review-index')) >= 0 ? 4 : 4));
+    assert.deepEqual(
+      queryCalls.map((args) => args.slice(0, 4)),
+      [
+        ['find', 'name', 'reviewValue', '--no-fuzzy'],
+        ['analyze', 'tree', 'reviewValue', '--file'],
+        ['analyze', 'callers', 'reviewValue', '--file'],
+        ['analyze', 'calls', 'reviewValue', '--file'],
+        ['find', 'content', 'reviewValue'],
+      ],
+    );
+    assert.equal(result.results.length, 4);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('executes every GitNexus query category with fixed argument arrays', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'code-review-gitnexus-query-plan-'));
+  const calls: Array<{ command: string; args: string[]; environment: NodeJS.ProcessEnv }> = [];
+  const base = fakeRunner(calls);
+  const runner: CommandRunner = async (command, args, options) => {
+    if (['context', 'impact', 'query'].includes(args[0] ?? '')) {
+      calls.push({ command, args, environment: options.environment });
+      return { stdout: JSON.stringify({ results: [{ name: 'reviewValue' }] }), stderr: '' };
+    }
+    return base(command, args, options);
+  };
+  const anchor = {
+    value: 'reviewValue',
+    kind: 'type' as const,
+    language: 'javascript-typescript',
+    path: 'src/value.ts',
+    provenance: [{ path: 'src/value.ts', side: 'RIGHT' as const, line: 1, lineKind: 'addition' as const }],
+  };
+  const queries: ContextQueryPlan[] = [
+    { id: 'q01', kind: 'definition-and-types', anchor },
+    { id: 'q02', kind: 'callers-and-tests', anchor },
+    { id: 'q03', kind: 'callees', anchor },
+    { id: 'q04', kind: 'configuration', anchor },
+  ];
+  try {
+    const result = await runCodeIndexer({
+      indexer: 'gitnexus',
+      cacheKey: 'gitnexus-query-plan',
+      cacheTtlMs: 86_400_000,
+      github: github(),
+      pullRequest,
+      queries,
+      cache: cacheAdapter().adapter,
+      commandRunner: runner,
+      temporaryRoot: root,
+    });
+    const queryCalls = calls.filter((call) => ['context', 'impact', 'query'].includes(call.args[0] ?? ''));
+    assert.deepEqual(
+      queryCalls.map((call) => call.args),
+      [
+        [
+          'context',
+          'reviewValue',
+          '--repo',
+          'code-review-base',
+          '--file',
+          'src/value.ts',
+          '--limit',
+          '20',
+          '--content',
+        ],
+        [
+          'impact',
+          'reviewValue',
+          '--repo',
+          'code-review-base',
+          '--file',
+          'src/value.ts',
+          '--direction',
+          'upstream',
+          '--depth',
+          '2',
+          '--include-tests',
+          '--limit',
+          '20',
+        ],
+        [
+          'impact',
+          'reviewValue',
+          '--repo',
+          'code-review-base',
+          '--file',
+          'src/value.ts',
+          '--direction',
+          'downstream',
+          '--depth',
+          '1',
+          '--limit',
+          '20',
+        ],
+        ['query', 'reviewValue configuration', '--repo', 'code-review-base', '--limit', '3', '--content'],
+      ],
+    );
+    assert.deepEqual(
+      result.results.map((item) => item.status),
+      ['included', 'included', 'included', 'included'],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('rejects option-looking and control-character query arguments before adapter launch', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'code-review-unsafe-query-'));
+  const calls: Array<{ command: string; args: string[]; environment: NodeJS.ProcessEnv }> = [];
+  const provenance = [{ path: 'src/value.ts', side: 'RIGHT' as const, line: 1, lineKind: 'addition' as const }];
+  const queries: ContextQueryPlan[] = [
+    {
+      id: 'q01',
+      kind: 'definition-and-types',
+      anchor: { value: '--help', kind: 'lexical', language: 'test', path: 'src/value.ts', provenance },
+    },
+    {
+      id: 'q02',
+      kind: 'callers-and-tests',
+      anchor: { value: 'safeValue', kind: 'lexical', language: 'test', path: '-option.ts', provenance },
+    },
+    {
+      id: 'q03',
+      kind: 'callees',
+      anchor: { value: 'safeValue', kind: 'lexical', language: 'test', path: 'src/unsafe\u202E.ts', provenance },
+    },
+  ];
+  try {
+    const result = await runCodeIndexer({
+      indexer: 'cgc',
+      cacheKey: 'unsafe-query',
+      cacheTtlMs: 86_400_000,
+      github: github(),
+      pullRequest,
+      queries,
+      cache: cacheAdapter().adapter,
+      commandRunner: fakeRunner(calls),
+      temporaryRoot: root,
+    });
+    assert.deepEqual(
+      result.results.map(({ status, reason }) => ({ status, reason })),
+      [
+        { status: 'unavailable', reason: 'query-failed' },
+        { status: 'unavailable', reason: 'query-failed' },
+        { status: 'unavailable', reason: 'query-failed' },
+      ],
+    );
+    assert.equal(
+      calls.some(
+        (call) =>
+          call.args.includes('--help') || call.args.includes('-option.ts') || call.args.includes('src/unsafe\u202E.ts'),
+      ),
+      false,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('classifies query timeouts and output limits without aborting later queries', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'code-review-query-limits-'));
+  const anchor = {
+    value: 'reviewValue',
+    kind: 'symbol' as const,
+    language: 'javascript-typescript',
+    path: 'src/value.ts',
+    provenance: [{ path: 'src/value.ts', side: 'RIGHT' as const, line: 1, lineKind: 'addition' as const }],
+  };
+  const queries: ContextQueryPlan[] = [
+    { id: 'q01', kind: 'definition-and-types', anchor },
+    { id: 'q02', kind: 'callers-and-tests', anchor },
+    { id: 'q03', kind: 'callees', anchor },
+  ];
+  const base = fakeRunner([]);
+  const runner: CommandRunner = async (command, args, options) => {
+    if (args.includes('name')) throw new Error('cgc timed out after 5000 ms');
+    if (args.includes('callers')) throw new Error(`cgc output exceeded ${options.maximumOutputBytes} bytes`);
+    if (args.includes('calls')) return { stdout: 'callee result', stderr: '' };
+    return base(command, args, options);
+  };
+  try {
+    const result = await runCodeIndexer({
+      indexer: 'cgc',
+      cacheKey: 'query-limits',
+      cacheTtlMs: 86_400_000,
+      github: github(),
+      pullRequest,
+      queries,
+      cache: cacheAdapter().adapter,
+      commandRunner: runner,
+      temporaryRoot: root,
+    });
+    assert.deepEqual(
+      result.results.map(({ status, reason }) => ({ status, reason })),
+      [
+        { status: 'timed-out', reason: 'query-timeout' },
+        { status: 'unavailable', reason: 'query-output-limit' },
+        { status: 'included', reason: undefined },
+      ],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('truncates query output at an exact UTF-8 boundary and digests only included bytes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'code-review-query-utf8-'));
+  const anchor = {
+    value: 'reviewValue',
+    kind: 'symbol' as const,
+    language: 'javascript-typescript',
+    path: 'src/value.ts',
+    provenance: [{ path: 'src/value.ts', side: 'RIGHT' as const, line: 1, lineKind: 'addition' as const }],
+  };
+  const base = fakeRunner([]);
+  const runner: CommandRunner = async (command, args, options) => {
+    if (args.includes('name')) return { stdout: `${'a'.repeat(5_999)}😀tail`, stderr: '' };
+    return base(command, args, options);
+  };
+  try {
+    const result = await runCodeIndexer({
+      indexer: 'cgc',
+      cacheKey: 'query-utf8',
+      cacheTtlMs: 86_400_000,
+      github: github(),
+      pullRequest,
+      queries: [{ id: 'q01', kind: 'definition-and-types', anchor }],
+      cache: cacheAdapter().adapter,
+      commandRunner: runner,
+      temporaryRoot: root,
+    });
+    const queryResult = result.results[0];
+    assert.equal(queryResult?.status, 'truncated');
+    assert.equal(queryResult?.content, 'a'.repeat(5_999));
+    assert.doesNotMatch(queryResult?.content ?? '', /�/u);
+    const bundle = packReviewContext(
+      [
+        {
+          source: {
+            source: 'code-index',
+            sourceId: 'q01',
+            status: 'truncated',
+            acquiredBytes: queryResult?.acquiredBytes ?? 0,
+            includedBytes: 0,
+          },
+          content: queryResult?.content,
+        },
+      ],
+      {
+        indexer: 'cgc',
+        anchorsPlanned: 1,
+        queriesPlanned: 1,
+        queriesCompleted: 1,
+        queriesTimedOut: 0,
+        queryByteLimitHits: 0,
+        queryBudgetSkipped: 0,
+        guidance: { agents: 'unavailable', contributing: 'unavailable' },
+        configuration: { candidates: 0, included: 0, unavailable: 0, truncated: 0 },
+        linkedIssues: { discovered: 0, fetched: 0, unavailable: 0 },
+      },
+    );
+    assert.equal(
+      bundle.items[0]?.source.contentDigest,
+      `sha256:${createHash('sha256').update('a'.repeat(5_999)).digest('hex')}`,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('skips remaining queries after the aggregate query deadline', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'code-review-query-deadline-'));
+  const anchor = {
+    value: 'reviewValue',
+    kind: 'symbol' as const,
+    language: 'javascript-typescript',
+    path: 'src/value.ts',
+    provenance: [{ path: 'src/value.ts', side: 'RIGHT' as const, line: 1, lineKind: 'addition' as const }],
+  };
+  const queries: ContextQueryPlan[] = [
+    { id: 'q01', kind: 'definition-and-types', anchor },
+    { id: 'q02', kind: 'callers-and-tests', anchor },
+    { id: 'q03', kind: 'callees', anchor },
+  ];
+  const times = [0, 0, 45_000, 45_000];
+  try {
+    const result = await runCodeIndexer({
+      indexer: 'cgc',
+      cacheKey: 'query-deadline',
+      cacheTtlMs: 86_400_000,
+      github: github(),
+      pullRequest,
+      queries,
+      cache: cacheAdapter().adapter,
+      commandRunner: fakeRunner([]),
+      clock: () => times.shift() ?? 45_000,
+      temporaryRoot: root,
+    });
+    assert.deepEqual(
+      result.results.map(({ status, reason }) => ({ status, reason })),
+      [
+        { status: 'empty', reason: undefined },
+        { status: 'budget-exhausted', reason: 'aggregate-time-limit' },
+        { status: 'budget-exhausted', reason: 'aggregate-time-limit' },
+      ],
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'vitest';
 import type { CodeIndexer } from '../src/config';
+import type { ContextQueryPlan } from '../src/context-planner';
 import { GitHubClient, type PullRequestContext } from '../src/github';
 import { runCodeIndexer, type CacheAdapter } from '../src/indexer';
 
@@ -59,17 +60,33 @@ test(
         return 1;
       },
     };
+    const typeAnchor = {
+      value: 'GitHubClient',
+      kind: 'type' as const,
+      language: 'javascript-typescript',
+      path: 'src/github.ts',
+      provenance: [{ path: 'src/github.ts', side: 'RIGHT' as const, line: 1, lineKind: 'addition' as const }],
+    };
+    const symbolAnchor = {
+      value: 'runReview',
+      kind: 'symbol' as const,
+      language: 'javascript-typescript',
+      path: 'src/review.ts',
+      provenance: [{ path: 'src/review.ts', side: 'RIGHT' as const, line: 1, lineKind: 'addition' as const }],
+    };
+    const queries: ContextQueryPlan[] = [
+      { id: 'q01', kind: 'definition-and-types', anchor: typeAnchor },
+      { id: 'q02', kind: 'callers-and-tests', anchor: symbolAnchor },
+      { id: 'q03', kind: 'callees', anchor: symbolAnchor },
+      { id: 'q04', kind: 'configuration', anchor: symbolAnchor },
+    ];
     const request = {
       indexer,
       cacheKey: 'integration-index-v1',
       cacheTtlMs: 86_400_000,
       github: new GitHubClient(process.env.GITHUB_TOKEN ?? ''),
       pullRequest,
-      diff: {
-        text: '+++ b/src/index.ts\n+const integration = true;',
-        originalBytes: 49,
-        truncated: false,
-      },
+      queries,
       cache: localCache,
       now: () => Date.parse('2026-09-20T12:00:00Z'),
     } as const;
@@ -81,7 +98,11 @@ test(
       });
       assert.equal(first.cacheHit, false);
       assert.match(first.context, new RegExp(`Indexer: ${indexer}`));
-      assert.ok(first.context.length > 200, 'expected indexed query context');
+      assert.equal(first.results.length, queries.length);
+      assert.ok(
+        first.results.every((result) => ['included', 'empty', 'truncated'].includes(result.status)),
+        `expected every ${indexer} command category to complete`,
+      );
 
       const second = await runCodeIndexer({
         ...request,
@@ -89,6 +110,8 @@ test(
       });
       assert.equal(second.cacheHit, true);
       assert.match(second.context, /Base revision:/);
+      assert.equal(second.results.length, queries.length);
+      assert.ok(second.results.every((result) => ['included', 'empty', 'truncated'].includes(result.status)));
     } finally {
       await Promise.all([
         rm(cacheRoot, { recursive: true, force: true }),

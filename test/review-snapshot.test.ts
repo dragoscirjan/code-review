@@ -19,17 +19,26 @@ const diff = prepareReviewedDiff(
   ['diff --git a/a.ts b/a.ts', '--- a/a.ts', '+++ b/a.ts', '@@ -1 +1 @@', '-old', '+new'].join('\n'),
   10_000,
 );
-const revision: PullRequestRevision = { baseSha: 'base', headSha: 'head', changedFiles: 1 };
+const revision: PullRequestRevision = {
+  baseSha: 'base',
+  headSha: 'head',
+  changedFiles: 1,
+  title: 'Change',
+  body: '',
+  author: 'author',
+};
 
 test('acquires a diff only when event, before, and after revisions agree', async () => {
   let revisionReads = 0;
   const result = await acquireReviewedSnapshot(
     {
-      async getPullRequestRevision() {
+      async getPullRequestRevision(_context, signal) {
+        assert.equal(signal instanceof AbortSignal, true);
         revisionReads += 1;
         return revision;
       },
-      async getPullRequestDiff() {
+      async getPullRequestDiff(_context, _maximumBytes, signal) {
+        assert.equal(signal instanceof AbortSignal, true);
         return diff;
       },
     },
@@ -100,11 +109,14 @@ test('rejects an incomplete GitHub changed-file set', async () => {
   );
 });
 
-test('final freshness check rejects changed head, base, or changed-file count', async () => {
+test('final freshness check rejects changed revision or mutable pull request metadata', async () => {
   for (const changed of [
     { ...revision, headSha: 'replacement' },
     { ...revision, baseSha: 'replacement' },
     { ...revision, changedFiles: 2 },
+    { ...revision, title: 'Replacement title' },
+    { ...revision, body: 'Replacement body' },
+    { ...revision, author: 'replacement-author' },
   ]) {
     await assert.rejects(
       assertSnapshotFresh(

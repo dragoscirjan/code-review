@@ -2,9 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { appendFile } from 'node:fs/promises';
 import { getActionInput, loadActionConfig, managedCommentMarkers } from './config';
 import { GitHubClient, loadPullRequestEvent } from './github';
-import { runCodeIndexer } from './indexer';
 import { redactSecrets } from './model';
 import { runReview } from './review';
+import { assertLinkedIssuesFresh, buildReviewContext } from './review-context';
 import { executeAndPublishReview } from './review-publication';
 import { acquireReviewedSnapshot, assertSnapshotFresh } from './review-snapshot';
 
@@ -43,30 +43,28 @@ async function main(): Promise<void> {
     `Reviewing ${pullRequest.owner}/${pullRequest.repository}#${pullRequest.number} at ${pullRequest.headSha.slice(0, 12)} with ${config.backend}`,
   );
   const snapshot = await acquireReviewedSnapshot(client, pullRequest, config.maxDiffBytes);
+  const authoritativePullRequest = snapshot.pullRequest;
   const diff = snapshot.diff;
   const actor = await client.getAuthenticatedActor();
   console.log(
     `Fetched ${diff.originalBytes} diff bytes${diff.truncated ? `; safely limited to ${config.maxDiffBytes}` : ''}`,
   );
 
-  let codeIndexContext: string | undefined;
-  let codeIndexCacheHit = false;
   if (config.codeIndexer !== 'none') {
-    console.log(`Installing and running ${config.codeIndexer} against the base revision`);
-    const codeIndex = await runCodeIndexer({
-      indexer: config.codeIndexer,
-      cacheKey: config.codeIndexCacheKey,
-      cacheTtlMs: config.codeIndexCacheTtlMs,
-      github: client,
-      pullRequest,
-      diff,
-    });
-    codeIndexContext = codeIndex.context;
-    codeIndexCacheHit = codeIndex.cacheHit;
-    console.log(
-      `Prepared ${Buffer.byteLength(codeIndex.context, 'utf8')} code index context bytes${codeIndex.cacheHit ? ' from a fresh cache' : ''}`,
-    );
+    console.log(`Installing and running ${config.codeIndexer} against the exact base revision`);
   }
+  const reviewContext = await buildReviewContext({
+    client,
+    pullRequest: authoritativePullRequest,
+    diff,
+    indexer: config.codeIndexer,
+    cacheKey: config.codeIndexCacheKey,
+    cacheTtlMs: config.codeIndexCacheTtlMs,
+  });
+  const codeIndexCacheHit = reviewContext.cacheHit;
+  console.log(
+    `Prepared ${reviewContext.bundle.metadata.includedBytes} bounded review context bytes${codeIndexCacheHit ? ' from a fresh index cache' : ''}`,
+  );
 
   const markers = managedCommentMarkers(config.backend);
   const publication = await executeAndPublishReview({
@@ -79,13 +77,17 @@ async function main(): Promise<void> {
         piVersion: config.piVersion,
         customPrompt: config.prompt,
         timeoutMs: config.timeoutMs,
-        pullRequest,
+        pullRequest: authoritativePullRequest,
         diff,
-        codeIndexContext,
+        reviewContext: reviewContext.bundle,
+        secrets,
       }),
-    assertFresh: () => assertSnapshotFresh(client, pullRequest, snapshot.revision),
+    assertFresh: async () => {
+      await assertSnapshotFresh(client, authoritativePullRequest, snapshot.revision);
+      await assertLinkedIssuesFresh(client, authoritativePullRequest, reviewContext.linkedIssueFingerprints);
+    },
     client,
-    pullRequest,
+    pullRequest: authoritativePullRequest,
     diff,
     actor,
     markers,
@@ -94,12 +96,15 @@ async function main(): Promise<void> {
     secrets,
     minimumConfidence: config.minimumConfidence,
     maximumInlineComments: config.maxInlineComments,
+    contextMetadata: reviewContext.bundle.metadata,
   });
 
   await setOutput('comment-url', publication.comment.html_url);
   await setOutput('review-url', publication.inlineReview?.html_url ?? '');
   await setOutput('inline-comment-count', String(publication.assessment.counts.inlineSelected));
   await setOutput('diff-truncated', String(diff.truncated));
+  await setOutput('context-truncated', String(reviewContext.bundle.metadata.truncated));
+  await setOutput('context-unavailable-source-count', String(reviewContext.bundle.metadata.unavailableSourceCount));
   await setOutput('code-indexer', config.codeIndexer);
   await setOutput('code-index-cache-hit', String(codeIndexCacheHit));
   console.log(`Published review: ${publication.comment.html_url}`);

@@ -4,19 +4,35 @@ import { lstat, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DEFAULT_CGC_VERSION, DEFAULT_GITNEXUS_VERSION, type CodeIndexer } from './config';
+import {
+  MAX_QUERY_INCLUDED_BYTES,
+  MAX_QUERY_OUTPUT_BYTES,
+  MAX_QUERY_PHASE_OUTPUT_BYTES,
+  MAX_QUERY_PHASE_TIMEOUT_MS,
+  MAX_QUERY_TIMEOUT_MS,
+  truncateUtf8,
+  type ContextQueryPlan,
+  type ContextSourceStatus,
+} from './context-planner';
 import type { GitHubClient, PullRequestContext, PullRequestDiff } from './github';
+import { extractRepositoryArchive } from './repository-archive';
 
+const MAX_ARCHIVE_DOWNLOAD_BYTES = 250 * 1024 * 1024;
+export const ARCHIVE_DOWNLOAD_TIMEOUT_MS = 120_000;
 const MAX_COMMAND_OUTPUT_BYTES = 5_000_000;
-const MAX_INDEX_CONTEXT_BYTES = 50_000;
 const INDEX_COMMAND_TIMEOUT_MS = 20 * 60_000;
 const INSTALL_COMMAND_TIMEOUT_MS = 10 * 60_000;
 const CACHE_SCHEMA = 'index-v1';
+const MAX_CACHE_FILES = 100_000;
+const MAX_CACHE_FILE_BYTES = 512 * 1024 * 1024;
+const MAX_CACHE_BYTES = 2 * 1024 * 1024 * 1024;
 
 export interface CommandOptions {
   cwd: string;
   environment: NodeJS.ProcessEnv;
   timeoutMs: number;
   killGraceMs?: number;
+  maximumOutputBytes?: number;
 }
 
 export type CommandRunner = (
@@ -37,16 +53,37 @@ export interface CodeIndexRequest {
   cacheTtlMs: number;
   github: GitHubClient;
   pullRequest: PullRequestContext;
-  diff: PullRequestDiff;
+  queries?: readonly ContextQueryPlan[];
+  /** Compatibility only for existing adapter fixtures; production supplies an explicit lexical query plan. */
+  diff?: PullRequestDiff;
   environment?: NodeJS.ProcessEnv;
   cache?: CacheAdapter;
   commandRunner?: CommandRunner;
+  archiveExtractor?: typeof extractRepositoryArchive;
   now?: () => number;
+  clock?: () => number;
   temporaryRoot?: string;
+}
+
+export interface IndexQueryResult {
+  query: ContextQueryPlan;
+  status: ContextSourceStatus;
+  content?: string;
+  acquiredBytes: number;
+  reason?:
+    | 'query-failed'
+    | 'query-timeout'
+    | 'query-output-limit'
+    | 'malformed-output'
+    | 'aggregate-time-limit'
+    | 'aggregate-output-limit';
 }
 
 export interface CodeIndexResult {
   indexer: Exclude<CodeIndexer, 'none'>;
+  version: string;
+  results: IndexQueryResult[];
+  /** Compatibility rendering for adapter integration fixtures; production uses provenance-bearing results. */
   context: string;
   cacheHit: boolean;
 }
@@ -143,6 +180,7 @@ export const runCommand: CommandRunner = async (command, args, options) =>
     });
     let stdout = '';
     let stderr = '';
+    let capturedBytes = 0;
     let settled = false;
     let failure: Error | undefined;
     let killTimer: NodeJS.Timeout | undefined;
@@ -175,15 +213,14 @@ export const runCommand: CommandRunner = async (command, args, options) =>
       killTimer = setTimeout(rejectAfterKill, options.killGraceMs ?? 5_000);
     };
     const append = (current: string, chunk: Buffer): string => {
-      if (failure) {
+      if (failure) return current;
+      capturedBytes += chunk.byteLength;
+      const maximumOutputBytes = options.maximumOutputBytes ?? MAX_COMMAND_OUTPUT_BYTES;
+      if (capturedBytes > maximumOutputBytes) {
+        stop(new Error(`${command} output exceeded ${maximumOutputBytes} bytes`));
         return current;
       }
-      const next = current + chunk.toString('utf8');
-      if (Buffer.byteLength(next, 'utf8') > MAX_COMMAND_OUTPUT_BYTES) {
-        stop(new Error(`${command} output exceeded 5000000 bytes`));
-        return current;
-      }
-      return next;
+      return current + chunk.toString('utf8');
     };
     child.stdout.on('data', (chunk: Buffer) => {
       stdout = append(stdout, chunk);
@@ -208,9 +245,8 @@ export const runCommand: CommandRunner = async (command, args, options) =>
         return;
       }
       if (!failure && code !== 0) {
-        const details = `${stdout}\n${stderr}`.trim().slice(-4_000);
         const error = new Error(
-          `${command} exited with code ${code ?? 'null'} and signal ${signal ?? 'none'}: ${details}`,
+          `${command} exited with code ${code ?? 'null'} and signal ${signal ?? 'none'}; output suppressed`,
         );
         if (processGroupExists(child)) {
           stop(error);
@@ -230,6 +266,35 @@ export const runCommand: CommandRunner = async (command, args, options) =>
 
 function versionFor(indexer: Exclude<CodeIndexer, 'none'>): string {
   return indexer === 'cgc' ? DEFAULT_CGC_VERSION : DEFAULT_GITNEXUS_VERSION;
+}
+
+export function buildIndexSearchQuery(pullRequest: PullRequestContext, diff: PullRequestDiff): string {
+  const path = diff.parsed?.files.find((file) => file.apiPath)?.apiPath ?? /\+\+\+ b\/([^\r\n]+)/u.exec(diff.text)?.[1];
+  return [pullRequest.title, path].filter(Boolean).join(' ').slice(0, 1_000);
+}
+
+export function limitIndexContext(value: string): string {
+  const sanitized = stripUnsafeOutput(value, '');
+  if (Buffer.byteLength(sanitized, 'utf8') <= 50_000) return sanitized;
+  return `${truncateUtf8(sanitized, 49_970).value}\n[index context truncated]`;
+}
+
+function compatibilityQueries(request: CodeIndexRequest): readonly ContextQueryPlan[] {
+  if (request.queries) return request.queries;
+  const path = request.diff?.parsed?.files.find((file) => file.apiPath)?.apiPath ?? 'src/index.ts';
+  return [
+    {
+      id: 'q01',
+      kind: 'configuration',
+      anchor: {
+        value: 'runReview',
+        kind: 'lexical',
+        language: 'compatibility',
+        path,
+        provenance: [{ path, side: 'RIGHT', line: 1, lineKind: 'addition' }],
+      },
+    },
+  ];
 }
 
 function safeRepositoryId(pullRequest: PullRequestContext): string {
@@ -258,6 +323,7 @@ async function cacheIsFresh(
   now: number,
 ): Promise<CacheMetadata | undefined> {
   try {
+    if (!(await validateRegularTree(databasePath))) return undefined;
     const metadata = JSON.parse(await readFile(metadataPath, 'utf8')) as Partial<CacheMetadata>;
     const createdAt = Date.parse(metadata.createdAt ?? '');
     const valid =
@@ -275,6 +341,32 @@ async function cacheIsFresh(
     return valid ? (metadata as CacheMetadata) : undefined;
   } catch {
     return undefined;
+  }
+}
+
+async function validateRegularTree(path: string): Promise<boolean> {
+  try {
+    const pending = [path];
+    let files = 0;
+    let bytes = 0;
+    while (pending.length > 0) {
+      const current = pending.pop();
+      if (!current) break;
+      const details = await lstat(current);
+      if (details.isSymbolicLink() || (!details.isDirectory() && !details.isFile())) return false;
+      if (details.isFile()) {
+        files += 1;
+        bytes += details.size;
+        if (files > MAX_CACHE_FILES || details.size > MAX_CACHE_FILE_BYTES || bytes > MAX_CACHE_BYTES) {
+          return false;
+        }
+        continue;
+      }
+      for (const entry of await readdir(current)) pending.push(join(current, entry));
+    }
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -303,6 +395,28 @@ async function containsRegularFile(path: string): Promise<boolean> {
   return false;
 }
 
+async function removeRepositoryIndexerControls(sourcePath: string): Promise<void> {
+  const pending = [sourcePath];
+  while (pending.length > 0) {
+    const directory = pending.pop();
+    if (!directory) break;
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (
+        entry.name === '.gitnexusrc' ||
+        entry.name === 'mcp.json' ||
+        entry.name === '.codegraphcontext' ||
+        entry.name === '.env' ||
+        entry.name.startsWith('.env.')
+      ) {
+        await rm(path, { recursive: true, force: true });
+      } else if (entry.isDirectory()) {
+        pending.push(path);
+      }
+    }
+  }
+}
+
 async function databaseHasContent(indexer: Exclude<CodeIndexer, 'none'>, databasePath: string): Promise<boolean> {
   if (indexer === 'cgc') {
     return containsRegularFile(join(databasePath, 'graph'));
@@ -315,102 +429,113 @@ async function databaseHasContent(indexer: Exclude<CodeIndexer, 'none'>, databas
   return (await Promise.all(required.map((path) => containsRegularFile(path)))).every(Boolean);
 }
 
-function changedPaths(diff: PullRequestDiff): string[] {
-  const paths = new Set<string>();
-  if (diff.parsed) {
-    for (const file of diff.parsed.files) {
-      if (file.apiPath) paths.add(file.apiPath);
-      if (paths.size >= 20) break;
-    }
-    return [...paths];
-  }
-  // Compatibility for callers constructing prompt-only fixtures; production diff acquisition always supplies parsed data.
-  for (const line of diff.text.split(/\r?\n/)) {
-    const match = /^\+\+\+ b\/(.+)$/.exec(line);
-    if (match?.[1]) paths.add(match[1]);
-    if (paths.size >= 20) break;
-  }
-  return [...paths];
+function stripUnsafeOutput(value: string, sourcePath: string): string {
+  const withoutPaths = sourcePath
+    ? value.replaceAll(sourcePath, '<base>').replaceAll(sourcePath.replaceAll('\\', '/'), '<base>')
+    : value;
+  return (
+    withoutPaths
+      // eslint-disable-next-line no-control-regex -- ANSI and other control bytes are never useful model context.
+      .replaceAll(/\u001B\[[0-?]*[ -/]*[@-~]/gu, '')
+      // eslint-disable-next-line no-control-regex -- Preserve only tab and line endings from external text.
+      .replaceAll(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/gu, '')
+      .trim()
+  );
 }
 
-export function buildIndexSearchQuery(pullRequest: PullRequestContext, diff: PullRequestDiff): string {
-  const files = changedPaths(diff);
-  return [`Pull request review: ${pullRequest.title}`, ...files].join(' ').slice(0, 1_000);
-}
-
-function stripAnsi(value: string): string {
-  // eslint-disable-next-line no-control-regex -- ANSI escape sequences begin with ESC.
-  return value.replaceAll(/\u001B\[[0-?]*[ -/]*[@-~]/g, '');
-}
-
-export function limitIndexContext(value: string): string {
-  const bytes = Buffer.from(stripAnsi(value).trim(), 'utf8');
-  if (bytes.length <= MAX_INDEX_CONTEXT_BYTES) {
-    return bytes.toString('utf8');
-  }
-  const trailer = Buffer.from('\n[index context truncated]', 'utf8');
-  let content = new TextDecoder().decode(bytes.subarray(0, MAX_INDEX_CONTEXT_BYTES - trailer.length));
-  while (content.length > 0 && Buffer.byteLength(content, 'utf8') + trailer.length > MAX_INDEX_CONTEXT_BYTES) {
-    content = content.slice(0, -1);
-  }
-  return `${content}${trailer.toString('utf8')}`;
-}
-
-async function validateSourceTree(sourcePath: string): Promise<void> {
-  const pending = [sourcePath];
-  let files = 0;
-  let bytes = 0;
-  while (pending.length > 0) {
-    const directory = pending.pop();
-    if (!directory) {
-      break;
-    }
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
-      const path = join(directory, entry.name);
-      const details = await lstat(path);
-      if (details.isSymbolicLink()) {
-        await rm(path, { force: true });
-        continue;
-      }
-      if (details.isDirectory()) {
-        pending.push(path);
-        continue;
-      }
-      if (!details.isFile()) {
-        await rm(path, { recursive: true, force: true });
-        continue;
-      }
-      files += 1;
-      bytes += details.size;
-      if (files > 100_000) {
-        throw new Error('Base-revision source exceeds 100000 files');
-      }
-      if (details.size > 20_000_000) {
-        throw new Error(`Base-revision file exceeds 20000000 bytes: ${path}`);
-      }
-      if (bytes > 2_000_000_000) {
-        throw new Error('Base-revision source exceeds 2000000000 bytes');
-      }
-    }
-  }
-}
-
-function parseGitNexusQuery(output: string): string {
-  const start = output.indexOf('{');
-  const end = output.lastIndexOf('}');
-  if (start < 0 || end < start) {
-    throw new Error('GitNexus returned no query JSON');
-  }
+function strictGitNexusJson(output: string): string {
   let value: unknown;
   try {
-    value = JSON.parse(output.slice(start, end + 1)) as unknown;
+    value = JSON.parse(output.trim()) as unknown;
   } catch {
-    throw new Error('GitNexus returned malformed query JSON');
+    throw new Error('malformed-output');
   }
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error('GitNexus query JSON must be an object');
+  if ((typeof value !== 'object' || value === null) && !Array.isArray(value)) throw new Error('malformed-output');
+  if (!Array.isArray(value) && (value as Record<string, unknown>).partial === true) throw new Error('malformed-output');
+  return JSON.stringify(value);
+}
+
+function queryArgumentSets(
+  indexer: Exclude<CodeIndexer, 'none'>,
+  databasePath: string,
+  query: ContextQueryPlan,
+): string[][] {
+  const anchor = query.anchor.value;
+  const path = query.anchor.path;
+  if (
+    !/^[\p{ID_Start}_$][\p{ID_Continue}$:!?=]*$/u.test(anchor) ||
+    /\p{Cc}|\p{Cf}/u.test(anchor) ||
+    Buffer.byteLength(anchor, 'utf8') > 128
+  ) {
+    throw new Error('Context query anchor is unsafe');
   }
-  return JSON.stringify(value, null, 2);
+  const pathSegments = path.split('/');
+  if (
+    !path ||
+    path.startsWith('/') ||
+    path.includes('\\') ||
+    /\p{Cc}|\p{Cf}/u.test(path) ||
+    Buffer.byteLength(path, 'utf8') > 1_024 ||
+    pathSegments.some((segment) => !segment || segment === '.' || segment === '..' || segment.startsWith('-'))
+  ) {
+    throw new Error('Context query path is unsafe');
+  }
+  if (indexer === 'cgc') {
+    const prefix = ['--database', 'kuzudb', '--path', databasePath];
+    if (query.kind === 'definition-and-types') {
+      const commands = [[...prefix, 'find', 'name', anchor, '--no-fuzzy']];
+      if (query.anchor.kind === 'type') {
+        commands.push([...prefix, 'analyze', 'tree', anchor, '--file', path]);
+      }
+      return commands;
+    }
+    if (query.kind === 'callers-and-tests') {
+      return [[...prefix, 'analyze', 'callers', anchor, '--file', path]];
+    }
+    if (query.kind === 'callees') return [[...prefix, 'analyze', 'calls', anchor, '--file', path]];
+    return [[...prefix, 'find', 'content', anchor]];
+  }
+  if (query.kind === 'definition-and-types') {
+    return [['context', anchor, '--repo', 'code-review-base', '--file', path, '--limit', '20', '--content']];
+  }
+  if (query.kind === 'callers-and-tests') {
+    return [
+      [
+        'impact',
+        anchor,
+        '--repo',
+        'code-review-base',
+        '--file',
+        path,
+        '--direction',
+        'upstream',
+        '--depth',
+        '2',
+        '--include-tests',
+        '--limit',
+        '20',
+      ],
+    ];
+  }
+  if (query.kind === 'callees') {
+    return [
+      [
+        'impact',
+        anchor,
+        '--repo',
+        'code-review-base',
+        '--file',
+        path,
+        '--direction',
+        'downstream',
+        '--depth',
+        '1',
+        '--limit',
+        '20',
+      ],
+    ];
+  }
+  return [['query', `${anchor} configuration`, '--repo', 'code-review-base', '--limit', '3', '--content']];
 }
 
 async function installCgc(toolsPath: string, options: CommandOptions, runner: CommandRunner): Promise<string> {
@@ -452,26 +577,15 @@ async function indexWithCgc(
   executable: string,
   sourcePath: string,
   databasePath: string,
-  searchQuery: string,
   cacheHit: boolean,
   options: CommandOptions,
   runner: CommandRunner,
-): Promise<string> {
-  const environment = {
-    ...options.environment,
-    CGC_EMBEDDED_BUFFER_POOL_MB: '512',
-  };
+): Promise<NodeJS.ProcessEnv> {
+  const environment = { ...options.environment, CGC_EMBEDDED_BUFFER_POOL_MB: '512' };
   const indexArgs = ['--database', 'kuzudb', '--path', databasePath, 'index', sourcePath, '--no-progress'];
-  if (!cacheHit) {
-    indexArgs.push('--force');
-  }
+  if (!cacheHit) indexArgs.push('--force');
   await runner(executable, indexArgs, { ...options, environment });
-  const result = await runner(
-    executable,
-    ['--database', 'kuzudb', '--path', databasePath, 'find', 'content', searchQuery],
-    { ...options, environment },
-  );
-  return result.stdout;
+  return environment;
 }
 
 async function rewriteGitNexusRegistry(databasePath: string, sourcePath: string): Promise<void> {
@@ -523,11 +637,10 @@ async function indexWithGitNexus(
   executable: string,
   sourcePath: string,
   databasePath: string,
-  searchQuery: string,
   cacheHit: boolean,
   options: CommandOptions,
   runner: CommandRunner,
-): Promise<string> {
+): Promise<NodeJS.ProcessEnv> {
   const gitNexusHome = join(databasePath, '..', 'home');
   await mkdir(gitNexusHome, { recursive: true });
   const environment = {
@@ -537,19 +650,104 @@ async function indexWithGitNexus(
     GITNEXUS_CONTENT_RETENTION: 'symbol',
     GITNEXUS_SKIP_OPTIONAL_GRAMMARS: '1',
   };
-  if (cacheHit) {
-    await rewriteGitNexusRegistry(databasePath, sourcePath);
-  } else {
+  if (cacheHit) await rewriteGitNexusRegistry(databasePath, sourcePath);
+  else {
     await runner(executable, ['analyze', sourcePath, '--index-only', '--skip-git', '--name', 'code-review-base'], {
       ...options,
       environment,
     });
   }
-  const result = await runner(executable, ['query', searchQuery, '--repo', 'code-review-base', '--limit', '5'], {
-    ...options,
-    environment,
-  });
-  return parseGitNexusQuery(result.stdout);
+  return environment;
+}
+
+async function executeQueries(input: {
+  indexer: Exclude<CodeIndexer, 'none'>;
+  executable: string;
+  databasePath: string;
+  sourcePath: string;
+  queries: readonly ContextQueryPlan[];
+  options: CommandOptions;
+  environment: NodeJS.ProcessEnv;
+  runner: CommandRunner;
+  clock: () => number;
+}): Promise<IndexQueryResult[]> {
+  const startedAt = input.clock();
+  let acquiredBytes = 0;
+  const results: IndexQueryResult[] = [];
+  for (const query of input.queries) {
+    const elapsed = input.clock() - startedAt;
+    if (elapsed >= MAX_QUERY_PHASE_TIMEOUT_MS) {
+      results.push({ query, status: 'budget-exhausted', acquiredBytes: 0, reason: 'aggregate-time-limit' });
+      continue;
+    }
+    if (acquiredBytes >= MAX_QUERY_PHASE_OUTPUT_BYTES) {
+      results.push({ query, status: 'budget-exhausted', acquiredBytes: 0, reason: 'aggregate-output-limit' });
+      continue;
+    }
+    let queryBytes = 0;
+    try {
+      const stdout: string[] = [];
+      let commandElapsed = elapsed;
+      for (const args of queryArgumentSets(input.indexer, input.databasePath, query)) {
+        const remainingPhaseMs = MAX_QUERY_PHASE_TIMEOUT_MS - commandElapsed;
+        const remainingQueryMs = MAX_QUERY_TIMEOUT_MS - (commandElapsed - elapsed);
+        if (remainingPhaseMs <= 1 || remainingQueryMs <= 1) throw new Error('context query timed out');
+        const remainingMs = Math.min(remainingPhaseMs, remainingQueryMs);
+        const killGraceMs = Math.min(1_000, Math.max(1, Math.floor(remainingMs / 2)));
+        const result = await input.runner(input.executable, args, {
+          ...input.options,
+          environment: input.environment,
+          timeoutMs: Math.max(1, remainingMs - killGraceMs),
+          killGraceMs,
+          maximumOutputBytes: Math.min(
+            MAX_QUERY_OUTPUT_BYTES - queryBytes,
+            MAX_QUERY_PHASE_OUTPUT_BYTES - acquiredBytes,
+          ),
+        });
+        const commandBytes = Buffer.byteLength(result.stdout, 'utf8') + Buffer.byteLength(result.stderr, 'utf8');
+        queryBytes += commandBytes;
+        acquiredBytes += commandBytes;
+        stdout.push(result.stdout);
+        commandElapsed = input.clock() - startedAt;
+      }
+      let content = stripUnsafeOutput(
+        input.indexer === 'gitnexus' ? strictGitNexusJson(stdout.join('')) : stdout.join('\n'),
+        input.sourcePath,
+      );
+      const originalContentBytes = Buffer.byteLength(content, 'utf8');
+      if (originalContentBytes === 0) {
+        results.push({ query, status: 'empty', acquiredBytes: queryBytes });
+        continue;
+      }
+      let status: ContextSourceStatus = 'included';
+      if (originalContentBytes > MAX_QUERY_INCLUDED_BYTES) {
+        content = truncateUtf8(content, MAX_QUERY_INCLUDED_BYTES).value;
+        status = 'truncated';
+      }
+      results.push({ query, status, content, acquiredBytes: queryBytes });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '';
+      const timedOut = /timed out/u.test(message);
+      const outputLimit = /output exceeded/u.test(message);
+      const chargedBytes = outputLimit
+        ? Math.min(MAX_QUERY_OUTPUT_BYTES - queryBytes, MAX_QUERY_PHASE_OUTPUT_BYTES - acquiredBytes)
+        : 0;
+      acquiredBytes += chargedBytes;
+      results.push({
+        query,
+        status: timedOut ? 'timed-out' : 'unavailable',
+        acquiredBytes: queryBytes + chargedBytes,
+        reason: timedOut
+          ? 'query-timeout'
+          : outputLimit
+            ? 'query-output-limit'
+            : /malformed-output/u.test(message)
+              ? 'malformed-output'
+              : 'query-failed',
+      });
+    }
+  }
+  return results;
 }
 
 export async function runCodeIndexer(request: CodeIndexRequest): Promise<CodeIndexResult> {
@@ -600,9 +798,9 @@ export async function runCodeIndexer(request: CodeIndexRequest): Promise<CodeInd
           console.log('Ignoring stale code index cache');
           await rm(databasePath, { recursive: true, force: true });
         }
-      } catch (error) {
+      } catch {
         await rm(databasePath, { recursive: true, force: true });
-        console.warn(`Unable to restore code index cache: ${error instanceof Error ? error.message : String(error)}`);
+        console.warn('Unable to restore code index cache; rebuilding without restored state');
       }
     } else {
       console.log('GitHub Actions cache service is unavailable; indexing without cache');
@@ -613,48 +811,33 @@ export async function runCodeIndexer(request: CodeIndexRequest): Promise<CodeInd
       request.pullRequest,
       request.pullRequest.baseSha,
       archivePath,
+      MAX_ARCHIVE_DOWNLOAD_BYTES,
+      AbortSignal.timeout(ARCHIVE_DOWNLOAD_TIMEOUT_MS),
     );
     console.log(`Downloaded ${archiveBytes} base-revision archive bytes`);
-    await runner(
-      'tar',
-      ['-xzf', archivePath, '-C', sourcePath, '--strip-components=1', '--no-same-owner', '--no-same-permissions'],
-      installOptions,
-    );
-
-    await validateSourceTree(sourcePath);
+    await (request.archiveExtractor ?? extractRepositoryArchive)(archivePath, sourcePath);
+    await removeRepositoryIndexerControls(sourcePath);
 
     const executable =
       request.indexer === 'cgc'
         ? await installCgc(toolsPath, installOptions, runner)
         : await installGitNexus(toolsPath, installOptions, runner);
-    const searchQuery = buildIndexSearchQuery(request.pullRequest, request.diff);
-    const performIndex = async (): Promise<string> =>
+    const graphPath = join(databasePath, 'graph');
+    const performIndex = async (): Promise<NodeJS.ProcessEnv> =>
       request.indexer === 'cgc'
-        ? indexWithCgc(executable, sourcePath, join(databasePath, 'graph'), searchQuery, cacheHit, indexOptions, runner)
-        : indexWithGitNexus(
-            executable,
-            sourcePath,
-            join(databasePath, 'graph'),
-            searchQuery,
-            cacheHit,
-            indexOptions,
-            runner,
-          );
-    let queryOutput: string;
+        ? indexWithCgc(executable, sourcePath, graphPath, cacheHit, indexOptions, runner)
+        : indexWithGitNexus(executable, sourcePath, graphPath, cacheHit, indexOptions, runner);
+    let queryEnvironment: NodeJS.ProcessEnv;
     try {
-      queryOutput = await performIndex();
+      queryEnvironment = await performIndex();
     } catch (error) {
-      if (!cacheHit) {
-        throw error;
-      }
-      console.warn(
-        `Restored code index failed; rebuilding from an empty database: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      if (!cacheHit) throw error;
+      console.warn('Restored code index failed; rebuilding from an empty database');
       cacheHit = false;
       restoredMetadata = undefined;
       await rm(databasePath, { recursive: true, force: true });
       await mkdir(databasePath, { recursive: true });
-      queryOutput = await performIndex();
+      queryEnvironment = await performIndex();
     }
 
     const metadata: CacheMetadata = {
@@ -673,15 +856,29 @@ export async function runCodeIndexer(request: CodeIndexRequest): Promise<CodeInd
       const saveKey = restoredKey === keys.primary ? `${keys.primary}-repair-${randomUUID()}` : keys.primary;
       try {
         await cache.save([databasePath], saveKey);
-      } catch (error) {
-        console.warn(`Unable to save code index cache: ${error instanceof Error ? error.message : String(error)}`);
+      } catch {
+        console.warn('Unable to save code index cache; continuing without a saved index');
       }
     }
 
+    const results = await executeQueries({
+      indexer: request.indexer,
+      executable,
+      databasePath: graphPath,
+      sourcePath,
+      queries: compatibilityQueries(request),
+      options: indexOptions,
+      environment: queryEnvironment,
+      runner,
+      clock: request.clock ?? Date.now,
+    });
     const context = limitIndexContext(
-      `Indexer: ${request.indexer} ${versionFor(request.indexer)}\nBase revision: ${request.pullRequest.baseSha}\nSearch query: ${searchQuery}\n\n${queryOutput}`,
+      `Indexer: ${request.indexer} ${versionFor(request.indexer)}\nBase revision: ${request.pullRequest.baseSha}\n\n${results
+        .filter((result) => result.content)
+        .map((result) => `${result.query.kind}:${result.query.anchor.value}\n${result.content}`)
+        .join('\n\n')}`,
     );
-    return { indexer: request.indexer, context, cacheHit };
+    return { indexer: request.indexer, version: versionFor(request.indexer), results, context, cacheHit };
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

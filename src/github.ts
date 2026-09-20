@@ -30,6 +30,28 @@ export interface PullRequestRevision {
   baseSha: string;
   headSha: string;
   changedFiles: number;
+  title: string;
+  body: string;
+  author: string;
+}
+
+export interface RepositoryTextResult {
+  status: 'found' | 'not-found' | 'unavailable';
+  text?: string;
+  bytes: number;
+  truncated: boolean;
+  blobSha?: string;
+  reason?: 'not-found-or-forbidden' | 'not-a-regular-file' | 'invalid-utf8' | 'too-large' | 'fetch-error';
+}
+
+export interface GitHubIssueContext {
+  id: number;
+  number: number;
+  title: string;
+  body: string;
+  htmlUrl: string;
+  updatedAt: string;
+  isPullRequest: boolean;
 }
 
 export interface GitHubComment {
@@ -70,17 +92,64 @@ function text(value: unknown, name: string): string {
 }
 
 function integer(value: unknown, name: string): number {
-  if (!Number.isInteger(value) || (value as number) <= 0) {
+  if (!Number.isSafeInteger(value) || (value as number) <= 0) {
     throw new Error(`${name} must be a positive integer`);
   }
   return value as number;
 }
 
 function nonnegativeInteger(value: unknown, name: string): number {
-  if (!Number.isInteger(value) || (value as number) < 0) {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
     throw new Error(`${name} must be a nonnegative integer`);
   }
   return value as number;
+}
+
+function utf8Prefix(bytes: Buffer, maximumBytes: number): string {
+  let end = Math.min(bytes.length, maximumBytes);
+  while (end >= 0) {
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, end));
+    } catch {
+      end -= 1;
+    }
+  }
+  return '';
+}
+
+async function readBoundedJsonResponse(response: Response, maximumBytes: number, label: string): Promise<unknown> {
+  if (!response.body) throw new Error(`${label} response has no body`);
+  const contentLength = Number(response.headers.get('content-length'));
+  if (Number.isFinite(contentLength) && contentLength > maximumBytes) {
+    await response.body.cancel().catch(() => undefined);
+    throw new Error(`${label} exceeds response limit`);
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      bytes += chunk.value.byteLength;
+      if (bytes > maximumBytes) throw new Error(`${label} exceeds response limit`);
+      chunks.push(chunk.value);
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    throw error;
+  }
+  let raw: string;
+  try {
+    raw = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))));
+  } catch {
+    throw new Error(`${label} is not valid UTF-8`);
+  }
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    throw new Error(`${label} is malformed`);
+  }
 }
 
 export function parsePullRequestEvent(payload: unknown): PullRequestContext {
@@ -119,6 +188,48 @@ function hasFinalMarker(comment: GitHubComment, marker: string): boolean {
     return false;
   }
   return comment.body.trimEnd().split(/\r?\n/).at(-1) === marker;
+}
+
+export function extractExplicitSameRepositoryIssueNumbers(
+  context: Pick<PullRequestContext, 'owner' | 'repository' | 'number'>,
+  title: string,
+  body: string,
+  maximum: number,
+): number[] {
+  const withoutCode = `${title}\n${body}`
+    .replace(/```[\s\S]*?```/gu, ' ')
+    .replace(/~~~[\s\S]*?~~~/gu, ' ')
+    .replace(/`[^`\r\n]*`/gu, ' ');
+  const matches: Array<{ index: number; number: number }> = [];
+  const escapedOwner = context.owner.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escapedRepository = context.repository.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const urlPattern = new RegExp(
+    `(?<![A-Za-z0-9])https://github\\.com/${escapedOwner}/${escapedRepository}/issues/(\\d+)(?=$|[\\s),.;:!?])`,
+    'giu',
+  );
+  const closingPattern = new RegExp(
+    `\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s+(?:(?:${escapedOwner}/${escapedRepository})?)(#\\d+)`,
+    'giu',
+  );
+  for (const match of withoutCode.matchAll(urlPattern)) {
+    const number = Number(match[1]);
+    if (Number.isSafeInteger(number) && number > 0 && number !== context.number) {
+      matches.push({ index: match.index, number });
+    }
+  }
+  for (const match of withoutCode.matchAll(closingPattern)) {
+    const number = Number(match[1]?.slice(1));
+    if (Number.isSafeInteger(number) && number > 0 && number !== context.number) {
+      matches.push({ index: match.index, number });
+    }
+  }
+  matches.sort((left, right) => left.index - right.index || left.number - right.number);
+  const selected: number[] = [];
+  for (const match of matches) {
+    if (!selected.includes(match.number)) selected.push(match.number);
+    if (selected.length >= maximum) break;
+  }
+  return selected;
 }
 
 export function findManagedComment(
@@ -168,17 +279,141 @@ export class GitHubClient {
     return { id: actor.id, login: actor.login };
   }
 
-  async getPullRequestRevision(context: PullRequestContext): Promise<PullRequestRevision> {
+  async getPullRequestRevision(context: PullRequestContext, signal?: AbortSignal): Promise<PullRequestRevision> {
     const path = `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/pulls/${context.number}`;
     const pullRequest = await this.request<{
       base: { sha: string };
       head: { sha: string };
       changed_files: number;
-    }>(path);
+      title?: unknown;
+      body?: unknown;
+      user?: unknown;
+    }>(path, { signal });
+    const body = pullRequest.body;
+    if (body !== null && typeof body !== 'string') throw new Error('pull_request.body must be a string or null');
     return {
       baseSha: text(record(pullRequest.base, 'pull_request.base').sha, 'pull_request.base.sha'),
       headSha: text(record(pullRequest.head, 'pull_request.head').sha, 'pull_request.head.sha'),
       changedFiles: nonnegativeInteger(pullRequest.changed_files, 'pull_request.changed_files'),
+      title: text(pullRequest.title, 'pull_request.title'),
+      body: body ?? '',
+      author: text(record(pullRequest.user, 'pull_request.user').login, 'pull_request.user.login'),
+    };
+  }
+
+  async getRepositoryTextAtRevision(
+    context: PullRequestContext,
+    repositoryPath: string,
+    revision: string,
+    maximumBytes: number,
+    signal?: AbortSignal,
+  ): Promise<RepositoryTextResult> {
+    const segments = repositoryPath.split('/');
+    if (
+      !segments.length ||
+      segments.some((segment) => !segment || segment === '.' || segment === '..' || /[\\\0\r\n]/u.test(segment))
+    ) {
+      throw new Error('Repository context path is unsafe');
+    }
+    const encodedPath = segments.map((segment) => encodeURIComponent(segment)).join('/');
+    const path = `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/contents/${encodedPath}?ref=${encodeURIComponent(revision)}`;
+    const response = await this.fetchImplementation(`${this.apiUrl}${path}`, {
+      signal,
+      headers: {
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${this.token}`,
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'code-review-action',
+      },
+    });
+    if (response.status === 403 || response.status === 404) {
+      await response.body?.cancel().catch(() => undefined);
+      return { status: 'not-found', bytes: 0, truncated: false, reason: 'not-found-or-forbidden' };
+    }
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      return { status: 'unavailable', bytes: 0, truncated: false, reason: 'fetch-error' };
+    }
+    let value: unknown;
+    try {
+      value = await readBoundedJsonResponse(
+        response,
+        Math.min(2_000_000, maximumBytes * 2 + 16_384),
+        'GitHub repository content',
+      );
+    } catch {
+      return { status: 'unavailable', bytes: 0, truncated: false, reason: 'fetch-error' };
+    }
+    let entry: Record<string, unknown>;
+    try {
+      entry = record(value, 'repository content');
+    } catch {
+      return { status: 'unavailable', bytes: 0, truncated: false, reason: 'fetch-error' };
+    }
+    if (entry.type !== 'file' || entry.target !== undefined || entry.submodule_git_url !== undefined) {
+      return { status: 'unavailable', bytes: 0, truncated: false, reason: 'not-a-regular-file' };
+    }
+    if (entry.encoding !== 'base64' || typeof entry.content !== 'string' || typeof entry.sha !== 'string') {
+      return { status: 'unavailable', bytes: 0, truncated: false, reason: 'fetch-error' };
+    }
+    const encodedContent = entry.content.replaceAll(/\s/gu, '');
+    if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(encodedContent)) {
+      return { status: 'unavailable', bytes: 0, truncated: false, reason: 'fetch-error' };
+    }
+    const bytes = Buffer.from(encodedContent, 'base64');
+    let decoded: string;
+    try {
+      decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch {
+      return { status: 'unavailable', bytes: bytes.length, truncated: false, reason: 'invalid-utf8' };
+    }
+    if (bytes.length <= maximumBytes) {
+      return { status: 'found', text: decoded, bytes: bytes.length, truncated: false, blobSha: entry.sha };
+    }
+    const textPrefix = utf8Prefix(bytes, maximumBytes);
+    return {
+      status: 'found',
+      text: textPrefix,
+      bytes: bytes.length,
+      truncated: true,
+      blobSha: entry.sha,
+      reason: 'too-large',
+    };
+  }
+
+  async getIssueContext(
+    context: PullRequestContext,
+    number: number,
+    maximumResponseBytes: number,
+    signal?: AbortSignal,
+  ): Promise<GitHubIssueContext> {
+    if (!Number.isSafeInteger(number) || number <= 0) throw new Error('Issue number must be a positive integer');
+    const path = `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/issues/${number}`;
+    const response = await this.fetchImplementation(`${this.apiUrl}${path}`, {
+      signal,
+      headers: {
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${this.token}`,
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'code-review-action',
+      },
+    });
+    if (!response.ok || !response.body) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error(`GitHub issue context request failed with ${response.status}`);
+    }
+    const value = await readBoundedJsonResponse(response, maximumResponseBytes, 'GitHub issue context');
+    const issue = record(value, 'issue context');
+    const issueNumber = integer(issue.number, 'issue.number');
+    if (issueNumber !== number) throw new Error('GitHub issue context number mismatch');
+    return {
+      id: integer(issue.id, 'issue.id'),
+      number: issueNumber,
+      title: text(issue.title, 'issue.title'),
+      body: typeof issue.body === 'string' ? issue.body : '',
+      htmlUrl: text(issue.html_url, 'issue.html_url'),
+      updatedAt: text(issue.updated_at, 'issue.updated_at'),
+      isPullRequest: issue.pull_request !== undefined,
     };
   }
 
@@ -187,6 +422,7 @@ export class GitHubClient {
     reference: string,
     destination: string,
     maximumBytes = 1_000_000_000,
+    signal?: AbortSignal,
   ): Promise<number> {
     const path = `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/tarball/${encodeURIComponent(reference)}`;
     const response = await this.fetchImplementation(`${this.apiUrl}${path}`, {
@@ -197,6 +433,7 @@ export class GitHubClient {
         'User-Agent': 'code-review-action',
       },
       redirect: 'follow',
+      signal,
     });
     if (!response.ok || !response.body) {
       const message = (await response.text()).slice(0, 2_000);
@@ -233,9 +470,14 @@ export class GitHubClient {
     return bytes;
   }
 
-  async getPullRequestDiff(context: PullRequestContext, maximumBytes: number): Promise<PullRequestDiff> {
+  async getPullRequestDiff(
+    context: PullRequestContext,
+    maximumBytes: number,
+    signal?: AbortSignal,
+  ): Promise<PullRequestDiff> {
     const path = `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/pulls/${context.number}`;
     const response = await this.fetchImplementation(`${this.apiUrl}${path}`, {
+      signal,
       headers: {
         Accept: 'application/vnd.github.v3.diff',
         Authorization: `Bearer ${this.token}`,

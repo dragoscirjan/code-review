@@ -54,7 +54,7 @@ for (const [backend, label] of [
       marker: `<!-- ${backend} -->`,
     });
     assert.ok(comment.startsWith(`## Code Review (\`z-ai/glm-5.3-flash\` via ${label})`));
-    assert.match(comment, /reviewer returned no findings/i);
+    assert.match(comment, /No validated findings were returned for the supplied context/i);
     assert.match(comment, /Accepted: 0/);
     assert.equal(comment.trimEnd().split(/\r?\n/).at(-1), `<!-- ${backend} -->`);
   });
@@ -81,8 +81,31 @@ test('renders accepted counts and keeps Markdown, HTML, mentions, bidi, and mark
     actor: 'reviewer',
     diffTruncated: true,
     originalDiffBytes: 100_000,
+    contextMetadata: {
+      version: 1,
+      maximumBytes: 50_000,
+      includedBytes: 12_345,
+      truncated: true,
+      unavailableSourceCount: 2,
+      truncatedSourceCount: 1,
+      anchorsPlanned: 3,
+      queriesPlanned: 12,
+      queriesCompleted: 8,
+      queriesTimedOut: 1,
+      queryByteLimitHits: 1,
+      queryBudgetSkipped: 3,
+      indexer: 'cgc',
+      guidance: { agents: 'included', contributing: 'unavailable' },
+      configuration: { candidates: 2, included: 1, unavailable: 1, truncated: 0 },
+      linkedIssues: { discovered: 2, fetched: 1, unavailable: 1 },
+    },
     marker: '<!-- managed -->',
   });
+  assert.match(comment, /Review context: 12345 \/ 50000 bytes/);
+  assert.match(comment, /Context sources unavailable: 2/);
+  assert.match(comment, /Base configuration: 1 included, 1 unavailable, 0 truncated/);
+  assert.match(comment, /Context queries: 8 completed, 1 timed out, 3 skipped by budget/);
+  assert.match(comment, /Linked issue criteria: 1 included, 1 unavailable/);
   assert.match(comment, /Rejected .*: 1/);
   assert.match(comment, /Unmapped: 1/);
   assert.match(comment, /Duplicates removed: 1/);

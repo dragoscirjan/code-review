@@ -1,3 +1,4 @@
+import type { ReviewContextMetadata } from './context-planner';
 import type { ReviewAssessment, ValidatedFinding } from './finding-validation';
 import type { ReviewBackend } from './review';
 import { renderModelTextLiteral } from './review-text';
@@ -31,7 +32,7 @@ ${renderModelTextLiteral(finding.fix)}`;
 }
 
 function renderAssessment(assessment: ReviewAssessment): string {
-  if (assessment.modelOutcome === 'clean') return 'The reviewer returned no findings.';
+  if (assessment.modelOutcome === 'clean') return 'No validated findings were returned for the supplied context.';
   if (assessment.findings.length === 0) return 'No model findings passed diff and evidence validation.';
   return assessment.findings.map((finding, index) => renderFinding(finding, index + 1)).join('\n\n');
 }
@@ -55,15 +56,26 @@ export function renderComment(input: {
   actor: string;
   diffTruncated: boolean;
   originalDiffBytes: number;
+  contextMetadata?: ReviewContextMetadata;
   marker: string;
 }): string {
   const { counts } = input.assessment;
   const truncation = input.diffTruncated
     ? `\n\n> Review context was truncated safely at complete diff-hunk boundaries from ${input.originalDiffBytes} bytes.`
     : '';
+  const context = input.contextMetadata
+    ? `
+- Review context: ${input.contextMetadata.includedBytes} / ${input.contextMetadata.maximumBytes} bytes
+- Context sources unavailable: ${input.contextMetadata.unavailableSourceCount}
+- Context sources truncated: ${input.contextMetadata.truncated ? 'yes' : 'no'}
+- Context queries: ${input.contextMetadata.queriesCompleted} completed, ${input.contextMetadata.queriesTimedOut} timed out, ${input.contextMetadata.queryBudgetSkipped} skipped by budget
+- Base guidance: AGENTS.md ${input.contextMetadata.guidance.agents}; CONTRIBUTING.md ${input.contextMetadata.guidance.contributing}
+- Base configuration: ${input.contextMetadata.configuration.included} included, ${input.contextMetadata.configuration.unavailable} unavailable, ${input.contextMetadata.configuration.truncated} truncated
+- Linked issue criteria: ${input.contextMetadata.linkedIssues.fetched} included, ${input.contextMetadata.linkedIssues.unavailable} unavailable`
+    : '';
   const comment = `## Code Review (\`${input.model}\` via ${backendLabel(input.backend)})
 
-- Head: \`${input.headSha.slice(0, 12)}\`
+- Head: \`${input.headSha.slice(0, 12)}\`${context}
 - Published through: \`@${input.actor}\`
 - Model findings received: ${counts.received}
 - Accepted: ${counts.accepted}
