@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { open, readFile, rm } from "node:fs/promises";
 
 export interface PullRequestContext {
   owner: string;
@@ -188,6 +188,59 @@ export class GitHubClient {
   async getAuthenticatedActor(): Promise<AuthenticatedActor> {
     const actor = await this.request<{ id: number; login: string }>("/user");
     return { id: actor.id, login: actor.login };
+  }
+
+  async downloadRepositoryArchive(
+    context: PullRequestContext,
+    reference: string,
+    destination: string,
+    maximumBytes = 1_000_000_000,
+  ): Promise<number> {
+    const path = `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/tarball/${encodeURIComponent(reference)}`;
+    const response = await this.fetchImplementation(`${this.apiUrl}${path}`, {
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${this.token}`,
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "code-review-action",
+      },
+      redirect: "follow",
+    });
+    if (!response.ok || !response.body) {
+      const message = (await response.text()).slice(0, 2_000);
+      throw new Error(
+        `GitHub archive request failed with ${response.status}: ${message}`,
+      );
+    }
+
+    const contentLength = Number(response.headers.get("content-length"));
+    if (Number.isFinite(contentLength) && contentLength > maximumBytes) {
+      throw new Error(`GitHub archive exceeds ${maximumBytes} bytes`);
+    }
+
+    const file = await open(destination, "wx", 0o600);
+    const reader = response.body.getReader();
+    let bytes = 0;
+    try {
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) {
+          break;
+        }
+        bytes += chunk.value.byteLength;
+        if (bytes > maximumBytes) {
+          throw new Error(`GitHub archive exceeds ${maximumBytes} bytes`);
+        }
+        await file.write(chunk.value);
+      }
+    } catch (error) {
+      await reader.cancel().catch(() => undefined);
+      await file.close();
+      await rm(destination, { force: true });
+      throw error;
+    }
+    await file.close();
+    return bytes;
   }
 
   async getPullRequestDiff(

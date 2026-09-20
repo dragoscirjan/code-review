@@ -3,6 +3,7 @@ import { appendFile } from "node:fs/promises";
 import { renderComment } from "./comment";
 import { loadActionConfig, managedCommentMarkers } from "./config";
 import { GitHubClient, loadPullRequestEvent } from "./github";
+import { runCodeIndexer } from "./indexer";
 import { runReview } from "./review";
 
 function workflowCommandValue(value: string): string {
@@ -49,6 +50,25 @@ async function main(): Promise<void> {
     `Fetched ${diff.originalBytes} diff bytes${diff.truncated ? `; limited to ${config.maxDiffBytes}` : ""}`,
   );
 
+  let codeIndexContext: string | undefined;
+  let codeIndexCacheHit = false;
+  if (config.codeIndexer !== "none") {
+    console.log(`Installing and running ${config.codeIndexer} against the base revision`);
+    const codeIndex = await runCodeIndexer({
+      indexer: config.codeIndexer,
+      cacheKey: config.codeIndexCacheKey,
+      cacheTtlMs: config.codeIndexCacheTtlMs,
+      github: client,
+      pullRequest,
+      diff,
+    });
+    codeIndexContext = codeIndex.context;
+    codeIndexCacheHit = codeIndex.cacheHit;
+    console.log(
+      `Prepared ${Buffer.byteLength(codeIndex.context, "utf8")} code index context bytes${codeIndex.cacheHit ? " from a fresh cache" : ""}`,
+    );
+  }
+
   const review = await runReview({
     backend: config.backend,
     containerEngine: config.containerEngine,
@@ -60,6 +80,7 @@ async function main(): Promise<void> {
     timeoutMs: config.timeoutMs,
     pullRequest,
     diff,
+    codeIndexContext,
   });
   const markers = managedCommentMarkers(config.backend);
   const marker = markers[0];
@@ -82,6 +103,8 @@ async function main(): Promise<void> {
 
   await setOutput("comment-url", comment.html_url);
   await setOutput("diff-truncated", String(diff.truncated));
+  await setOutput("code-indexer", config.codeIndexer);
+  await setOutput("code-index-cache-hit", String(codeIndexCacheHit));
   console.log(`Published review: ${comment.html_url}`);
 }
 

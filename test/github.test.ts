@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import {
   findManagedComment,
@@ -82,6 +85,45 @@ test("truncates by UTF-8 byte length", () => {
   assert.equal(result.originalBytes, 120);
   assert.ok(Buffer.byteLength(result.text, "utf8") <= 50);
   assert.match(result.text, /diff truncated/);
+});
+
+test("downloads the exact base-revision archive with a size bound", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "code-review-archive-"));
+  const destination = join(directory, "base.tar.gz");
+  const client = new GitHubClient(
+    "token",
+    "https://api.example.test",
+    async (input, init) => {
+      assert.match(String(input), /tarball\/base-sha$/);
+      assert.equal(
+        (init?.headers as Record<string, string>).Authorization,
+        "Bearer token",
+      );
+      return new Response("archive-bytes", { status: 200 });
+    },
+  );
+  try {
+    const bytes = await client.downloadRepositoryArchive(
+      {
+        owner: "owner",
+        repository: "repository",
+        number: 7,
+        title: "Change",
+        body: "",
+        url: "https://example.test/7",
+        baseSha: "base-sha",
+        headSha: "head-sha",
+        author: "contributor",
+      },
+      "base-sha",
+      destination,
+      100,
+    );
+    assert.equal(bytes, 13);
+    assert.equal(await readFile(destination, "utf8"), "archive-bytes");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("updates only the managed comment owned by the PAT actor", async () => {

@@ -1,9 +1,16 @@
+import ms, { type StringValue } from "ms";
 import type { ReviewBackend } from "./review";
 
 export const DEFAULT_BACKEND: ReviewBackend = "opencode";
 export const DEFAULT_MODEL = "z-ai/glm-5.3-flash";
 export const DEFAULT_OPENCODE_VERSION = "1.18.31";
 export const DEFAULT_PI_VERSION = "0.85.1";
+export const DEFAULT_CGC_VERSION = "0.6.13";
+export const DEFAULT_GITNEXUS_VERSION = "1.6.12";
+export const DEFAULT_CODE_INDEX_CACHE_KEY = "code-review-index-v1";
+export const DEFAULT_CODE_INDEX_CACHE_TTL = "24h";
+
+export type CodeIndexer = "none" | "cgc" | "gitnexus";
 
 const DEFAULT_PROMPT =
   "Focus on correctness, security, regressions, and missing tests.";
@@ -17,6 +24,9 @@ export interface ActionConfig {
   prompt: string;
   opencodeVersion: string;
   piVersion: string;
+  codeIndexer: CodeIndexer;
+  codeIndexCacheKey: string;
+  codeIndexCacheTtlMs: number;
   maxDiffBytes: number;
   timeoutMs: number;
 }
@@ -62,6 +72,22 @@ function parseInteger(
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
     throw new Error(`${name} must be between ${minimum} and ${maximum}`);
+  }
+  return parsed;
+}
+
+function parseDuration(
+  value: string,
+  name: string,
+  minimumMs: number,
+  maximumMs: number,
+): number {
+  if (!/^\d+(?:ms|s|m|h|d)$/.test(value)) {
+    throw new Error(`${name} must be a duration such as 30m, 24h, or 7d`);
+  }
+  const parsed = ms(value as StringValue);
+  if (parsed < minimumMs || parsed > maximumMs) {
+    throw new Error(`${name} must be between ${ms(minimumMs)} and ${ms(maximumMs)}`);
   }
   return parsed;
 }
@@ -119,6 +145,30 @@ export function loadActionConfig(
     getActionInput("pi-version", environment) ?? DEFAULT_PI_VERSION,
     "pi-version",
   );
+  const codeIndexer =
+    getActionInput("code-indexer", environment) ?? "none";
+  if (
+    codeIndexer !== "none" &&
+    codeIndexer !== "cgc" &&
+    codeIndexer !== "gitnexus"
+  ) {
+    throw new Error("code-indexer must be none, cgc, or gitnexus");
+  }
+  const codeIndexCacheKey =
+    getActionInput("code-index-cache-key", environment) ??
+    DEFAULT_CODE_INDEX_CACHE_KEY;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(codeIndexCacheKey)) {
+    throw new Error(
+      "code-index-cache-key must contain 1-80 letters, digits, dots, underscores, or hyphens",
+    );
+  }
+  const codeIndexCacheTtlMs = parseDuration(
+    getActionInput("code-index-cache-ttl", environment) ??
+      DEFAULT_CODE_INDEX_CACHE_TTL,
+    "code-index-cache-ttl",
+    5 * 60_000,
+    30 * 24 * 60 * 60_000,
+  );
   const maxDiffBytes = parseInteger(
     getActionInput("max-diff-bytes", environment) ?? "120000",
     "max-diff-bytes",
@@ -141,6 +191,9 @@ export function loadActionConfig(
     prompt,
     opencodeVersion,
     piVersion,
+    codeIndexer,
+    codeIndexCacheKey,
+    codeIndexCacheTtlMs,
     maxDiffBytes,
     timeoutMs: timeoutSeconds * 1_000,
   };
