@@ -21,7 +21,7 @@ export function buildOpenCodeCommand(input: {
 
 export function parseOpenCodeJson(output: string): string {
   const textParts: string[] = [];
-  for (const [index, line] of output.split(/\r?\n/).entries()) {
+  for (const line of output.split(/\r?\n/)) {
     if (!line.trim()) {
       continue;
     }
@@ -30,7 +30,7 @@ export function parseOpenCodeJson(output: string): string {
     try {
       event = JSON.parse(line) as unknown;
     } catch {
-      throw new Error(`OpenCode emitted invalid JSON on line ${index + 1}`);
+      continue;
     }
 
     if (typeof event !== "object" || event === null) {

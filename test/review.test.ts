@@ -183,14 +183,17 @@ for (const backend of ["opencode", "pi"] as const) {
       join(tmpdir(), `code-review-${backend}-redact-`),
     );
     const fakePodman = join(directory, "podman");
+    const output =
+      backend === "opencode"
+        ? '{"type":"error","message":"provider-secret"}'
+        : '{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"provider-secret","content":[]}}';
     await writeFile(
       fakePodman,
       `#!/bin/sh
 if [ "$1" = "rm" ]; then
   exit 0
 fi
-printf '%s\\n' 'provider-secret' >&2
-exit 7
+printf '%s\\n' '${output}'
 `,
     );
     await chmod(fakePodman, 0o755);
@@ -207,6 +210,33 @@ exit 7
     }
   });
 }
+
+test("suppresses raw backend output after a non-zero exit", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "code-review-exit-"));
+  const fakePodman = join(directory, "podman");
+  await writeFile(
+    fakePodman,
+    `#!/bin/sh
+if [ "$1" = "rm" ]; then
+  exit 0
+fi
+printf '%s\\n' 'provider-secret' >&2
+exit 7
+`,
+  );
+  await chmod(fakePodman, 0o755);
+
+  try {
+    await assert.rejects(runReview(request("opencode", directory)), (error) => {
+      assert.ok(error instanceof Error);
+      assert.doesNotMatch(error.message, /provider-secret/);
+      assert.match(error.message, /backend output was suppressed/);
+      return true;
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("force-removes the named container after a timeout", async () => {
   const directory = await mkdtemp(join(tmpdir(), "code-review-timeout-"));

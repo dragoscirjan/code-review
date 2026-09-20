@@ -8,6 +8,7 @@ import {
 
 test("extracts text events from OpenCode JSON output", () => {
   const output = [
+    "npx informational notice",
     JSON.stringify({ type: "step_start" }),
     JSON.stringify({ type: "text", part: { text: "First" } }),
     JSON.stringify({ type: "text", part: { text: "Second" } }),
@@ -15,8 +16,8 @@ test("extracts text events from OpenCode JSON output", () => {
   assert.equal(parseOpenCodeJson(output), "First\n\nSecond");
 });
 
-test("rejects malformed OpenCode output", () => {
-  assert.throws(() => parseOpenCodeJson("not json"), /invalid JSON/);
+test("rejects output without review text", () => {
+  assert.throws(() => parseOpenCodeJson("not json"), /no review text/);
   assert.throws(
     () => parseOpenCodeJson(JSON.stringify({ type: "step_finish" })),
     /no review text/,

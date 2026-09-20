@@ -4,6 +4,7 @@ import { buildPiCommand, parsePiJson } from "../src/pi";
 
 test("extracts the final assistant text from Pi JSON output", () => {
   const output = [
+    "npx informational notice",
     JSON.stringify({ type: "session", version: 3 }),
     JSON.stringify({
       type: "message_end",
@@ -20,8 +21,8 @@ test("extracts the final assistant text from Pi JSON output", () => {
   assert.equal(parsePiJson(output), "Pi review");
 });
 
-test("rejects malformed or empty Pi output", () => {
-  assert.throws(() => parsePiJson("not json"), /invalid JSON/);
+test("rejects output without review text", () => {
+  assert.throws(() => parsePiJson("not json"), /no review text/);
   assert.throws(
     () => parsePiJson(JSON.stringify({ type: "agent_end" })),
     /no review text/,

@@ -341,10 +341,9 @@ async function runProcess(
         return;
       }
       if (code !== 0) {
-        const details = `${stdout.slice(-4_000)}\n${stderr.slice(-4_000)}`.trim();
         reject(
           new Error(
-            `Review sandbox exited with code ${code ?? "null"} and signal ${signal ?? "none"}: ${details}`,
+            `Review sandbox exited with code ${code ?? "null"} and signal ${signal ?? "none"}; backend output was suppressed`,
           ),
         );
         return;

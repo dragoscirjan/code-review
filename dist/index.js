@@ -333,7 +333,7 @@ function buildOpenCodeCommand(input) {
 }
 function parseOpenCodeJson(output) {
   const textParts = [];
-  for (const [index, line] of output.split(/\r?\n/).entries()) {
+  for (const line of output.split(/\r?\n/)) {
     if (!line.trim()) {
       continue;
     }
@@ -341,7 +341,7 @@ function parseOpenCodeJson(output) {
     try {
       event = JSON.parse(line);
     } catch {
-      throw new Error(`OpenCode emitted invalid JSON on line ${index + 1}`);
+      continue;
     }
     if (typeof event !== "object" || event === null) {
       continue;
@@ -394,7 +394,7 @@ function buildPiCommand(input) {
 }
 function parsePiJson(output) {
   let review = "";
-  for (const [index, line] of output.split(/\r?\n/).entries()) {
+  for (const line of output.split(/\r?\n/)) {
     if (!line.trim()) {
       continue;
     }
@@ -402,7 +402,7 @@ function parsePiJson(output) {
     try {
       event = JSON.parse(line);
     } catch {
-      throw new Error(`Pi emitted invalid JSON on line ${index + 1}`);
+      continue;
     }
     if (typeof event !== "object" || event === null) {
       continue;
@@ -702,11 +702,9 @@ async function runProcess(command, args, options) {
         return;
       }
       if (code !== 0) {
-        const details = `${stdout.slice(-4e3)}
-${stderr.slice(-4e3)}`.trim();
         reject(
           new Error(
-            `Review sandbox exited with code ${code ?? "null"} and signal ${signal ?? "none"}: ${details}`
+            `Review sandbox exited with code ${code ?? "null"} and signal ${signal ?? "none"}; backend output was suppressed`
           )
         );
         return;

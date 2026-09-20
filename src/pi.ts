@@ -24,7 +24,7 @@ export function buildPiCommand(input: {
 
 export function parsePiJson(output: string): string {
   let review = "";
-  for (const [index, line] of output.split(/\r?\n/).entries()) {
+  for (const line of output.split(/\r?\n/)) {
     if (!line.trim()) {
       continue;
     }
@@ -33,7 +33,7 @@ export function parsePiJson(output: string): string {
     try {
       event = JSON.parse(line) as unknown;
     } catch {
-      throw new Error(`Pi emitted invalid JSON on line ${index + 1}`);
+      continue;
     }
 
     if (typeof event !== "object" || event === null) {
