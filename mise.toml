@@ -9,6 +9,10 @@ python = "3.12"
 description = "Build the bundled GitHub Action"
 run = "npm run build"
 
+[tasks.commitlint]
+description = "Validate a commit message file"
+run = "npm run commitlint -- --edit"
+
 [tasks.typecheck]
 description = "Check TypeScript types"
 run = "npm run typecheck"

@@ -105,13 +105,13 @@ Update documentation in the same pull request when behavior or configuration cha
 
 ## Commits
 
-Use Conventional Commits, for example:
+Use Conventional Commits with the linked GitHub issue number as the scope. The Husky `commit-msg` hook enforces this format:
 
 ```text
-feat: add GitHub App credential provider
-fix: reject comments outside changed lines
-docs: document PAT review identity
-test: cover renamed files in diff mapping
+feat(#21): add GitHub App credential provider
+fix(#22): reject comments outside changed lines
+docs(#23): document PAT review identity
+test(#24): cover renamed files in diff mapping
 ```
 
 Keep commits reviewable. A commit should build and pass the relevant tests unless the pull request documents why an intermediate commit cannot do so.
