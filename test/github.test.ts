@@ -30,6 +30,18 @@ test("finds a managed comment by final marker line and actor", () => {
   assert.equal(findManagedComment(comments, 30, marker), undefined);
 });
 
+test("matches an exact legacy marker during migration", () => {
+  const legacy = "<!-- code-review:opencode-poc:v1 -->";
+  const current = "<!-- code-review:opencode:openrouter-poc:v2 -->";
+  const comment: GitHubComment = {
+    id: 5,
+    body: `Legacy review\n\n${legacy}`,
+    html_url: "https://example.test/5",
+    user: { id: 20, login: "bot" },
+  };
+  assert.equal(findManagedComment([comment], 20, [current, legacy])?.id, 5);
+});
+
 test("does not match a backend marker copied into review text", () => {
   const opencodeMarker = "<!-- code-review:opencode -->";
   const piMarker = "<!-- code-review:pi -->";

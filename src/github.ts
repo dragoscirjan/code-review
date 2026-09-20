@@ -130,14 +130,15 @@ export function truncateUtf8(value: string, maximumBytes: number): PullRequestDi
 export function findManagedComment(
   comments: GitHubComment[],
   actorId: number,
-  marker: string,
+  markers: string | readonly string[],
 ): GitHubComment | undefined {
+  const acceptedMarkers = typeof markers === "string" ? [markers] : markers;
   return comments.find((comment) => {
     if (comment.user?.id !== actorId || typeof comment.body !== "string") {
       return false;
     }
     const finalLine = comment.body.trimEnd().split(/\r?\n/).at(-1);
-    return finalLine === marker;
+    return finalLine !== undefined && acceptedMarkers.includes(finalLine);
   });
 }
 
@@ -219,11 +220,11 @@ export class GitHubClient {
   async upsertManagedComment(
     context: PullRequestContext,
     actor: AuthenticatedActor,
-    marker: string,
+    markers: string | readonly string[],
     body: string,
   ): Promise<GitHubComment> {
     const comments = await this.listComments(context);
-    const existing = findManagedComment(comments, actor.id, marker);
+    const existing = findManagedComment(comments, actor.id, markers);
     if (existing) {
       return this.request<GitHubComment>(
         `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/issues/comments/${existing.id}`,

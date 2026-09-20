@@ -28,8 +28,9 @@ var DEFAULT_MODEL = "z-ai/glm-5.3-flash";
 var DEFAULT_OPENCODE_VERSION = "1.18.31";
 var DEFAULT_PI_VERSION = "0.85.1";
 var DEFAULT_PROMPT = "Focus on correctness, security, regressions, and missing tests.";
-function managedCommentMarker(backend) {
-  return `<!-- code-review:${backend}:openrouter-poc:v2 -->`;
+function managedCommentMarkers(backend) {
+  const current = `<!-- code-review:${backend}:openrouter-poc:v2 -->`;
+  return backend === "opencode" ? [current, "<!-- code-review:opencode-poc:v1 -->"] : [current];
 }
 function inputCandidates(name) {
   const upper = name.toUpperCase();
@@ -202,13 +203,14 @@ function truncateUtf8(value, maximumBytes) {
     truncated: true
   };
 }
-function findManagedComment(comments, actorId, marker) {
+function findManagedComment(comments, actorId, markers) {
+  const acceptedMarkers = typeof markers === "string" ? [markers] : markers;
   return comments.find((comment) => {
     if (comment.user?.id !== actorId || typeof comment.body !== "string") {
       return false;
     }
     const finalLine = comment.body.trimEnd().split(/\r?\n/).at(-1);
-    return finalLine === marker;
+    return finalLine !== void 0 && acceptedMarkers.includes(finalLine);
   });
 }
 var GitHubClient = class {
@@ -273,9 +275,9 @@ var GitHubClient = class {
     }
     throw new Error("Pull request has more than 2000 comments");
   }
-  async upsertManagedComment(context, actor, marker, body) {
+  async upsertManagedComment(context, actor, markers, body) {
     const comments = await this.listComments(context);
-    const existing = findManagedComment(comments, actor.id, marker);
+    const existing = findManagedComment(comments, actor.id, markers);
     if (existing) {
       return this.request(
         `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/issues/comments/${existing.id}`,
@@ -833,7 +835,8 @@ async function main() {
     pullRequest,
     diff
   });
-  const marker = managedCommentMarker(config.backend);
+  const markers = managedCommentMarkers(config.backend);
+  const marker = markers[0];
   const body = renderComment({
     review,
     backend: config.backend,
@@ -847,7 +850,7 @@ async function main() {
   const comment = await client.upsertManagedComment(
     pullRequest,
     actor,
-    marker,
+    markers,
     body
   );
   await setOutput("comment-url", comment.html_url);

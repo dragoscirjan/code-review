@@ -21,8 +21,11 @@ export interface ActionConfig {
   timeoutMs: number;
 }
 
-export function managedCommentMarker(backend: ReviewBackend): string {
-  return `<!-- code-review:${backend}:openrouter-poc:v2 -->`;
+export function managedCommentMarkers(backend: ReviewBackend): string[] {
+  const current = `<!-- code-review:${backend}:openrouter-poc:v2 -->`;
+  return backend === "opencode"
+    ? [current, "<!-- code-review:opencode-poc:v1 -->"]
+    : [current];
 }
 
 function inputCandidates(name: string): string[] {

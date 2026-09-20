@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFile } from "node:fs/promises";
 import { renderComment } from "./comment";
-import { loadActionConfig, managedCommentMarker } from "./config";
+import { loadActionConfig, managedCommentMarkers } from "./config";
 import { GitHubClient, loadPullRequestEvent } from "./github";
 import { runReview } from "./review";
 
@@ -61,7 +61,8 @@ async function main(): Promise<void> {
     pullRequest,
     diff,
   });
-  const marker = managedCommentMarker(config.backend);
+  const markers = managedCommentMarkers(config.backend);
+  const marker = markers[0];
   const body = renderComment({
     review,
     backend: config.backend,
@@ -75,7 +76,7 @@ async function main(): Promise<void> {
   const comment = await client.upsertManagedComment(
     pullRequest,
     actor,
-    marker,
+    markers,
     body,
   );
 

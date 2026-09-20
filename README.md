@@ -79,6 +79,7 @@ Do not add `actions/checkout` to this `pull_request_target` job. Do not referenc
 - Both backends run in a digest-pinned container with a read-only root, no Linux capabilities, no added privileges, resource limits, and no host mounts.
 - Pull request titles, bodies, and diffs are untrusted data.
 - Each backend uses a separate hidden marker. The action also checks the PAT actor ID before updating a comment.
+- The first OpenCode run after an upgrade recognizes the previous POC marker and updates that comment to the new format.
 
 The PAT determines the visible GitHub identity. The heading identifies the model and backend, for example `Code Review (z-ai/glm-5.3-flash via Pi)`.
 

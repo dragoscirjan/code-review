@@ -24,5 +24,6 @@ for (const [backend, label] of [
       ),
     );
     assert.doesNotMatch(comment, /^## OpenCode review/);
+    assert.equal(comment.trimEnd().split(/\r?\n/).at(-1), `<!-- ${backend} -->`);
   });
 }

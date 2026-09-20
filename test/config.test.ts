@@ -5,7 +5,7 @@ import {
   DEFAULT_MODEL,
   getActionInput,
   loadActionConfig,
-  managedCommentMarker,
+  managedCommentMarkers,
 } from "../src/config";
 
 test("reads hyphenated action input names", () => {
@@ -102,8 +102,12 @@ test("requires exact backend package versions", () => {
   );
 });
 
-test("uses a distinct managed marker for each backend", () => {
-  assert.notEqual(managedCommentMarker("opencode"), managedCommentMarker("pi"));
+test("uses distinct markers and retains the OpenCode migration marker", () => {
+  const opencode = managedCommentMarkers("opencode");
+  const pi = managedCommentMarkers("pi");
+  assert.notEqual(opencode[0], pi[0]);
+  assert.deepEqual(opencode.slice(1), ["<!-- code-review:opencode-poc:v1 -->"]);
+  assert.equal(pi.length, 1);
 });
 
 test("rejects an oversized prompt", () => {
