@@ -1,11 +1,15 @@
-import { appendFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { loadActionConfig, MANAGED_COMMENT_MARKER } from "./config";
+import { appendFile } from "node:fs/promises";
+import { renderComment } from "./comment";
+import { loadActionConfig, managedCommentMarkers } from "./config";
 import { GitHubClient, loadPullRequestEvent } from "./github";
-import { runOpenCode } from "./opencode";
+import { runReview } from "./review";
 
 function workflowCommandValue(value: string): string {
-  return value.replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
+  return value
+    .replaceAll("%", "%25")
+    .replaceAll("\r", "%0D")
+    .replaceAll("\n", "%0A");
 }
 
 async function setOutput(name: string, value: string): Promise<void> {
@@ -19,28 +23,6 @@ async function setOutput(name: string, value: string): Promise<void> {
     `${name}<<${delimiter}\n${value}\n${delimiter}\n`,
     "utf8",
   );
-}
-
-function renderComment(input: {
-  review: string;
-  model: string;
-  headSha: string;
-  actor: string;
-  diffTruncated: boolean;
-  originalDiffBytes: number;
-}): string {
-  const truncation = input.diffTruncated
-    ? `\n\n> Diff input was truncated from ${input.originalDiffBytes} bytes.`
-    : "";
-  return `## OpenCode review
-
-- Model: \`${input.model}\`
-- Head: \`${input.headSha.slice(0, 12)}\`
-- Published through: \`@${input.actor}\`${truncation}
-
-${input.review}
-
-${MANAGED_COMMENT_MARKER}`;
 }
 
 async function main(): Promise<void> {
@@ -57,7 +39,7 @@ async function main(): Promise<void> {
   );
 
   console.log(
-    `Reviewing ${pullRequest.owner}/${pullRequest.repository}#${pullRequest.number} at ${pullRequest.headSha.slice(0, 12)}`,
+    `Reviewing ${pullRequest.owner}/${pullRequest.repository}#${pullRequest.number} at ${pullRequest.headSha.slice(0, 12)} with ${config.backend}`,
   );
   const [actor, diff] = await Promise.all([
     client.getAuthenticatedActor(),
@@ -67,27 +49,34 @@ async function main(): Promise<void> {
     `Fetched ${diff.originalBytes} diff bytes${diff.truncated ? `; limited to ${config.maxDiffBytes}` : ""}`,
   );
 
-  const review = await runOpenCode({
+  const review = await runReview({
+    backend: config.backend,
     containerEngine: config.containerEngine,
     model: config.model,
-    version: config.opencodeVersion,
+    openRouterApiKey: config.openRouterApiKey,
+    opencodeVersion: config.opencodeVersion,
+    piVersion: config.piVersion,
     customPrompt: config.prompt,
     timeoutMs: config.timeoutMs,
     pullRequest,
     diff,
   });
+  const markers = managedCommentMarkers(config.backend);
+  const marker = markers[0];
   const body = renderComment({
     review,
+    backend: config.backend,
     model: config.model,
     headSha: pullRequest.headSha,
     actor: actor.login,
     diffTruncated: diff.truncated,
     originalDiffBytes: diff.originalBytes,
+    marker,
   });
   const comment = await client.upsertManagedComment(
     pullRequest,
     actor,
-    MANAGED_COMMENT_MARKER,
+    markers,
     body,
   );
 

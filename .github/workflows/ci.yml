@@ -37,7 +37,7 @@ jobs:
             --tmpfs /tmp:rw,exec,nosuid,nodev,size=1536m \
             --workdir /tmp \
             --user 65534:65534 \
-            docker.io/library/node:20.19.5-bookworm-slim@sha256:d08621e478133b0492bd661ceee5d13a22b8c55297f3dbbb57f1c15d0c214942 \
+            docker.io/library/node:24.14.0-bookworm-slim@sha256:4bd6219054c8bebcd26a66bfd8ca0bd6e1024b4b97474c59bb7ee3bbcbef4fe8 \
             node --version
       - name: Verify bundled action
         run: |

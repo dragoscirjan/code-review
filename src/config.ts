@@ -1,18 +1,31 @@
-export const DEFAULT_MODEL = "opencode/big-pickle";
+import type { ReviewBackend } from "./review";
+
+export const DEFAULT_BACKEND: ReviewBackend = "opencode";
+export const DEFAULT_MODEL = "z-ai/glm-5.3-flash";
 export const DEFAULT_OPENCODE_VERSION = "1.18.31";
-export const MANAGED_COMMENT_MARKER = "<!-- code-review:opencode-poc:v1 -->";
+export const DEFAULT_PI_VERSION = "0.85.1";
 
 const DEFAULT_PROMPT =
   "Focus on correctness, security, regressions, and missing tests.";
 
 export interface ActionConfig {
   githubToken: string;
+  openRouterApiKey: string;
+  backend: ReviewBackend;
   containerEngine: "podman" | "docker";
   model: string;
   prompt: string;
   opencodeVersion: string;
+  piVersion: string;
   maxDiffBytes: number;
   timeoutMs: number;
+}
+
+export function managedCommentMarkers(backend: ReviewBackend): string[] {
+  const current = `<!-- code-review:${backend}:openrouter-poc:v2 -->`;
+  return backend === "opencode"
+    ? [current, "<!-- code-review:opencode-poc:v1 -->"]
+    : [current];
 }
 
 function inputCandidates(name: string): string[] {
@@ -53,12 +66,32 @@ function parseInteger(
   return parsed;
 }
 
+function exactVersion(value: string, name: string): string {
+  if (!/^\d+\.\d+\.\d+$/.test(value)) {
+    throw new Error(`${name} must be an exact semantic version`);
+  }
+  return value;
+}
+
 export function loadActionConfig(
   environment: NodeJS.ProcessEnv = process.env,
 ): ActionConfig {
   const githubToken = getActionInput("github-token", environment);
   if (!githubToken) {
     throw new Error("github-token is required");
+  }
+
+  const openRouterApiKey = getActionInput(
+    "openrouter-api-key",
+    environment,
+  );
+  if (!openRouterApiKey) {
+    throw new Error("openrouter-api-key is required");
+  }
+
+  const backend = getActionInput("backend", environment) ?? DEFAULT_BACKEND;
+  if (backend !== "opencode" && backend !== "pi") {
+    throw new Error("backend must be opencode or pi");
   }
 
   const containerEngine =
@@ -77,13 +110,15 @@ export function loadActionConfig(
     throw new Error("prompt must not exceed 10000 UTF-8 bytes");
   }
 
-  const opencodeVersion =
+  const opencodeVersion = exactVersion(
     getActionInput("opencode-version", environment) ??
-    DEFAULT_OPENCODE_VERSION;
-  if (!/^\d+\.\d+\.\d+$/.test(opencodeVersion)) {
-    throw new Error("opencode-version must be an exact semantic version");
-  }
-
+      DEFAULT_OPENCODE_VERSION,
+    "opencode-version",
+  );
+  const piVersion = exactVersion(
+    getActionInput("pi-version", environment) ?? DEFAULT_PI_VERSION,
+    "pi-version",
+  );
   const maxDiffBytes = parseInteger(
     getActionInput("max-diff-bytes", environment) ?? "120000",
     "max-diff-bytes",
@@ -99,10 +134,13 @@ export function loadActionConfig(
 
   return {
     githubToken,
+    openRouterApiKey,
+    backend,
     containerEngine,
     model,
     prompt,
     opencodeVersion,
+    piVersion,
     maxDiffBytes,
     timeoutMs: timeoutSeconds * 1_000,
   };

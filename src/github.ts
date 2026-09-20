@@ -127,15 +127,29 @@ export function truncateUtf8(value: string, maximumBytes: number): PullRequestDi
   };
 }
 
+function hasFinalMarker(comment: GitHubComment, marker: string): boolean {
+  if (typeof comment.body !== "string") {
+    return false;
+  }
+  return comment.body.trimEnd().split(/\r?\n/).at(-1) === marker;
+}
+
 export function findManagedComment(
   comments: GitHubComment[],
   actorId: number,
-  marker: string,
+  markers: string | readonly string[],
 ): GitHubComment | undefined {
-  return comments.find(
-    (comment) =>
-      comment.user?.id === actorId && comment.body?.includes(marker) === true,
-  );
+  const acceptedMarkers = typeof markers === "string" ? [markers] : markers;
+  for (const marker of acceptedMarkers) {
+    const match = comments.find(
+      (comment) =>
+        comment.user?.id === actorId && hasFinalMarker(comment, marker),
+    );
+    if (match) {
+      return match;
+    }
+  }
+  return undefined;
 }
 
 export class GitHubClient {
@@ -216,11 +230,11 @@ export class GitHubClient {
   async upsertManagedComment(
     context: PullRequestContext,
     actor: AuthenticatedActor,
-    marker: string,
+    markers: string | readonly string[],
     body: string,
   ): Promise<GitHubComment> {
     const comments = await this.listComments(context);
-    const existing = findManagedComment(comments, actor.id, marker);
+    const existing = findManagedComment(comments, actor.id, markers);
     if (existing) {
       return this.request<GitHubComment>(
         `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/issues/comments/${existing.id}`,
