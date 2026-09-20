@@ -25,6 +25,10 @@ run = "npm run lint"
 description = "Check linting without modifying files"
 run = "npm run lint:check"
 
+[tasks."lint-staged"]
+description = "Lint and format staged files"
+run = "npm run lint-staged"
+
 [tasks."duplicate-check"]
 description = "Check source code for duplication"
 run = "npm run duplicate-check"

@@ -17,7 +17,7 @@ mise trust
 mise run deps:sync
 ```
 
-Run `mise tasks` to list the available tasks. Use `mise run <task>` when a task exists.
+Run `mise tasks` to list the available tasks. Use `mise run <task>` when a task exists. Dependency installation also configures Husky hooks: staged files are linted and formatted before commits, and the test suite runs before pushes.
 
 ## Before starting
 

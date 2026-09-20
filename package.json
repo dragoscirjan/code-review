@@ -16,6 +16,8 @@
     "format:check": "prettier --ignore-path .prettierignore --check \"**/*.{cjs,js,json,json5,jsonc,md,mjs,ts,toml,yaml,yml}\"",
     "lint": "eslint --fix .",
     "lint:check": "eslint .",
+    "lint-staged": "lint-staged",
+    "prepare": "husky",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:integration": "RUN_LLM_INTEGRATION=1 vitest run test/integration.test.ts",
@@ -24,6 +26,9 @@
     "typecheck": "tsc --noEmit",
     "validate": "mise run validate"
   },
+  "lint-staged": {
+    "*.{cjs,js,json,json5,jsonc,md,mjs,ts,toml,yaml,yml}": ["eslint --fix", "prettier --write"]
+  },
   "devDependencies": {
     "@tempel/eslint": "1.3.1",
     "@tempel/prettier": "1.1.0",
@@ -31,7 +36,9 @@
     "@types/ms": "2.1.0",
     "@types/node": "20.19.43",
     "esbuild": "0.28.2",
+    "husky": "9.1.7",
     "jscpd": "5.2.0",
+    "lint-staged": "16.2.4",
     "typescript": "5.9.3"
   },
   "dependencies": {
