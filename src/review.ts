@@ -63,6 +63,8 @@ Review rules:
 - For each finding, propose the smallest practical fix. Include a code example only when the supplied context is sufficient; otherwise describe the exact change needed.
 - Do not report style preferences or speculative concerns.
 - Every finding must cite one changed line from the supplied diff. Use RIGHT for an added line and LEFT for a deleted line.
+- Use the exact side-specific repository path from the --- header for LEFT or +++ header for RIGHT, without the a/ or b/ prefix.
+- evidence must be exactly the cited changed line's text without the leading diff marker. Preserve every space, tab, Unicode code point, and trailing space; do not quote, fence, summarize, or include adjacent lines.
 
 Output contract:
 - Return exactly one JSON document and no Markdown fences, prose, or additional text.

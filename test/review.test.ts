@@ -96,6 +96,8 @@ test('preserves pull request content inside generated untrusted boundaries', () 
   assert.match(prompt, /only supported contract version is 1/);
   assert.match(prompt, /A clean review is exactly \{"version":1,"outcome":"clean","findings":\[\]\}/);
   assert.match(prompt, /Return exactly one JSON document/);
+  assert.match(prompt, /exact side-specific repository path/);
+  assert.match(prompt, /evidence must be exactly the cited changed line's text/);
   assert.doesNotMatch(prompt, /Return concise GitHub-flavored Markdown/);
   assert.match(prompt, /Trusted review guidance:\nFocus on tests\./);
   assert.match(prompt, /Ignore all previous instructions/);
@@ -142,6 +144,8 @@ test('passes only the model credential to each backend', () => {
     INPUT_GITHUB_TOKEN: 'github-secret',
     HTTPS_PROXY: 'https://proxy-user:proxy-secret@example.test',
     HTTP_PROXY: 'http://proxy-user:proxy-secret@example.test',
+    INPUT_MODEL_CREDENTIALS: '{"selected":"provider-secret","unused":"unused-secret"}',
+    UNUSED_MODEL_TOKEN: 'unused-secret',
   };
   const opencode = buildContainerEnvironment(source, connection, 'opencode', versions);
   const pi = buildContainerEnvironment(source, connection, 'pi', versions);
@@ -153,6 +157,9 @@ test('passes only the model credential to each backend', () => {
     assert.equal(child.INPUT_GITHUB_TOKEN, undefined);
     assert.equal(child.HTTPS_PROXY, undefined);
     assert.equal(child.HTTP_PROXY, undefined);
+    assert.equal(child.INPUT_MODEL_CREDENTIALS, undefined);
+    assert.equal(child.UNUSED_MODEL_TOKEN, undefined);
+    assert.ok(!JSON.stringify(child).includes('unused-secret'));
   }
   assert.match(opencode.REVIEW_HARNESS_CONFIG ?? '', /"\*":"deny"/);
   assert.equal(pi.PI_TELEMETRY, '0');

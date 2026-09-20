@@ -1,4 +1,5 @@
 import { open, readFile, rm } from 'node:fs/promises';
+import { prepareReviewedDiff, type UnifiedDiff } from './unified-diff';
 
 export interface PullRequestContext {
   owner: string;
@@ -21,6 +22,14 @@ export interface PullRequestDiff {
   text: string;
   originalBytes: number;
   truncated: boolean;
+  totalFiles?: number;
+  parsed?: UnifiedDiff;
+}
+
+export interface PullRequestRevision {
+  baseSha: string;
+  headSha: string;
+  changedFiles: number;
 }
 
 export interface GitHubComment {
@@ -31,6 +40,17 @@ export interface GitHubComment {
     id: number;
     login: string;
   } | null;
+}
+
+export interface GitHubReview extends GitHubComment {
+  commit_id?: string;
+}
+
+export interface GitHubInlineCommentInput {
+  path: string;
+  side: 'LEFT' | 'RIGHT';
+  line: number;
+  body: string;
 }
 
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -52,6 +72,13 @@ function text(value: unknown, name: string): string {
 function integer(value: unknown, name: string): number {
   if (!Number.isInteger(value) || (value as number) <= 0) {
     throw new Error(`${name} must be a positive integer`);
+  }
+  return value as number;
+}
+
+function nonnegativeInteger(value: unknown, name: string): number {
+  if (!Number.isInteger(value) || (value as number) < 0) {
+    throw new Error(`${name} must be a nonnegative integer`);
   }
   return value as number;
 }
@@ -85,33 +112,6 @@ export function parsePullRequestEvent(payload: unknown): PullRequestContext {
 export async function loadPullRequestEvent(eventPath: string): Promise<PullRequestContext> {
   const content = await readFile(eventPath, 'utf8');
   return parsePullRequestEvent(JSON.parse(content) as unknown);
-}
-
-export function truncateUtf8(value: string, maximumBytes: number): PullRequestDiff {
-  const bytes = Buffer.from(value, 'utf8');
-  if (bytes.length <= maximumBytes) {
-    return { text: value, originalBytes: bytes.length, truncated: false };
-  }
-
-  const trailer = Buffer.from('\n\n[diff truncated by code-review action]', 'utf8');
-  if (maximumBytes <= trailer.length) {
-    return {
-      text: trailer.subarray(0, maximumBytes).toString('utf8'),
-      originalBytes: bytes.length,
-      truncated: true,
-    };
-  }
-
-  const decoder = new TextDecoder('utf-8', { fatal: false });
-  let content = decoder.decode(bytes.subarray(0, maximumBytes - trailer.length));
-  while (content.length > 0 && Buffer.byteLength(content, 'utf8') + trailer.length > maximumBytes) {
-    content = content.slice(0, -1);
-  }
-  return {
-    text: `${content}${trailer.toString('utf8')}`,
-    originalBytes: bytes.length,
-    truncated: true,
-  };
 }
 
 function hasFinalMarker(comment: GitHubComment, marker: string): boolean {
@@ -156,8 +156,8 @@ export class GitHubClient {
     });
 
     if (!response.ok) {
-      const message = (await response.text()).slice(0, 2_000);
-      throw new Error(`GitHub API ${init.method ?? 'GET'} ${path} failed with ${response.status}: ${message}`);
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error(`GitHub API ${init.method ?? 'GET'} ${path} failed with ${response.status}`);
     }
 
     return (await response.json()) as T;
@@ -166,6 +166,20 @@ export class GitHubClient {
   async getAuthenticatedActor(): Promise<AuthenticatedActor> {
     const actor = await this.request<{ id: number; login: string }>('/user');
     return { id: actor.id, login: actor.login };
+  }
+
+  async getPullRequestRevision(context: PullRequestContext): Promise<PullRequestRevision> {
+    const path = `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/pulls/${context.number}`;
+    const pullRequest = await this.request<{
+      base: { sha: string };
+      head: { sha: string };
+      changed_files: number;
+    }>(path);
+    return {
+      baseSha: text(record(pullRequest.base, 'pull_request.base').sha, 'pull_request.base.sha'),
+      headSha: text(record(pullRequest.head, 'pull_request.head').sha, 'pull_request.head.sha'),
+      changedFiles: nonnegativeInteger(pullRequest.changed_files, 'pull_request.changed_files'),
+    };
   }
 
   async downloadRepositoryArchive(
@@ -230,12 +244,39 @@ export class GitHubClient {
       },
     });
 
-    if (!response.ok) {
-      const message = (await response.text()).slice(0, 2_000);
-      throw new Error(`GitHub diff request failed with ${response.status}: ${message}`);
+    if (!response.ok || !response.body) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error(`GitHub diff request failed with ${response.status}`);
     }
-
-    return truncateUtf8(await response.text(), maximumBytes);
+    const acquisitionLimit = 10_000_000;
+    const contentLength = Number(response.headers.get('content-length'));
+    if (Number.isFinite(contentLength) && contentLength > acquisitionLimit) {
+      await response.body.cancel().catch(() => undefined);
+      throw new Error(`GitHub diff exceeds ${acquisitionLimit} acquisition bytes`);
+    }
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let bytes = 0;
+    try {
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        bytes += chunk.value.byteLength;
+        if (bytes > acquisitionLimit) throw new Error(`GitHub diff exceeds ${acquisitionLimit} acquisition bytes`);
+        chunks.push(chunk.value);
+      }
+    } catch (error) {
+      await reader.cancel().catch(() => undefined);
+      throw error;
+    }
+    const encoded = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
+    let raw: string;
+    try {
+      raw = new TextDecoder('utf-8', { fatal: true }).decode(encoded);
+    } catch {
+      throw new Error('GitHub diff is not valid UTF-8');
+    }
+    return prepareReviewedDiff(raw, maximumBytes);
   }
 
   async listComments(context: PullRequestContext): Promise<GitHubComment[]> {
@@ -249,6 +290,42 @@ export class GitHubClient {
       }
     }
     throw new Error('Pull request has more than 2000 comments');
+  }
+
+  async listPullRequestReviews(context: PullRequestContext): Promise<GitHubReview[]> {
+    const reviews: GitHubReview[] = [];
+    for (let page = 1; page <= 20; page += 1) {
+      const path = `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/pulls/${context.number}/reviews?per_page=100&page=${page}`;
+      const response = await this.request<GitHubReview[]>(path);
+      reviews.push(...response);
+      if (response.length < 100) return reviews;
+    }
+    throw new Error('Pull request has more than 2000 reviews');
+  }
+
+  async createOrReuseInlineReview(
+    context: PullRequestContext,
+    actor: AuthenticatedActor,
+    headSha: string,
+    marker: string,
+    comments: readonly GitHubInlineCommentInput[],
+  ): Promise<GitHubReview> {
+    if (comments.length === 0) throw new Error('Inline review requires at least one comment');
+    const existing = findManagedComment(await this.listPullRequestReviews(context), actor.id, marker);
+    if (existing) return existing;
+    return this.request<GitHubReview>(
+      `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/pulls/${context.number}/reviews`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          commit_id: headSha,
+          event: 'COMMENT',
+          body: `Validated inline findings from code-review.\n\n${marker}`,
+          comments,
+        }),
+        headers: { 'Content-Type': 'application/json' },
+      },
+    );
   }
 
   async upsertManagedComment(

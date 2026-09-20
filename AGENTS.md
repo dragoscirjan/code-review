@@ -19,7 +19,7 @@
 - Accept provider-neutral `model-config` plus separate secret `model-credentials` for existing local/private or remote model endpoints. See Wiki Provider-neutral-model-configuration and issue #12. No fixed-model allowlist or provider-specific credential input.
 - Publish through the `GH_TOKEN` personal access token secret.
 - Pass only the selected provider credential to the backend container. Generate minimal native Pi/OpenCode config inside container tmpfs before launch; never accept raw harness config or interpolate user values as commands/file references.
-- Do not implement managed local model runtime lifecycle, inline comments, or Forgejo and Gitea adapters in this milestone. Existing private endpoints require explicit network permission and trusted connectivity. Gateway-enforced egress remains future work.
+- Do not implement managed local model runtime lifecycle or Forgejo and Gitea adapters in this milestone. Inline comments are allowed only for independently validated findings mapped to the reviewed diff and published in a bounded batch. Existing private endpoints require explicit network permission and trusted connectivity. Gateway-enforced egress remains future work.
 - Use `pull_request_target` only with an action pinned to an immutable trusted commit. Never check out or execute pull request code in that workflow.
 - Run each backend in the fixed digest-pinned container sandbox. Use Podman by default and allow Docker only as a validated fallback. Pass the bounded diff as untrusted prompt data. Do not mount host files.
 - Deny all OpenCode tools. Disable all Pi tools and project resource discovery.

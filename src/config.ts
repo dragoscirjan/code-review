@@ -1,5 +1,5 @@
 import ms, { type StringValue } from 'ms';
-import { loadModelConnection, type ModelConnection } from './model';
+import { loadModelConfiguration, type ModelConnection } from './model';
 import type { ReviewBackend } from './review';
 
 export const DEFAULT_BACKEND: ReviewBackend = 'opencode';
@@ -17,6 +17,7 @@ const DEFAULT_PROMPT = 'Focus on correctness, security, regressions, and missing
 export interface ActionConfig {
   githubToken: string;
   connection: ModelConnection;
+  modelCredentialValues: readonly string[];
   backend: ReviewBackend;
   containerEngine: 'podman' | 'docker';
   prompt: string;
@@ -26,13 +27,18 @@ export interface ActionConfig {
   codeIndexCacheKey: string;
   codeIndexCacheTtlMs: number;
   maxDiffBytes: number;
+  minimumConfidence: number;
+  maxInlineComments: number;
   timeoutMs: number;
 }
 
 export function managedCommentMarkers(backend: ReviewBackend): string[] {
-  const current = `<!-- code-review:${backend}:v3 -->`;
-  const previous = `<!-- code-review:${backend}:openrouter-poc:v2 -->`;
-  return backend === 'opencode' ? [current, previous, '<!-- code-review:opencode-poc:v1 -->'] : [current, previous];
+  const current = `<!-- code-review:${backend}:v4 -->`;
+  const structured = `<!-- code-review:${backend}:v3 -->`;
+  const providerNeutral = `<!-- code-review:${backend}:openrouter-poc:v2 -->`;
+  return backend === 'opencode'
+    ? [current, structured, providerNeutral, '<!-- code-review:opencode-poc:v1 -->']
+    : [current, structured, providerNeutral];
 }
 
 function inputCandidates(name: string): string[] {
@@ -58,6 +64,17 @@ function parseInteger(value: string, name: string, minimum: number, maximum: num
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
     throw new Error(`${name} must be between ${minimum} and ${maximum}`);
+  }
+  return parsed;
+}
+
+function parseConfidence(value: string): number {
+  if (!/^(?:0(?:\.\d+)?|1(?:\.0+)?)$/.test(value)) {
+    throw new Error('minimum-confidence must be a decimal between 0 and 1');
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
+    throw new Error('minimum-confidence must be between 0 and 1');
   }
   return parsed;
 }
@@ -93,7 +110,10 @@ export function loadActionConfig(environment: NodeJS.ProcessEnv = process.env): 
   }
   const modelConfig = getActionInput('model-config', environment);
   if (!modelConfig) throw new Error('model-config is required; see README for OpenRouter and local examples');
-  const connection = loadModelConnection(modelConfig, getActionInput('model-credentials', environment));
+  const { connection, credentialValues: modelCredentialValues } = loadModelConfiguration(
+    modelConfig,
+    getActionInput('model-credentials', environment),
+  );
 
   const backend = getActionInput('backend', environment) ?? DEFAULT_BACKEND;
   if (backend !== 'opencode' && backend !== 'pi') {
@@ -135,6 +155,13 @@ export function loadActionConfig(environment: NodeJS.ProcessEnv = process.env): 
     1_000,
     500_000,
   );
+  const minimumConfidence = parseConfidence(getActionInput('minimum-confidence', environment) ?? '0');
+  const maxInlineComments = parseInteger(
+    getActionInput('max-inline-comments', environment) ?? '0',
+    'max-inline-comments',
+    0,
+    10,
+  );
   const timeoutSeconds = parseInteger(
     getActionInput('timeout-seconds', environment) ?? '600',
     'timeout-seconds',
@@ -145,6 +172,7 @@ export function loadActionConfig(environment: NodeJS.ProcessEnv = process.env): 
   return {
     githubToken,
     connection,
+    modelCredentialValues,
     backend,
     containerEngine,
     prompt,
@@ -154,6 +182,8 @@ export function loadActionConfig(environment: NodeJS.ProcessEnv = process.env): 
     codeIndexCacheKey,
     codeIndexCacheTtlMs,
     maxDiffBytes,
+    minimumConfidence,
+    maxInlineComments,
     timeoutMs: timeoutSeconds * 1_000,
   };
 }

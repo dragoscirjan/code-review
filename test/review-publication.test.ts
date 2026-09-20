@@ -1,8 +1,15 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
-import type { AuthenticatedActor, GitHubComment, PullRequestContext } from '../src/github';
-import { parseReviewResult, type ReviewResultV1 } from '../src/review-contract';
+import type {
+  AuthenticatedActor,
+  GitHubComment,
+  GitHubInlineCommentInput,
+  GitHubReview,
+  PullRequestContext,
+} from '../src/github';
+import { parseReviewResult, type ReviewFinding, type ReviewResultV1 } from '../src/review-contract';
 import { executeAndPublishReview } from '../src/review-publication';
+import { prepareReviewedDiff } from '../src/unified-diff';
 
 const pullRequest: PullRequestContext = {
   owner: 'owner',
@@ -16,83 +23,245 @@ const pullRequest: PullRequestContext = {
   url: 'https://example.test/pull/1',
 };
 const actor: AuthenticatedActor = { id: 7, login: 'reviewer' };
+const diff = prepareReviewedDiff(
+  [
+    'diff --git a/src/file.ts b/src/file.ts',
+    '--- a/src/file.ts',
+    '+++ b/src/file.ts',
+    '@@ -1 +1 @@',
+    '-old();',
+    '+unsafe();',
+  ].join('\n'),
+  10_000,
+);
 
-function publicationSpy() {
-  let calls = 0;
+function finding(overrides: Partial<ReviewFinding> = {}): ReviewFinding {
+  return {
+    category: 'security',
+    severity: 'high',
+    confidence: 1,
+    location: { path: 'src/file.ts', side: 'RIGHT', line: 1 },
+    evidence: 'unsafe();',
+    explanation: 'Unsafe behavior.',
+    fix: 'Use safe behavior.',
+    ...overrides,
+  };
+}
+
+function publicationSpy(options: { inlineError?: boolean; summaryError?: boolean } = {}) {
+  const events: string[] = [];
   let publishedBody = '';
+  let inlineComments: readonly GitHubInlineCommentInput[] = [];
   return {
     client: {
+      async createOrReuseInlineReview(
+        _context: PullRequestContext,
+        _actor: AuthenticatedActor,
+        headSha: string,
+        _marker: string,
+        comments: readonly GitHubInlineCommentInput[],
+      ): Promise<GitHubReview> {
+        events.push(`inline:${headSha}`);
+        inlineComments = comments;
+        if (options.inlineError) throw new Error('inline failed');
+        return { id: 2, body: 'review', html_url: 'https://example.test/review/2', user: actor };
+      },
       async upsertManagedComment(
         _context: PullRequestContext,
         _actor: AuthenticatedActor,
         _markers: string | readonly string[],
         body: string,
       ): Promise<GitHubComment> {
-        calls += 1;
+        events.push('summary');
         publishedBody = body;
+        if (options.summaryError) throw new Error('summary failed');
         return { id: 1, body, html_url: 'https://example.test/comment/1', user: actor };
       },
     },
-    calls: () => calls,
+    events,
     publishedBody: () => publishedBody,
+    inlineComments: () => inlineComments,
   };
 }
 
-function input(executeReview: () => Promise<ReviewResultV1>, spy: ReturnType<typeof publicationSpy>) {
+function input(
+  executeReview: () => Promise<ReviewResultV1>,
+  spy: ReturnType<typeof publicationSpy>,
+  overrides: Partial<Parameters<typeof executeAndPublishReview>[0]> = {},
+) {
   return {
     executeReview,
+    assertFresh: async () => undefined,
     client: spy.client,
     pullRequest,
+    diff,
     actor,
     markers: ['<!-- managed -->'],
     backend: 'opencode' as const,
     model: 'model',
-    secrets: ['provider-secret'],
-    diffTruncated: false,
-    originalDiffBytes: 10,
+    secrets: ['provider-secret', 'unused-secret'],
+    minimumConfidence: 0,
+    maximumInlineComments: 0,
+    ...overrides,
   };
 }
 
-test('malformed backend output cannot reach managed-comment publication', async () => {
+test('malformed backend output cannot reach publication', async () => {
   const spy = publicationSpy();
   await assert.rejects(
     executeAndPublishReview(input(async () => parseReviewResult('No material findings.'), spy)),
     /one valid JSON document/,
   );
-  assert.equal(spy.calls(), 0);
+  assert.deepEqual(spy.events, []);
 });
 
-test('a secret in structural review data cannot reach managed-comment publication', async () => {
+test('staleness between snapshot/indexing and backend invocation produces zero backend and publication calls', async () => {
+  const spy = publicationSpy();
+  const review = parseReviewResult(JSON.stringify({ version: 1, outcome: 'findings', findings: [finding()] }));
+  let backendCalls = 0;
+  await assert.rejects(
+    executeAndPublishReview(
+      input(
+        async () => {
+          backendCalls += 1;
+          return review;
+        },
+        spy,
+        {
+          assertFresh: async () => {
+            throw new Error('Pull request revision changed during review');
+          },
+          maximumInlineComments: 1,
+        },
+      ),
+    ),
+    /revision changed/,
+  );
+  assert.equal(backendCalls, 0);
+  assert.deepEqual(spy.events, []);
+});
+
+test('invalid findings are omitted while summary reports unmapped and rejected counts', async () => {
   const spy = publicationSpy();
   const review = parseReviewResult(
     JSON.stringify({
       version: 1,
       outcome: 'findings',
       findings: [
-        {
-          category: 'security',
-          severity: 'high',
-          confidence: 1,
-          location: { path: 'src/provider-secret.ts', side: 'RIGHT', line: 1 },
-          evidence: 'A credential is exposed.',
-          explanation: 'The changed path contains structural secret data.',
-          fix: 'Remove the credential.',
-        },
+        finding({ location: { path: 'missing.ts', side: 'RIGHT', line: 1 } }),
+        finding({ evidence: 'spoofed evidence' }),
       ],
     }),
   );
-
-  await assert.rejects(executeAndPublishReview(input(async () => review, spy)), /forbidden secret data/);
-  assert.equal(spy.calls(), 0);
+  await executeAndPublishReview(input(async () => review, spy, { maximumInlineComments: 2 }));
+  assert.deepEqual(spy.events, ['summary']);
+  assert.match(spy.publishedBody(), /Rejected .*: 1/);
+  assert.match(spy.publishedBody(), /Unmapped: 1/);
+  assert.doesNotMatch(spy.publishedBody(), /missing\.ts|spoofed evidence/);
 });
 
-test('a valid review is rendered before one managed-comment publication', async () => {
+test('publishes all selected inline findings in one batch before the managed summary', async () => {
   const spy = publicationSpy();
-  const review = parseReviewResult('{"version":1,"outcome":"clean","findings":[]}');
+  const review = parseReviewResult(JSON.stringify({ version: 1, outcome: 'findings', findings: [finding()] }));
+  const result = await executeAndPublishReview(input(async () => review, spy, { maximumInlineComments: 1 }));
+  assert.deepEqual(spy.events, [`inline:${pullRequest.headSha}`, 'summary']);
+  assert.deepEqual(
+    spy.inlineComments().map(({ path, line, side }) => ({ path, line, side })),
+    [{ path: 'src/file.ts', line: 1, side: 'RIGHT' }],
+  );
+  assert.equal(result.assessment.counts.inlineSelected, 1);
+  assert.equal(
+    spy.inlineComments()[0]?.body.trimEnd().split(/\r?\n/).at(-1)?.startsWith('<!-- code-review-inline:'),
+    true,
+  );
+});
 
-  await executeAndPublishReview(input(async () => review, spy));
+test('a head change after inline creation prevents the managed summary', async () => {
+  const spy = publicationSpy();
+  const review = parseReviewResult(JSON.stringify({ version: 1, outcome: 'findings', findings: [finding()] }));
+  let freshnessChecks = 0;
+  await assert.rejects(
+    executeAndPublishReview(
+      input(async () => review, spy, {
+        maximumInlineComments: 1,
+        assertFresh: async () => {
+          freshnessChecks += 1;
+          if (freshnessChecks === 3) throw new Error('Pull request revision changed during review');
+        },
+      }),
+    ),
+    /revision changed/,
+  );
+  assert.deepEqual(spy.events, [`inline:${pullRequest.headSha}`]);
+});
 
-  assert.equal(spy.calls(), 1);
-  assert.match(spy.publishedBody(), /No material findings\./);
-  assert.equal(spy.publishedBody().trimEnd().split(/\r?\n/).at(-1), '<!-- managed -->');
+test('inline API failure prevents summary publication and never falls back per comment', async () => {
+  const spy = publicationSpy({ inlineError: true });
+  const review = parseReviewResult(JSON.stringify({ version: 1, outcome: 'findings', findings: [finding()] }));
+  await assert.rejects(
+    executeAndPublishReview(input(async () => review, spy, { maximumInlineComments: 1 })),
+    /inline failed/,
+  );
+  assert.deepEqual(spy.events, [`inline:${pullRequest.headSha}`]);
+});
+
+test('summary failure after inline success fails the action', async () => {
+  const spy = publicationSpy({ summaryError: true });
+  const review = parseReviewResult(JSON.stringify({ version: 1, outcome: 'findings', findings: [finding()] }));
+  await assert.rejects(
+    executeAndPublishReview(input(async () => review, spy, { maximumInlineComments: 1 })),
+    /summary failed/,
+  );
+  assert.deepEqual(spy.events, [`inline:${pullRequest.headSha}`, 'summary']);
+});
+
+test('protects unused credentials across evidence, explanation, fix, inline, and summary payloads', async () => {
+  const spy = publicationSpy();
+  const review = parseReviewResult(
+    JSON.stringify({
+      version: 1,
+      outcome: 'findings',
+      findings: [finding({ explanation: 'unused-secret', fix: 'remove unused-secret' })],
+    }),
+  );
+  await executeAndPublishReview(input(async () => review, spy, { maximumInlineComments: 1 }));
+  assert.deepEqual(spy.events, [`inline:${pullRequest.headSha}`, 'summary']);
+  for (const payload of [spy.publishedBody(), spy.inlineComments()[0]?.body ?? '']) {
+    assert.doesNotMatch(payload, /unused-secret/);
+    assert.match(payload, /\[REDACTED\]/);
+  }
+
+  const evidenceSpy = publicationSpy();
+  const secretDiff = prepareReviewedDiff(
+    [
+      'diff --git a/src/file.ts b/src/file.ts',
+      '--- a/src/file.ts',
+      '+++ b/src/file.ts',
+      '@@ -1 +1 @@',
+      '-old();',
+      '+unused-secret',
+    ].join('\n'),
+    10_000,
+  );
+  const secretEvidence = parseReviewResult(
+    JSON.stringify({
+      version: 1,
+      outcome: 'findings',
+      findings: [finding({ evidence: 'unused-secret' })],
+    }),
+  );
+  await executeAndPublishReview(input(async () => secretEvidence, evidenceSpy, { diff: secretDiff }));
+  assert.deepEqual(evidenceSpy.events, ['summary']);
+  assert.doesNotMatch(evidenceSpy.publishedBody(), /unused-secret/);
+  assert.match(evidenceSpy.publishedBody(), /Rejected .*: 1/);
+});
+
+test('final payload scan blocks an unused credential in controlled summary metadata', async () => {
+  const spy = publicationSpy();
+  const clean = parseReviewResult('{"version":1,"outcome":"clean","findings":[]}');
+  await assert.rejects(
+    executeAndPublishReview(input(async () => clean, spy, { model: 'unused-secret' })),
+    /forbidden secret data/,
+  );
+  assert.deepEqual(spy.events, []);
 });
