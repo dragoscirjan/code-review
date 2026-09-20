@@ -43,11 +43,11 @@ test("surfaces Pi provider errors", () => {
           },
         }),
       ),
-    /provider failed/,
+    /provider error; backend details suppressed/,
   );
 });
 
-test("builds a tool-free Pi OpenRouter command", () => {
+test("builds a tool-free Pi command for the configured provider", () => {
   const command = buildPiCommand({
     version: "0.85.1",
     model: "z-ai/glm-5.3-flash",
@@ -60,7 +60,7 @@ test("builds a tool-free Pi OpenRouter command", () => {
   assert.ok(command.includes("--no-tools"));
   assert.ok(command.includes("--no-extensions"));
   assert.ok(command.includes("--no-context-files"));
-  assert.ok(command.includes("openrouter"));
+  assert.ok(command.includes("review-provider"));
   assert.ok(command.includes("z-ai/glm-5.3-flash"));
   assert.ok(command.includes("--offline"));
 });

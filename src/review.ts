@@ -6,10 +6,11 @@ import { join } from "node:path";
 import type { PullRequestContext, PullRequestDiff } from "./github";
 import {
   buildOpenCodeCommand,
-  OPENCODE_CONFIG_CONTENT,
   parseOpenCodeJson,
 } from "./opencode";
 import { buildPiCommand, parsePiJson } from "./pi";
+import { redactSecrets, validateModelEndpoint, type ModelConnection } from "./model";
+import { buildHarnessConfig, SANDBOX_BOOTSTRAP } from "./sandbox";
 
 const MAX_PROCESS_OUTPUT_BYTES = 5_000_000;
 const MAX_REVIEW_BYTES = 60_000;
@@ -21,8 +22,7 @@ export type ReviewBackend = "opencode" | "pi";
 export interface ReviewRequest {
   backend: ReviewBackend;
   containerEngine: "podman" | "docker";
-  model: string;
-  openRouterApiKey: string;
+  connection: ModelConnection;
   opencodeVersion: string;
   piVersion: string;
   customPrompt: string;
@@ -94,8 +94,9 @@ ${escapeUntrustedData(diff.text)}
 
 export function buildContainerEnvironment(
   source: NodeJS.ProcessEnv,
-  openRouterApiKey: string,
+  connection: ModelConnection,
   backend: ReviewBackend,
+  versions: { opencodeVersion: string; piVersion: string },
 ): NodeJS.ProcessEnv {
   const allowed = [
     "PATH",
@@ -120,10 +121,13 @@ export function buildContainerEnvironment(
   }
   environment.CI = "true";
   environment.NO_COLOR = "1";
-  environment.OPENROUTER_API_KEY = openRouterApiKey;
-  if (backend === "opencode") {
-    environment.OPENCODE_CONFIG_CONTENT = OPENCODE_CONFIG_CONTENT;
-  } else {
+  if (connection.credential) environment.REVIEW_MODEL_TOKEN = connection.credential.value;
+  environment.REVIEW_BACKEND = backend;
+  environment.REVIEW_HARNESS_CONFIG = JSON.stringify(buildHarnessConfig(connection, backend));
+  environment.REVIEW_HARNESS_COMMAND = JSON.stringify(backend === "opencode"
+    ? buildOpenCodeCommand({ version: versions.opencodeVersion })
+    : buildPiCommand({ version: versions.piVersion, model: connection.modelId }));
+  if (backend === "pi") {
     environment.PI_TELEMETRY = "0";
     environment.PI_SKIP_VERSION_CHECK = "1";
   }
@@ -132,28 +136,19 @@ export function buildContainerEnvironment(
 
 export function buildContainerArguments(input: {
   backend: ReviewBackend;
-  model: string;
-  opencodeVersion: string;
-  piVersion: string;
+  connection: ModelConnection;
   containerName: string;
+  containerEngine: "podman" | "docker";
 }): string[] {
   const backendEnvironment =
     input.backend === "opencode"
-      ? ["--env", "OPENCODE_CONFIG_CONTENT"]
+      ? []
       : [
           "--env",
           "PI_TELEMETRY",
           "--env",
           "PI_SKIP_VERSION_CHECK",
         ];
-  const command =
-    input.backend === "opencode"
-      ? buildOpenCodeCommand({
-          version: input.opencodeVersion,
-          model: input.model,
-        })
-      : buildPiCommand({ version: input.piVersion, model: input.model });
-
   return [
     "run",
     "--rm",
@@ -193,11 +188,16 @@ export function buildContainerArguments(input: {
     "CI=true",
     "--env",
     "NO_COLOR=1",
-    "--env",
-    "OPENROUTER_API_KEY",
+    "--env", "REVIEW_MODEL_TOKEN",
+    "--env", "REVIEW_BACKEND",
+    "--env", "REVIEW_HARNESS_CONFIG",
+    "--env", "REVIEW_HARNESS_COMMAND",
     ...backendEnvironment,
+    ...(input.containerEngine === "docker" && input.connection.network === "private" &&
+      new URL(input.connection.baseUrl).hostname === "host.docker.internal"
+      ? ["--add-host", "host.docker.internal:host-gateway"] : []),
     SANDBOX_IMAGE,
-    ...command,
+    "node", "-e", SANDBOX_BOOTSTRAP,
   ];
 }
 
@@ -370,7 +370,7 @@ async function runProcess(
 
 function redactError(error: unknown, secret: string): Error {
   const message = error instanceof Error ? error.message : String(error);
-  return new Error(message.replaceAll(secret, "[REDACTED]"));
+  return new Error(redactSecrets(message, [secret]));
 }
 
 export function limitReview(review: string): string {
@@ -382,6 +382,7 @@ export function limitReview(review: string): string {
 }
 
 export async function runReview(request: ReviewRequest): Promise<string> {
+  await validateModelEndpoint(request.connection);
   const temporaryRoot = process.env.RUNNER_TEMP ?? tmpdir();
   await mkdir(temporaryRoot, { recursive: true });
   const workspace = await mkdtemp(join(temporaryRoot, "code-review-"));
@@ -396,15 +397,15 @@ export async function runReview(request: ReviewRequest): Promise<string> {
     const containerName = `code-review-${request.backend}-${randomUUID()}`;
     const args = buildContainerArguments({
       backend: request.backend,
-      model: request.model,
-      opencodeVersion: request.opencodeVersion,
-      piVersion: request.piVersion,
+      connection: request.connection,
       containerName,
+      containerEngine: request.containerEngine,
     });
     const environment = buildContainerEnvironment(
       request.environment ?? process.env,
-      request.openRouterApiKey,
+      request.connection,
       request.backend,
+      request,
     );
     try {
       const result = await runProcess(request.containerEngine, args, {
@@ -418,10 +419,7 @@ export async function runReview(request: ReviewRequest): Promise<string> {
         request.backend === "opencode"
           ? parseOpenCodeJson(result.stdout)
           : parsePiJson(result.stdout);
-      const redactedReview = review.replaceAll(
-        request.openRouterApiKey,
-        "[REDACTED]",
-      );
+      const redactedReview = redactSecrets(review, [request.connection.credential?.value ?? ""]);
       return limitReview(redactedReview);
     } catch (error) {
       const cleanup = await removeContainer(
@@ -432,10 +430,10 @@ export async function runReview(request: ReviewRequest): Promise<string> {
       );
       if (!cleanup.ok) {
         console.warn(
-          `Unable to confirm cleanup of ${containerName}: ${cleanup.details}`,
+          `Unable to confirm cleanup of ${containerName}; engine details suppressed`,
         );
       }
-      throw redactError(error, request.openRouterApiKey);
+      throw redactError(error, request.connection.credential?.value ?? "");
     }
   } finally {
     await rm(workspace, { recursive: true, force: true });

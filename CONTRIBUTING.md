@@ -6,7 +6,7 @@ Use GitHub Issues for defects, features, and acceptance criteria. Put product re
 
 The repository is in its bootstrap phase. The POC uses npm, TypeScript, esbuild, and Node's test runner through `tsx`. Do not add a second package manager, task runner, formatter, or test framework without an accepted design change. Follow `package-lock.json` and the scripts in `package.json`.
 
-The POC supports the GitHub Action, OpenCode and Pi, OpenRouter model access, GitHub-hosted runners, and PAT publication. The only model is `z-ai/glm-5.3-flash`. Both backends run in the fixed container sandbox without the checkout, host mounts, or GitHub credentials. The selected backend receives only the OpenRouter key. Podman is the default and Docker is the only fallback. Keep local-runtime and additional-forge work out of POC pull requests.
+The current milestone supports the GitHub Action, OpenCode and Pi, configured existing model endpoints, GitHub-hosted runners, and PAT publication. `model-config` selects an explicitly permitted remote/private provider endpoint and model; `model-credentials` supplies separate named bearer or API-key credentials. See the Wiki's Provider-neutral-model-configuration page and issue #12. Both backends run in the fixed container sandbox without checkout, host mounts, or GitHub credentials. Generate native harness configuration inside the container and pass only the selected provider credential. Reject arbitrary native config, commands, headers, and ambient environment references. Podman is the default and Docker is the only fallback. Managed local-runtime lifecycle, enforced-egress gateway, self-hosted runner support and additional forges remain separate work.
 
 ## Before starting
 

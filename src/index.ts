@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { appendFile } from "node:fs/promises";
 import { renderComment } from "./comment";
-import { loadActionConfig, managedCommentMarkers } from "./config";
+import { getActionInput, loadActionConfig, managedCommentMarkers } from "./config";
+import { redactSecrets } from "./model";
 import { GitHubClient, loadPullRequestEvent } from "./github";
 import { runCodeIndexer } from "./indexer";
 import { runReview } from "./review";
@@ -26,8 +27,16 @@ async function setOutput(name: string, value: string): Promise<void> {
   );
 }
 
+const secrets: string[] = [];
+
 async function main(): Promise<void> {
+  for (const name of ["github-token", "model-credentials"]) {
+    const value = getActionInput(name, process.env);
+    if (value) secrets.push(value);
+  }
   const config = loadActionConfig();
+  if (config.connection.credential) secrets.push(config.connection.credential.value);
+  for (const secret of secrets) console.log(`::add-mask::${workflowCommandValue(secret)}`);
   const eventPath = process.env.GITHUB_EVENT_PATH;
   if (!eventPath) {
     throw new Error("GITHUB_EVENT_PATH is required");
@@ -72,8 +81,7 @@ async function main(): Promise<void> {
   const review = await runReview({
     backend: config.backend,
     containerEngine: config.containerEngine,
-    model: config.model,
-    openRouterApiKey: config.openRouterApiKey,
+    connection: config.connection,
     opencodeVersion: config.opencodeVersion,
     piVersion: config.piVersion,
     customPrompt: config.prompt,
@@ -85,9 +93,9 @@ async function main(): Promise<void> {
   const markers = managedCommentMarkers(config.backend);
   const marker = markers[0];
   const body = renderComment({
-    review,
+    review: redactSecrets(review, secrets),
     backend: config.backend,
-    model: config.model,
+    model: config.connection.modelId,
     headSha: pullRequest.headSha,
     actor: actor.login,
     diffTruncated: diff.truncated,
@@ -110,6 +118,6 @@ async function main(): Promise<void> {
 
 main().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
-  console.error(`::error::${workflowCommandValue(message)}`);
+  console.error(`::error::${workflowCommandValue(redactSecrets(message, secrets))}`);
   process.exitCode = 1;
 });

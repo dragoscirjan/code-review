@@ -9,6 +9,7 @@
     "test": "tsx --test test/*.test.ts",
     "test:integration": "RUN_LLM_INTEGRATION=1 tsx --test test/integration.test.ts",
     "test:indexers": "RUN_INDEXER_INTEGRATION=1 tsx --test test/indexer-integration.test.ts",
+    "test:models": "RUN_MODEL_CONTRACT=1 tsx --test test/model-contract.test.ts",
     "typecheck": "tsc --noEmit",
     "validate": "npm run typecheck && npm test && npm run build"
   },

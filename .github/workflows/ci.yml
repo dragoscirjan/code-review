@@ -60,6 +60,29 @@ jobs:
           git ls-files --error-unmatch dist/index.js
           git diff --exit-code -- dist/index.js
 
+  model-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [opencode, pi]
+        engine: [podman, docker]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Verify native model configuration against controlled endpoints
+        env:
+          REVIEW_TEST_BACKEND: ${{ matrix.backend }}
+          CONTAINER_ENGINE: ${{ matrix.engine }}
+        run: npm run test:models
+
   indexer-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 30

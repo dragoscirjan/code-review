@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildOpenCodeCommand,
-  OPENCODE_CONFIG_CONTENT,
   parseOpenCodeJson,
 } from "../src/opencode";
 
@@ -24,10 +23,9 @@ test("rejects output without review text", () => {
   );
 });
 
-test("builds a pure OpenCode OpenRouter command", () => {
+test("builds a pure OpenCode command for only the configured model", () => {
   const command = buildOpenCodeCommand({
     version: "1.18.31",
-    model: "z-ai/glm-5.3-flash",
   });
   assert.deepEqual(command.slice(0, 3), [
     "npx",
@@ -35,8 +33,5 @@ test("builds a pure OpenCode OpenRouter command", () => {
     "opencode-ai@1.18.31",
   ]);
   assert.ok(command.includes("--pure"));
-  assert.ok(command.includes("openrouter/z-ai/glm-5.3-flash"));
-  assert.deepEqual(JSON.parse(OPENCODE_CONFIG_CONTENT), {
-    permission: { "*": "deny" },
-  });
+  assert.ok(command.includes("review-provider/review-model"));
 });

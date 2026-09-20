@@ -411,7 +411,9 @@ test(
         runCommand(script, [], {
           cwd: root,
           environment: { PATH: process.env.PATH },
-          timeoutMs: 100,
+          // Allow the shell to start and record its descendant on slower hosts.
+          // The descendant still ignores TERM, so forced cleanup is exercised.
+          timeoutMs: 2_000,
           killGraceMs: 25,
         }),
         /timed out/,

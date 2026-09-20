@@ -1,34 +1,27 @@
 # Pull request code review action
 
-This repository contains a GitHub Action that reviews a pull request with OpenCode or Pi and posts a managed review comment.
+A GitHub Action that reviews pull requests with **OpenCode or Pi**, using a configured local/private or remote model endpoint, and publishes one managed summary per backend.
 
-## POC scope
+## OpenRouter setup / migration
 
-- GitHub-hosted runners.
-- OpenCode and Pi review backends.
-- OpenRouter with `z-ai/glm-5.3-flash` as the only supported model.
-- A personal access token supplied through `secrets.GH_TOKEN`.
-- An OpenRouter key supplied through `secrets.OPENROUTER_API_KEY`.
-- Optional CodeGraphContext or GitNexus indexing of the pull request base revision.
-- One managed comment per backend. Repeated runs update that backend's comment.
+The provider-specific `openrouter-api-key` and `model` inputs have been removed. There is no default provider, free-model fallback, or fixed-model allowlist.
 
-The action does not execute pull request code. It fetches a bounded diff through the GitHub API and sends the diff as untrusted prompt data to the selected backend. When code indexing is enabled, the action downloads the exact base revision, removes symlinks and unsupported file types, installs the selected indexer, and passes bounded query results to the reviewer. It never indexes the pull request head.
+1. Keep your existing **`GH_TOKEN`** GitHub Actions secret (the PAT used to publish comments).
+2. Create a GitHub Actions repository secret named **`REVIEW_MODEL_CREDENTIALS`**. Its value is this JSON, replacing the placeholder with your existing OpenRouter API key:
 
-The disposable model container has no host mounts. The review backend cannot access the source snapshot, index database, PAT, GitHub Actions environment, or host filesystem.
+   ```json
+   {"review-provider":{"type":"bearer","value":"YOUR_OPENROUTER_API_KEY"}}
+   ```
 
-## Usage
-
-Pin the action to an immutable commit from a trusted branch. This matrix runs both POC backends and produces two managed comments.
+   You can reuse the key currently stored in `OPENROUTER_API_KEY`; you do not need a new OpenRouter account or key. Never commit this JSON with a real token.
+3. Use the workflow below, replacing `REPLACE_WITH_COMMIT_SHA` with an immutable trusted commit **containing this change**. Do not pass the new inputs to an older action revision.
 
 ```yaml
 name: Code review
-
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
-
 permissions: {}
-
 jobs:
   review:
     if: github.event.pull_request.draft == false
@@ -45,54 +38,118 @@ jobs:
       - uses: dragoscirjan/code-review@REPLACE_WITH_COMMIT_SHA
         with:
           github-token: ${{ secrets.GH_TOKEN }}
-          openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
           backend: ${{ matrix.backend }}
-          model: z-ai/glm-5.3-flash
-          code-indexer: gitnexus
-          code-index-cache-key: code-review-index-v1
-          code-index-cache-ttl: 24h
-          prompt: |
-            Focus on correctness, security, regressions, and missing tests.
+          model-config: |
+            {
+              "version": 1,
+              "provider": {
+                "api": "openai-completions",
+                "baseUrl": "https://openrouter.ai/api/v1",
+                "network": "remote",
+                "credential": "review-provider"
+              },
+              "model": {
+                "id": "z-ai/glm-5.3-flash",
+                "contextWindow": 131072,
+                "maxOutputTokens": 8192
+              }
+            }
+          model-credentials: ${{ secrets.REVIEW_MODEL_CREDENTIALS }}
+          prompt: Focus on correctness, security, regressions, and missing tests.
 ```
 
-Do not add `actions/checkout` to this `pull_request_target` job. Do not reference the pull request branch as the action revision. Either change would give untrusted pull request code access to the PAT and model-provider credential.
+Do not add checkout or execute PR code in this `pull_request_target` job. Never reference the PR branch as the action revision or obtain configuration from PR-controlled content. The repository's own `.github/workflows/code-review.yml` remains pinned to its older trusted commit; update that pin and its inputs together after publishing a reviewed implementation commit. This change does not automatically deploy itself.
+
+## Provider and model configuration
+
+`model-config` is **our strict versioned schema**, not native Pi/OpenCode configuration. The action translates it into the selected harness's native configuration inside its disposable container, before launching the harness. Host/user configuration is never modified.
+
+One invocation selects one provider/model. Use workflow matrices or separate invocations for more. Non-secret configuration can be inline workflow JSON or `${{ vars.REVIEW_MODEL_CONFIG }}`. Secrets belong only in `model-credentials`.
+
+| Field | Meaning |
+| --- | --- |
+| `version` | Required; `1`. |
+| `provider.api` | Required; one of the protocols below. |
+| `provider.baseUrl` | Required API base URL; no URL credentials, query, fragment, or interpolation. |
+| `provider.network` | Required; `remote` explicitly permits sending source to a public HTTPS provider; `private` explicitly permits a private-network endpoint (HTTP allowed). |
+| `provider.credential` | Optional reference into `model-credentials`; never an environment variable or token. |
+| `model.id` | Required exact provider model ID, not a Pi/OpenCode selector. |
+| `model.contextWindow` | Positive integer, default `128000`, maximum `2000000`. Set to the model's actual capability. |
+| `model.maxOutputTokens` | Positive integer, default `8192`, strictly below `contextWindow`. |
+
+Unknown fields are rejected. Each JSON input is capped at 32,000 UTF-8 bytes; at most 16 credentials, with tokens limited to 8,192 printable non-whitespace ASCII characters. References/model IDs use letters, digits, `.`, `_`, `:`, `/`, `-` (maximum 200 characters, starting with a letter/digit).
+
+### Protocols and authentication
+
+| API | Base URL example | Credential type |
+| --- | --- | --- |
+| `openai-completions` | `https://openrouter.ai/api/v1` or an OpenAI-compatible `/v1` endpoint | `bearer`, or omit credential for keyless servers |
+| `openai-responses` | `https://api.openai.com/v1` | `bearer`, or keyless compatible server |
+| `anthropic-messages` | `https://api.anthropic.com` (**without `/v1`**) | Required `api-key` (Anthropic `x-api-key`) |
+
+For Anthropic, use `{"review-provider":{"type":"api-key","value":"YOUR_ANTHROPIC_API_KEY"}}` as the secret. The adapter accounts for the harnesses' different Anthropic base URL conventions. A bearer credential may be an API key or an already-issued access token; the action does not log in, refresh OAuth tokens, or run credential commands. Anthropic OAuth tokens containing `sk-ant-oat` are rejected because Pi would reinterpret them as OAuth rather than `x-api-key` authentication.
+
+Support means the configured endpoint must implement the selected protocol. It does not imply support for every vendor's native authentication, reasoning options, or proprietary extensions. Google/Azure/Bedrock-specific protocols, arbitrary headers, plugins, shell commands, environment forwarding, raw harness config, and `model-config-file` are not supported in this milestone. Add explicit adapters rather than passing through arbitrary harness settings.
+
+### Existing local/private models
+
+For example, an existing Ollama server exposing its OpenAI-compatible endpoint:
+
+```yaml
+with:
+  github-token: ${{ secrets.GH_TOKEN }}
+  backend: pi
+  model-config: |
+    {
+      "version": 1,
+      "provider": {
+        "api": "openai-completions",
+        "baseUrl": "http://192.168.10.20:11434/v1",
+        "network": "private"
+      },
+      "model": {"id": "qwen2.5-coder:7b", "contextWindow": 32768, "maxOutputTokens": 4096}
+    }
+```
+
+Omit `model-credentials` for keyless servers. The harness adapters use a non-secret placeholder key for keyless endpoints because Pi and some SDKs require authentication configuration; the server must tolerate that placeholder Authorization header. No models are installed, downloaded, loaded, unloaded, or stopped by the action.
+
+**Networking must already exist.** A GitHub-hosted runner cannot automatically reach your laptop or LAN. Configure trusted private connectivity first. Container `localhost` is not the runner host and is rejected. Podman supports `host.containers.internal`; Docker's `host.docker.internal` receives a host-gateway mapping only when explicitly selected with `network: private`. The server must listen on an address reachable from the container, with appropriate firewall/access controls. Host networking is never enabled. Self-hosted runner support and public-fork isolation remain out of scope.
 
 ## Inputs
 
 | Input | Default | Description |
 | --- | --- | --- |
-| `github-token` | Required | PAT used to read the pull request and publish the review. |
-| `openrouter-api-key` | Required | OpenRouter key passed only to the selected backend container. |
-| `backend` | `opencode` | Review backend. Accepted values are `opencode` and `pi`. |
-| `container-engine` | `podman` | Sandbox engine. Accepted values are `podman` and `docker`. |
-| `model` | `z-ai/glm-5.3-flash` | The only model accepted by the POC. |
-| `prompt` | Correctness and security review | Trusted guidance added to the fixed review prompt. |
-| `opencode-version` | `1.18.31` | Exact `opencode-ai` npm version. |
-| `pi-version` | `0.85.1` | Exact `@earendil-works/pi-coding-agent` npm version. |
-| `code-indexer` | `none` | Base-revision indexer. Accepted values are `none`, `cgc`, and `gitnexus`. |
-| `code-index-cache-key` | `code-review-index-v1` | GitHub Actions cache key prefix for the index database. |
-| `code-index-cache-ttl` | `24h` | Maximum cache age. Accepted units are `ms`, `s`, `m`, `h`, and `d`. |
-| `max-diff-bytes` | `120000` | Maximum UTF-8 diff bytes sent to the backend. |
-| `timeout-seconds` | `600` | Backend process timeout. |
+| `github-token` | Required | PAT for PR API access and publication. |
+| `model-config` | Required | Provider/model JSON above. |
+| `model-credentials` | `{}` | Secret JSON credential map; only the selected credential enters the backend. |
+| `backend` | `opencode` | `opencode` or `pi`. |
+| `container-engine` | `podman` | `podman` or validated `docker` fallback. |
+| `prompt` | Correctness and security review | Additional trusted review guidance. |
+| `opencode-version` | `1.18.31` | Exact npm package version. |
+| `pi-version` | `0.85.1` | Exact npm package version. |
+| `code-indexer` | `none` | `none`, `cgc` or `gitnexus`; exact base revision only. |
+| `code-index-cache-key` | `code-review-index-v1` | Cache key prefix. |
+| `code-index-cache-ttl` | `24h` | Maximum cache age (`ms`, `s`, `m`, `h`, `d`). |
+| `max-diff-bytes` | `120000` | Maximum UTF-8 diff bytes. |
+| `timeout-seconds` | `600` | Backend timeout. |
 
-## Security model
+Outputs: `comment-url`, `diff-truncated`, `code-indexer`, `code-index-cache-hit`.
 
-- The workflow uses a trusted action commit and never checks out pull request code.
-- The action accepts executable settings only from trusted workflow inputs.
-- Backend package names are fixed. Version inputs must use exact semantic versions.
-- The GitHub PAT never enters the review container.
-- The OpenRouter key enters the selected container through its environment. The action does not place it in process arguments, prompts, logs, or comments.
-- OpenCode runs with `--pure` and a wildcard permission denial.
-- Pi runs with all tools, extensions, skills, prompt templates, context files, and sessions disabled.
-- Both backends run in a digest-pinned container with a read-only root, no Linux capabilities, no added privileges, resource limits, and no host mounts.
-- Pull request titles, bodies, diffs, and index query results are untrusted data.
-- CGC and GitNexus index only the exact base SHA. The action does not index the pull request head.
-- Indexer processes receive a small environment allowlist without GitHub or model-provider credentials.
-- Cache entries include the cache schema, repository, base SHA, indexer version, operating system, architecture, and creation time. The action deletes stale or mismatched restores. Successful hits are not re-saved, so cache reads cannot renew the TTL. It retries once with an empty database if a restored index cannot be queried, then saves the rebuild under a new generation key.
-- Each backend uses a separate hidden marker. The action also checks the PAT actor ID before updating a comment.
-- The first OpenCode run after an upgrade recognizes the previous POC marker and updates that comment to the new format.
+## Security and limitations
 
-The PAT determines the visible GitHub identity. The heading identifies the model and backend, for example `Code Review (z-ai/glm-5.3-flash via Pi)`.
+- GitHub-hosted runners, GitHub PAT publication, summary comments only. Pi still uses its CLI for this milestone.
+- No PR code execution. The diff and optional bounded base-index context are untrusted prompt data.
+- The backend container is digest-pinned, mount-free, non-root, read-only, capability-dropped, resource-limited and denies added privileges. OpenCode denies all tools; Pi disables tools and resource discovery.
+- Native harness configuration is generated in container tmpfs with restrictive permissions. Fixed provider naming avoids built-in provider auto-configuration. Native interpolation syntax in credentials is handled without executing commands or loading referenced files.
+- GitHub credentials never enter the model container. Only the selected model credential is passed through environment—not arguments or prompt. Output is bounded, selected credentials are redacted, and raw provider errors are suppressed.
+- `network` permission and DNS/address preflight checks are **not an egress firewall**. DNS can change after checking; harness SDKs control redirects. Trust the endpoint and its redirect behavior. npm/package code also has container network access and the selected credential. A credential-isolating model gateway with enforced egress is future work.
+- Private HTTP is not encrypted. Prefer TLS and authenticated private endpoints.
+- The POC still publishes Markdown rather than schema-validated structured findings. Tool denial does not eliminate prompt injection or guarantee finding correctness. Inline validation and a full result schema remain future work.
+- Managed comments require both a backend-specific hidden marker and the authenticated PAT actor. Legacy OpenRouter markers migrate to provider-neutral markers without creating a new comment. PAT comments appear as the token's owner.
+
+Optional indexing downloads only the base SHA archive and removes symlinks/non-regular files. CGC/GitNexus run on the host with a credential-stripped environment, which is **not OS isolation**. Archive size checks after extraction and transitive package dependencies retain the documented POC limitations. Index context is capped at 50 KB. Cache identity includes repository, base SHA, pinned indexer, platform and age; successful reads do not renew TTL. An unusable restore gets one clean rebuild. Cache service failures warn; explicitly selected indexer failures stop the review.
+
+Design: [Provider-neutral configuration](https://github.com/dragoscirjan/code-review/wiki/Provider-neutral-model-configuration). Work item: [#12](https://github.com/dragoscirjan/code-review/issues/12).
 
 ## Development
 
@@ -101,19 +158,17 @@ npm ci
 npm run validate
 ```
 
-`npm run validate` type-checks the source, runs unit tests, and rebuilds `dist/index.js`. Commit the bundled file with source changes.
-
-Run the two live OpenRouter checks only when the provider key is available:
+Validation type-checks, runs tests, and rebuilds the committed `dist/index.js`. Unit tests exercise schema/network policy, credential boundaries, both native config translations and the actual bootstrap code using controlled dependencies. Live checks are opt-in:
 
 ```bash
+# Controlled model responses through real pinned harness containers; no provider secret:
+CONTAINER_ENGINE=podman npm run test:models
+CONTAINER_ENGINE=docker npm run test:models
+
+# Live provider smoke test (optional, may incur provider charges):
 OPENROUTER_API_KEY=... npm run test:integration
-```
-
-The integration suite runs one review through OpenCode and one through Pi. Run live indexer checks with:
-
-```bash
 GITHUB_TOKEN=... CODE_INDEXER=cgc npm run test:indexers
 GITHUB_TOKEN=... CODE_INDEXER=gitnexus npm run test:indexers
 ```
 
-These checks install the pinned indexer and index a real repository archive. See `CONTRIBUTING.md` for the development workflow.
+The live test environment variable is only a test convenience, not a restored action input. See `CONTRIBUTING.md`.
