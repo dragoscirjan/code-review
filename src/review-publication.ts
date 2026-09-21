@@ -3,7 +3,12 @@ import type { AnalyzerSummary } from './analyzer';
 import type { AnalyzerFindingCandidate } from './analyzer-contract';
 import { renderComment, renderInlineComment } from './comment';
 import type { ReviewContextMetadata } from './context-planner';
-import { assessReview, type ReviewAssessment, type ValidatedFinding } from './finding-validation';
+import {
+  assessReview,
+  orderAcceptedFindingsForInline,
+  type ReviewAssessment,
+  type ValidatedFinding,
+} from './finding-validation';
 import type {
   AuthenticatedActor,
   GitHubClient,
@@ -18,6 +23,7 @@ import type { ReviewBackend } from './review';
 import type { ReviewResultV1 } from './review-contract';
 import {
   MAX_REVIEW_STATE_FINDINGS,
+  REVIEW_STATE_VERSION,
   publicationDigest,
   reconcileFindingStates,
   serializeReviewState,
@@ -25,6 +31,7 @@ import {
   type ReviewStateFinding,
   type ReviewStateV1,
 } from './review-lifecycle';
+import { assertReviewMemoryCurrent, type ReviewMemory } from './review-memory';
 import type { ExecutedReview, ReviewExecutionSummary } from './review-specialists';
 
 export interface ExecuteAndPublishReviewInput {
@@ -46,6 +53,7 @@ export interface ExecuteAndPublishReviewInput {
   maximumInlineComments: number;
   contextMetadata?: ReviewContextMetadata;
   analyzer?: { findings: readonly AnalyzerFindingCandidate[]; summary: AnalyzerSummary };
+  memory?: ReviewMemory;
   lifecycle?: {
     apiUrl: string;
     policyDigest: string;
@@ -74,6 +82,7 @@ function redactAssessment(assessment: ReviewAssessment, secrets: readonly string
     ...assessment,
     findings,
     inlineFindings: findings.slice(0, assessment.counts.inlineSelected),
+    memorySuppressedFindings: assessment.memorySuppressedFindings.map((finding) => redactFinding(finding, secrets)),
   };
 }
 
@@ -212,6 +221,10 @@ function serializeBoundedState(
 export async function executeAndPublishReview(input: ExecuteAndPublishReviewInput) {
   const marker = input.markers[0];
   if (!marker) throw new Error('At least one managed-comment marker is required');
+  if (input.memory && input.memory.baseSha !== input.pullRequest.baseSha) {
+    throw new Error('Review memory does not match the reviewed base revision');
+  }
+  if (input.memory) assertReviewMemoryCurrent(input.memory);
   await input.assertFresh();
   await input.assertStateFresh?.();
   if (!input.diff.parsed) throw new Error('Reviewed diff is missing its validated line map');
@@ -229,14 +242,23 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
       },
       input.secrets,
       input.analyzer?.findings ?? [],
+      input.memory,
     ),
     input.secrets,
   );
 
+  const memoryApplications = assessment.memoryApplications;
+
   const lifecycle = input.lifecycle;
   const priorActive = lifecycle?.priorState?.findings ?? [];
   const carried = lifecycle?.carried ?? [];
-  const reconciled = reconcileFindingStates(assessment.findings, priorActive, input.pullRequest.headSha, carried);
+  const reconciled = reconcileFindingStates(
+    assessment.findings,
+    priorActive,
+    input.pullRequest.headSha,
+    carried,
+    assessment.memorySuppressedFindings,
+  );
   const persistedActive = reconciled.active.slice(0, MAX_REVIEW_STATE_FINDINGS);
   const coverageComplete =
     !input.diff.truncated &&
@@ -247,7 +269,7 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
     : (lifecycle?.priorState?.completedThroughHeadSha ?? null);
   let state: ReviewStateV1 | undefined = lifecycle
     ? {
-        version: 1,
+        version: REVIEW_STATE_VERSION,
         apiUrl: lifecycle.apiUrl,
         repository: `${input.pullRequest.owner}/${input.pullRequest.repository}`,
         pullRequest: input.pullRequest.number,
@@ -269,6 +291,15 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
         }),
         inlineHistorySuppressed: 0,
         inlineLimitOmitted: 0,
+        memory: {
+          mode: input.memory?.mode ?? 'none',
+          status: input.memory?.status ?? 'disabled',
+          effectiveDigest: input.memory?.effectiveDigest ?? `sha256:${'A'.repeat(43)}`,
+          activeSuppressions: input.memory?.activeSuppressions.length ?? 0,
+          activePreferences: input.memory?.activePreferences.length ?? 0,
+          suppressedCandidates: Math.min(assessment.counts.memorySuppressed, 32),
+          appliedEntries: memoryApplications.slice(0, 32),
+        },
         coverageComplete,
         mode: lifecycle.mode,
         fromHeadSha: lifecycle.fromHeadSha,
@@ -289,9 +320,8 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
         legacyPattern.test(existing.body.trimEnd().split(/\r?\n/u).at(-1) ?? ''),
     );
   }
-  const eligible = suppressLegacyMigration
-    ? []
-    : assessment.findings.filter((finding) => !published.has(finding.fingerprint));
+  const inlineOrder = orderAcceptedFindingsForInline(assessment.findings, input.memory);
+  const eligible = suppressLegacyMigration ? [] : inlineOrder.filter((finding) => !published.has(finding.fingerprint));
   const selected = eligible.slice(0, input.maximumInlineComments);
   const inlineHistorySuppressed = suppressLegacyMigration
     ? assessment.findings.length
@@ -333,6 +363,18 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
     contextMetadata: input.contextMetadata,
     analyzerSummary: input.analyzer?.summary,
     executionSummary,
+    ...(input.memory
+      ? {
+          memory: {
+            mode: input.memory.mode,
+            status: input.memory.status,
+            activeSuppressions: input.memory.activeSuppressions.length,
+            activePreferences: input.memory.activePreferences.length,
+            suppressedCandidates: assessment.counts.memorySuppressed,
+            applications: memoryApplications,
+          },
+        }
+      : {}),
     ...(stateLine && lifecycle
       ? {
           lifecycle: {
@@ -358,8 +400,10 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
     input.secrets,
   );
 
+  if (input.memory) assertReviewMemoryCurrent(input.memory);
   await input.assertFresh();
   await input.assertStateFresh?.();
+  if (input.memory) assertReviewMemoryCurrent(input.memory);
   const inlineReview =
     inlineComments.length > 0
       ? await input.client.createOrReuseInlineReview(
@@ -374,6 +418,7 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
     await input.assertFresh();
     await input.assertStateFresh?.();
   }
+  if (input.memory) assertReviewMemoryCurrent(input.memory);
   const comment = await input.client.upsertManagedComment(
     input.pullRequest,
     input.actor,

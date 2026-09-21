@@ -164,22 +164,48 @@ test('extracts only explicit same-repository issue references in textual order',
   assert.deepEqual(numbers, [23, 24, 25]);
 });
 
-test('reads bounded regular guidance at the exact base revision and rejects symlinks', async () => {
+test('reads bounded regular guidance only after exact-commit tree proof and rejects symlinks', async () => {
   const requests: string[] = [];
+  const revision = 'a'.repeat(40);
+  const rootTree = 'b'.repeat(40);
+  const docsTree = 'c'.repeat(40);
+  const blobSha = 'd'.repeat(40);
+  const linkSha = 'e'.repeat(40);
   const responses = [
+    new Response(JSON.stringify({ sha: revision, tree: { sha: rootTree } }), { status: 200 }),
     new Response(
       JSON.stringify({
-        type: 'file',
-        sha: 'blob-sha',
+        sha: rootTree,
+        truncated: false,
+        tree: [{ path: 'docs', mode: '040000', type: 'tree', sha: docsTree }],
+      }),
+      { status: 200 },
+    ),
+    new Response(
+      JSON.stringify({
+        sha: docsTree,
+        truncated: false,
+        tree: [{ path: 'AGENTS.md', mode: '100644', type: 'blob', sha: blobSha }],
+      }),
+      { status: 200 },
+    ),
+    new Response(
+      JSON.stringify({
+        sha: blobSha,
         encoding: 'base64',
         content: Buffer.from('rules\n'.repeat(20)).toString('base64'),
       }),
-      { status: 200, headers: { 'Content-Type': 'application/json' } },
+      { status: 200 },
     ),
-    new Response(JSON.stringify({ type: 'file', sha: 'link-sha', encoding: 'base64', content: '', target: 'secret' }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    }),
+    new Response(JSON.stringify({ sha: revision, tree: { sha: rootTree } }), { status: 200 }),
+    new Response(
+      JSON.stringify({
+        sha: rootTree,
+        truncated: false,
+        tree: [{ path: 'AGENTS.md', mode: '120000', type: 'blob', sha: linkSha }],
+      }),
+      { status: 200 },
+    ),
   ];
   const client = new GitHubClient('token', 'https://api.example.test', async (url) => {
     requests.push(String(url));
@@ -194,19 +220,114 @@ test('reads bounded regular guidance at the exact base revision and rejects syml
     title: 'Change',
     body: '',
     url: 'url',
-    baseSha: 'base sha',
-    headSha: 'head',
+    baseSha: revision,
+    headSha: 'f'.repeat(40),
     author: 'author',
   };
-  const guidance = await client.getRepositoryTextAtRevision(context, 'docs/AGENTS.md', 'base sha', 25);
+  const guidance = await client.getRepositoryTextAtRevision(context, 'docs/AGENTS.md', revision, 25);
   assert.equal(guidance.status, 'found');
   assert.equal(guidance.truncated, true);
-  assert.equal(guidance.blobSha, 'blob-sha');
+  assert.equal(guidance.blobSha, blobSha);
   assert.ok(Buffer.byteLength(guidance.text ?? '', 'utf8') <= 25);
-  assert.match(requests[0] ?? '', /contents\/docs\/AGENTS\.md\?ref=base%20sha$/);
-  const link = await client.getRepositoryTextAtRevision(context, 'AGENTS.md', 'base sha', 25);
+  assert.match(requests[0] ?? '', new RegExp(`/git/commits/${revision}$`, 'u'));
+  assert.match(requests[1] ?? '', new RegExp(`/git/trees/${rootTree}$`, 'u'));
+  assert.match(requests[2] ?? '', new RegExp(`/git/trees/${docsTree}$`, 'u'));
+  assert.match(requests[3] ?? '', new RegExp(`/git/blobs/${blobSha}$`, 'u'));
+  const link = await client.getRepositoryTextAtRevision(context, 'AGENTS.md', revision, 25);
   assert.equal(link.status, 'unavailable');
   assert.equal(link.reason, 'not-a-regular-file');
+  assert.equal(requests.length, 6);
+});
+
+test('exact-revision text distinguishes missing from forbidden and rejects unsafe tree metadata before blobs', async () => {
+  const revision = 'a'.repeat(40);
+  const rootTree = 'b'.repeat(40);
+  const context: PullRequestContext = {
+    owner: 'owner',
+    repository: 'repository',
+    number: 7,
+    title: 'Change',
+    body: '',
+    url: 'url',
+    baseSha: revision,
+    headSha: 'f'.repeat(40),
+    author: 'author',
+  };
+  for (const status of [403, 429]) {
+    const unavailable = new GitHubClient(
+      'token',
+      'https://api.example.test',
+      async () => new Response(null, { status }),
+    );
+    assert.deepEqual(await unavailable.getRepositoryTextAtRevision(context, 'AGENTS.md', revision, 25), {
+      status: 'unavailable',
+      bytes: 0,
+      truncated: false,
+      reason: 'fetch-error',
+    });
+  }
+  const missing = new GitHubClient(
+    'token',
+    'https://api.example.test',
+    async () => new Response(null, { status: 404 }),
+  );
+  assert.deepEqual(await missing.getRepositoryTextAtRevision(context, 'AGENTS.md', revision, 25), {
+    status: 'not-found',
+    bytes: 0,
+    truncated: false,
+    reason: 'not-found',
+  });
+  const absentResponses = [
+    new Response(JSON.stringify({ sha: revision, tree: { sha: rootTree } }), { status: 200 }),
+    new Response(JSON.stringify({ sha: rootTree, truncated: false, tree: [] }), { status: 200 }),
+  ];
+  const absent = new GitHubClient('token', 'https://api.example.test', async () => absentResponses.shift()!);
+  assert.equal((await absent.getRepositoryTextAtRevision(context, 'AGENTS.md', revision, 25)).status, 'not-found');
+  assert.equal(absentResponses.length, 0);
+
+  for (const unsafe of [
+    {
+      sha: rootTree,
+      truncated: true,
+      tree: [{ path: 'AGENTS.md', mode: '100644', type: 'blob', sha: 'c'.repeat(40) }],
+    },
+    {
+      sha: rootTree,
+      truncated: false,
+      tree: [
+        { path: 'AGENTS.md', mode: '100644', type: 'blob', sha: 'c'.repeat(40) },
+        { path: 'AGENTS.md', mode: '100644', type: 'blob', sha: 'd'.repeat(40) },
+      ],
+    },
+    {
+      sha: rootTree,
+      truncated: false,
+      tree: [{ path: 'malformed-entry' }, { path: 'AGENTS.md', mode: '100644', type: 'blob', sha: 'c'.repeat(40) }],
+    },
+    {
+      sha: rootTree,
+      truncated: false,
+      tree: [{ path: 'AGENTS.md', mode: '160000', type: 'commit', sha: 'c'.repeat(40) }],
+    },
+    {
+      sha: rootTree,
+      truncated: false,
+      tree: [{ path: 'AGENTS.md', mode: '040000', type: 'tree', sha: 'c'.repeat(40) }],
+    },
+  ]) {
+    let calls = 0;
+    const responses = [
+      new Response(JSON.stringify({ sha: revision, tree: { sha: rootTree } }), { status: 200 }),
+      new Response(JSON.stringify(unsafe), { status: 200 }),
+    ];
+    const client = new GitHubClient('token', 'https://api.example.test', async () => {
+      calls += 1;
+      return responses.shift()!;
+    });
+    const result = await client.getRepositoryTextAtRevision(context, 'AGENTS.md', revision, 25);
+    assert.equal(result.status, 'unavailable');
+    assert.equal(calls, 2, 'unsafe metadata must stop before blob acquisition');
+  }
 });
 
 test('reads a bounded same-repository issue response and rejects oversized data', async () => {

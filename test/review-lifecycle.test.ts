@@ -42,7 +42,7 @@ function findingState(overrides: Partial<ReviewStateFinding> = {}): ReviewStateF
 
 function state(overrides: Partial<ReviewStateV1> = {}): ReviewStateV1 {
   const value: ReviewStateV1 = {
-    version: 1,
+    version: 2,
     apiUrl: 'https://api.github.com',
     repository: 'owner/repository',
     pullRequest: 22,
@@ -57,6 +57,15 @@ function state(overrides: Partial<ReviewStateV1> = {}): ReviewStateV1 {
     publicationDigest: `sha256:${'E'.repeat(43)}`,
     inlineHistorySuppressed: 0,
     inlineLimitOmitted: 0,
+    memory: {
+      mode: 'none',
+      status: 'disabled',
+      effectiveDigest: `sha256:${'M'.repeat(43)}`,
+      activeSuppressions: 0,
+      activePreferences: 0,
+      suppressedCandidates: 0,
+      appliedEntries: [],
+    },
     coverageComplete: true,
     mode: 'full',
     fromHeadSha: null,
@@ -135,12 +144,34 @@ test('serializes canonical bounded state immediately before the final marker', (
   const parsed = parseReviewState(`summary\n${line}\n${marker}`, marker);
   assert.equal(parsed.kind, 'valid');
   if (parsed.kind === 'valid') assert.deepEqual(parsed.state, state());
+
+  const enabled = state({
+    memory: {
+      mode: 'base-config',
+      status: 'enabled',
+      effectiveDigest: `sha256:${'N'.repeat(43)}`,
+      activeSuppressions: 1,
+      activePreferences: 1,
+      suppressedCandidates: 1,
+      appliedEntries: [
+        {
+          id: 'accepted-entry',
+          repositoryDeclaredAuthor: 'maintainer',
+          digest: `sha256:${'O'.repeat(43)}`,
+        },
+      ],
+    },
+  });
+  const enabledLine = serializeReviewState(enabled);
+  const parsedEnabled = parseReviewState(`summary\n${enabledLine}\n${marker}`, marker);
+  assert.equal(parsedEnabled.kind, 'valid');
+  if (parsedEnabled.kind === 'valid') assert.deepEqual(parsedEnabled.state.memory, enabled.memory);
 });
 
 test('ignores unsupported and rejects malformed, duplicate, displaced, and oversized metadata', () => {
-  assert.equal(parseReviewState(`summary\n<!-- code-review-state:v2:AAAA -->\n${marker}`, marker).kind, 'unsupported');
+  assert.equal(parseReviewState(`summary\n<!-- code-review-state:v3:AAAA -->\n${marker}`, marker).kind, 'unsupported');
   assert.equal(
-    parseReviewState(`summary\n<!-- code-review-state:v1:not*base64 -->\n${marker}`, marker).kind,
+    parseReviewState(`summary\n<!-- code-review-state:v2:not*base64 -->\n${marker}`, marker).kind,
     'malformed',
   );
   const valid = serializeReviewState(state());
@@ -148,7 +179,7 @@ test('ignores unsupported and rejects malformed, duplicate, displaced, and overs
   assert.equal(parseReviewState(`${valid}\n${valid}\n${marker}`, marker).kind, 'malformed');
   assert.equal(
     parseReviewState(
-      `<!-- code-review-state:v1:${'A'.repeat(MAX_REVIEW_STATE_ENCODED_BYTES + 1)} -->\n${marker}`,
+      `<!-- code-review-state:v2:${'A'.repeat(MAX_REVIEW_STATE_ENCODED_BYTES + 1)} -->\n${marker}`,
       marker,
     ).kind,
     'malformed',
@@ -161,14 +192,65 @@ test('rejects noncanonical JSON, duplicate fingerprints, unknown fields, and inv
     Object.fromEntries(Object.entries(state()).filter(([key]) => key !== 'reviewInputDigest')),
     { ...state(), extra: true },
     { ...state(), findings: [findingState(), findingState()] },
+    { ...state(), memory: { ...state().memory, effectiveDigest: 'invalid' } },
+    {
+      ...state(),
+      memory: {
+        ...state().memory,
+        activeSuppressions: 0,
+        suppressedCandidates: 1,
+        appliedEntries: [{ id: 'entry', repositoryDeclaredAuthor: 'author', digest: `sha256:${'Z'.repeat(43)}` }],
+      },
+    },
+    { ...state(), memory: { ...state().memory, mode: 'base-config', status: 'disabled' } },
+    { ...state(), memory: { ...state().memory, mode: 'none', status: 'missing' } },
+    { ...state(), memory: { ...state().memory, mode: 'none', status: 'enabled' } },
+    {
+      ...state(),
+      memory: { ...state().memory, mode: 'base-config', status: 'enabled', activeSuppressions: 33 },
+    },
+    {
+      ...state(),
+      memory: { ...state().memory, mode: 'base-config', status: 'enabled', activePreferences: 33 },
+    },
+    {
+      ...state(),
+      memory: {
+        ...state().memory,
+        mode: 'base-config',
+        status: 'enabled',
+        activeSuppressions: 32,
+        suppressedCandidates: 33,
+      },
+    },
+    {
+      ...state(),
+      memory: {
+        ...state().memory,
+        mode: 'base-config',
+        status: 'missing',
+        activePreferences: 1,
+      },
+    },
+    {
+      ...state(),
+      memory: {
+        ...state().memory,
+        mode: 'base-config',
+        status: 'enabled',
+        activeSuppressions: 1,
+        suppressedCandidates: 1,
+        appliedEntries: [{ id: 'entry', author: 'maintainer', digest: `sha256:${'Z'.repeat(43)}` }],
+      },
+    },
     { ...state(), findings: [findingState({ state: 'resolved', supersededBy: `sha256:${'Z'.repeat(43)}` })] },
   ];
   for (const value of cases) {
     const encoded = Buffer.from(JSON.stringify(value), 'utf8').toString('base64url');
-    assert.equal(parseReviewState(`<!-- code-review-state:v1:${encoded} -->\n${marker}`, marker).kind, 'malformed');
+    assert.equal(parseReviewState(`<!-- code-review-state:v2:${encoded} -->\n${marker}`, marker).kind, 'malformed');
   }
-  const noncanonical = Buffer.from(`{ "version": 1 }`, 'utf8').toString('base64url');
-  assert.equal(parseReviewState(`<!-- code-review-state:v1:${noncanonical} -->\n${marker}`, marker).kind, 'malformed');
+  const noncanonical = Buffer.from(`{ "version": 2 }`, 'utf8').toString('base64url');
+  assert.equal(parseReviewState(`<!-- code-review-state:v2:${noncanonical} -->\n${marker}`, marker).kind, 'malformed');
 });
 
 test('fingerprints survive line shifts and ranking/fix changes but distinguish explanation and byte identity', () => {
@@ -229,6 +311,14 @@ test('classifies unchanged, new, resolved, and superseded findings deterministic
 
   const resolved = reconcileFindingStates([], [priorExact], nextSha);
   assert.deepEqual(resolved.counts, { new: 0, unchanged: 0, resolved: 1, superseded: 0 });
+
+  const memorySuppressed = reconcileFindingStates([], [priorExact], nextSha, [], [exact]);
+  assert.deepEqual(memorySuppressed.counts, { new: 0, unchanged: 0, resolved: 0, superseded: 0 });
+  assert.deepEqual(memorySuppressed.tombstones, []);
+
+  const changedButSuppressed = reconcileFindingStates([], [priorExact], nextSha, [], [changed]);
+  assert.deepEqual(changedButSuppressed.counts, { new: 0, unchanged: 0, resolved: 0, superseded: 0 });
+  assert.deepEqual(changedButSuppressed.tombstones, []);
 });
 
 test('same-head reuse rejects title, body, linked-issue, context, and fixed-policy changes', () => {
@@ -238,6 +328,7 @@ test('same-head reuse rejects title, body, linked-issue, context, and fixed-poli
     contextDigest: `sha256:${'C'.repeat(43)}`,
     analyzerResultDigest: `sha256:${'A'.repeat(43)}`,
     executionPlanDigest: `sha256:${'E'.repeat(43)}`,
+    repositoryMemoryDigest: `sha256:${'M'.repeat(43)}`,
     linkedIssues: [{ number: 22, digest: 'a'.repeat(64) }],
   };
   const original = reviewInputDigest(baseline);
@@ -248,6 +339,7 @@ test('same-head reuse rejects title, body, linked-issue, context, and fixed-poli
     reviewInputDigest({ ...baseline, contextDigest: `sha256:${'D'.repeat(43)}` }),
     reviewInputDigest({ ...baseline, analyzerResultDigest: `sha256:${'B'.repeat(43)}` }),
     reviewInputDigest({ ...baseline, executionPlanDigest: `sha256:${'F'.repeat(43)}` }),
+    reviewInputDigest({ ...baseline, repositoryMemoryDigest: `sha256:${'N'.repeat(43)}` }),
     reviewInputDigest({ ...baseline, linkedIssues: [{ number: 22, digest: 'b'.repeat(64) }] }),
     reviewInputDigest(baseline, {
       ...REVIEW_SEMANTIC_VERSIONS,
@@ -291,6 +383,8 @@ test('policy and scope bind state without credential material', () => {
     opencodeVersion: '1.0.0',
     piVersion: '1.0.0',
     deterministicAnalyzerManifestDigest: `sha256:${'M'.repeat(43)}`,
+    repositoryMemoryMode: 'base-config',
+    repositoryMemoryContractVersion: 1,
     requestedReviewStrategy: 'auto',
     specialistTokenBudget: 300_000,
     aggregateTimeoutMs: 600_000,
@@ -317,6 +411,8 @@ test('policy and scope bind state without credential material', () => {
     policy,
     reviewPolicyDigest({ ...policyInput, deterministicAnalyzerManifestDigest: `sha256:${'N'.repeat(43)}` }),
   );
+  assert.notEqual(policy, reviewPolicyDigest({ ...policyInput, repositoryMemoryMode: 'none' }));
+  assert.notEqual(policy, reviewPolicyDigest({ ...policyInput, repositoryMemoryContractVersion: 2 }));
   assert.notEqual(policy, reviewPolicyDigest({ ...policyInput, requestedReviewStrategy: 'single-pass' }));
   assert.notEqual(policy, reviewPolicyDigest({ ...policyInput, specialistTokenBudget: 400_000 }));
   assert.notEqual(
@@ -340,6 +436,20 @@ test('policy and scope bind state without credential material', () => {
       reviewInputDigest: value.reviewInputDigest,
     }),
     true,
+  );
+  assert.equal(
+    stateScopeMatches(value, {
+      apiUrl: value.apiUrl,
+      repository: value.repository,
+      pullRequest: value.pullRequest,
+      backend: value.backend,
+      actorId: value.actorId,
+      baseSha: value.baseSha,
+      policyDigest: policy,
+      reviewInputDigest: value.reviewInputDigest,
+      repositoryMemoryDigest: `sha256:${'N'.repeat(43)}`,
+    }),
+    false,
   );
   assert.equal(
     stateScopeMatches(value, {
