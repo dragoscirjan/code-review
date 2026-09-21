@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { renderComment, renderInlineComment } from './comment';
+import type { ReviewContextMetadata } from './context-planner';
 import { assessReview, type ReviewAssessment, type ValidatedFinding } from './finding-validation';
 import type {
   AuthenticatedActor,
@@ -25,6 +26,7 @@ export interface ExecuteAndPublishReviewInput {
   secrets: readonly string[];
   minimumConfidence: number;
   maximumInlineComments: number;
+  contextMetadata?: ReviewContextMetadata;
 }
 
 function redactFinding(finding: ValidatedFinding, secrets: readonly string[]): ValidatedFinding {
@@ -113,6 +115,7 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
     actor: input.actor.login,
     diffTruncated: input.diff.truncated,
     originalDiffBytes: input.diff.originalBytes,
+    contextMetadata: input.contextMetadata,
     marker,
   });
   assertPayloadsContainNoSecrets(

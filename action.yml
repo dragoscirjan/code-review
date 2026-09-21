@@ -66,6 +66,10 @@ outputs:
     description: URL of the created or updated review comment
   diff-truncated:
     description: Whether complete diff hunks were omitted to fit max-diff-bytes
+  context-truncated:
+    description: Whether any supplemental review context was truncated by a source or aggregate byte limit
+  context-unavailable-source-count:
+    description: Number of supplemental context sources unavailable, unsupported, timed out, or skipped by budget
   review-url:
     description: URL of the created or reused inline pull request review, empty when inline publication is disabled
   inline-comment-count:

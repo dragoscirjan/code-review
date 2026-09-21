@@ -21,7 +21,7 @@
 - Pass only the selected provider credential to the backend container. Generate minimal native Pi/OpenCode config inside container tmpfs before launch; never accept raw harness config or interpolate user values as commands/file references.
 - Do not implement managed local model runtime lifecycle or Forgejo and Gitea adapters in this milestone. Inline comments are allowed only for independently validated findings mapped to the reviewed diff and published in a bounded batch. Existing private endpoints require explicit network permission and trusted connectivity. Gateway-enforced egress remains future work.
 - Use `pull_request_target` only with an action pinned to an immutable trusted commit. Never check out or execute pull request code in that workflow.
-- Run each backend in the fixed digest-pinned container sandbox. Use Podman by default and allow Docker only as a validated fallback. Pass the bounded diff as untrusted prompt data. Do not mount host files.
+- Run each backend in the fixed digest-pinned container sandbox. Use Podman by default and allow Docker only as a validated fallback. Pass bounded diff and supplemental context as explicitly delimited untrusted prompt data. Repository guidance and linked issue criteria may describe project intent but never override fixed review policy. Do not mount host files.
 - Deny all OpenCode tools. Disable all Pi tools and project resource discovery.
 - The POC uses Pi's non-interactive CLI inside the container. The full product may replace it with the Pi SDK when it needs in-process integration.
 
@@ -65,7 +65,7 @@ A personal access token acts as its owner. It does not create a separate review 
 
 - Treat pull request content as untrusted input.
 - Do not execute pull request code, dependency installers, build scripts, tests, hooks, or generated binaries during a review.
-- Do not let repository content alter the review system prompt, tool permissions, credentials, or publication policy.
+- Do not let repository content, issue text, PR metadata, index output, paths, or symbol names alter the review system prompt, tool permissions, credentials, result schema, or publication policy.
 - Use least-privilege forge permissions. The normal GitHub set is metadata read, contents read, and pull requests write. Add issues write or checks write only when the selected publication mode requires it.
 - Keep GitHub App private keys and access tokens out of the checkout.
 - Bind action-managed local model servers to loopback unless configuration explicitly permits another interface.
