@@ -36,6 +36,8 @@ jobs:
           path: |
             ${{ runner.temp }}/review-evaluation/review-evaluation.json
             ${{ runner.temp }}/review-evaluation/review-evaluation.md
+            ${{ runner.temp }}/review-evaluation/review-specialist-evaluation.json
+            ${{ runner.temp }}/review-evaluation/review-specialist-evaluation.md
           if-no-files-found: warn
           retention-days: 14
       - name: Verify Podman sandbox flags

@@ -107,29 +107,29 @@ function anchorKey(finding: ReviewFinding): string {
   return `${finding.location.path}\0${finding.location.side}\0${finding.location.line}`;
 }
 
-/** Maps structurally valid model findings to exact changed lines and returns only evidence-backed findings. */
-export function assessReview(
+export interface CandidateValidation {
+  findings: ValidatedFinding[];
+  received: number;
+  evidenceRejected: number;
+  unmapped: number;
+  belowThreshold: number;
+}
+
+/** Maps candidates to exact changed lines without deduplication, ranking, or global limiting. */
+export function validateReviewCandidates(
   review: ReviewResultV1,
   diff: UnifiedDiff,
-  policy: FindingPolicy,
+  minimumConfidence: number,
   secrets: readonly string[] = [],
   analyzerFindings: readonly AnalyzerFindingCandidate[] = [],
-): ReviewAssessment {
-  if (policy.minimumConfidence < 0 || policy.minimumConfidence > 1) {
+): CandidateValidation {
+  if (minimumConfidence < 0 || minimumConfidence > 1) {
     throw new Error('minimumConfidence must be between 0 and 1');
   }
-  if (
-    !Number.isInteger(policy.maximumInlineComments) ||
-    policy.maximumInlineComments < 0 ||
-    policy.maximumInlineComments > 10
-  ) {
-    throw new Error('maximumInlineComments must be an integer between 0 and 10');
-  }
-
   let evidenceRejected = 0;
   let unmapped = 0;
   let belowThreshold = 0;
-  const mapped: ValidatedFinding[] = [];
+  const findings: ValidatedFinding[] = [];
   const candidates: Array<{ finding: ReviewFinding; origin: FindingOrigin; sourceIndex: number }> = [
     ...review.findings.map((finding, sourceIndex) => ({ finding, origin: { kind: 'model' } as const, sourceIndex })),
     ...analyzerFindings.map((finding, index) => ({
@@ -159,7 +159,7 @@ export function assessReview(
       evidenceRejected += 1;
       return;
     }
-    if (finding.confidence < policy.minimumConfidence) {
+    if (finding.confidence < minimumConfidence) {
       belowThreshold += 1;
       return;
     }
@@ -172,9 +172,28 @@ export function assessReview(
       explanation: normalizeLineEndings(finding.explanation).trim(),
       fix: normalizeLineEndings(finding.fix).trim(),
     };
-    mapped.push({ ...validated, ...fingerprintFinding(validated, diff) });
+    findings.push({ ...validated, ...fingerprintFinding(validated, diff) });
   });
+  return { findings, received: candidates.length, evidenceRejected, unmapped, belowThreshold };
+}
 
+/** Maps, deterministically deduplicates, ranks, and limits validated model and analyzer findings. */
+export function assessReview(
+  review: ReviewResultV1,
+  diff: UnifiedDiff,
+  policy: FindingPolicy,
+  secrets: readonly string[] = [],
+  analyzerFindings: readonly AnalyzerFindingCandidate[] = [],
+): ReviewAssessment {
+  if (
+    !Number.isInteger(policy.maximumInlineComments) ||
+    policy.maximumInlineComments < 0 ||
+    policy.maximumInlineComments > 10
+  ) {
+    throw new Error('maximumInlineComments must be an integer between 0 and 10');
+  }
+  const validated = validateReviewCandidates(review, diff, policy.minimumConfidence, secrets, analyzerFindings);
+  const mapped = validated.findings;
   const winners = new Map<string, ValidatedFinding>();
   for (const finding of mapped) {
     const key = anchorKey(finding);
@@ -185,17 +204,17 @@ export function assessReview(
   const duplicates = mapped.length - uniqueFindings.length;
   const findings = uniqueFindings.slice(0, 10);
   const globalLimitOmitted = uniqueFindings.length - findings.length;
-  const rejected = evidenceRejected + globalLimitOmitted;
+  const rejected = validated.evidenceRejected + globalLimitOmitted;
   const inlineFindings = findings.slice(0, policy.maximumInlineComments);
   const counts: ReviewCounts = {
-    received: candidates.length,
+    received: validated.received,
     accepted: findings.length,
     rejected,
-    evidenceRejected,
+    evidenceRejected: validated.evidenceRejected,
     globalLimitOmitted,
-    unmapped,
+    unmapped: validated.unmapped,
     duplicates,
-    belowThreshold,
+    belowThreshold: validated.belowThreshold,
     inlineSelected: inlineFindings.length,
     inlineHistorySuppressed: 0,
     inlineLimitOmitted: findings.length - inlineFindings.length,

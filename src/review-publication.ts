@@ -25,9 +25,10 @@ import {
   type ReviewStateFinding,
   type ReviewStateV1,
 } from './review-lifecycle';
+import type { ExecutedReview, ReviewExecutionSummary } from './review-specialists';
 
 export interface ExecuteAndPublishReviewInput {
-  executeReview: () => Promise<ReviewResultV1>;
+  executeReview: () => Promise<ReviewResultV1 | ExecutedReview>;
   assertFresh: () => Promise<void>;
   assertStateFresh?: () => Promise<void>;
   client: Pick<GitHubClient, 'createOrReuseInlineReview' | 'upsertManagedComment'> &
@@ -215,7 +216,9 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
   await input.assertStateFresh?.();
   if (!input.diff.parsed) throw new Error('Reviewed diff is missing its validated line map');
   assertLifecycleCoverage(input);
-  const review = await input.executeReview();
+  const executed = await input.executeReview();
+  const review = 'review' in executed ? executed.review : executed;
+  const executionSummary: ReviewExecutionSummary | undefined = 'review' in executed ? executed.summary : undefined;
   let assessment = redactAssessment(
     assessReview(
       review,
@@ -329,6 +332,7 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
     originalDiffBytes: input.diff.originalBytes,
     contextMetadata: input.contextMetadata,
     analyzerSummary: input.analyzer?.summary,
+    executionSummary,
     ...(stateLine && lifecycle
       ? {
           lifecycle: {
@@ -378,5 +382,5 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
     lifecycle?.lease,
   );
   await input.assertFresh();
-  return { comment, inlineReview, assessment, lifecycle: reconciled, state };
+  return { comment, inlineReview, assessment, lifecycle: reconciled, state, executionSummary };
 }

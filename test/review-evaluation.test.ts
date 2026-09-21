@@ -22,6 +22,13 @@ import {
   MAX_EVALUATION_ARTIFACT_BYTES,
   writeEvaluationArtifacts,
 } from '../src/review-evaluation-artifacts';
+import {
+  evaluateSpecialistRecordings,
+  parseSpecialistEvaluationRecordings,
+  parseSpecialistEvaluationThresholds,
+  renderSpecialistEvaluationJson,
+  renderSpecialistEvaluationMarkdown,
+} from '../src/review-specialist-evaluation';
 
 const temporaryDirectories: string[] = [];
 afterEach(async () => {
@@ -35,6 +42,14 @@ async function corpusText(): Promise<string> {
 
 async function thresholdsText(): Promise<string> {
   return readFile('test/fixtures/review-evaluation/thresholds.v1.json', 'utf8');
+}
+
+async function specialistText(): Promise<string> {
+  return readFile('test/fixtures/review-evaluation/specialists.v1.json', 'utf8');
+}
+
+async function specialistThresholdsText(): Promise<string> {
+  return readFile('test/fixtures/review-evaluation/specialist-thresholds.v1.json', 'utf8');
 }
 
 test('deterministically measures malformed recorded assistant payloads through the production parser', () => {
@@ -382,6 +397,42 @@ test('artifact output rejects unsafe locations, preexisting paths, symlinks, and
     /must be empty/,
   );
   assert.equal(await readFile(outside, 'utf8'), 'do not overwrite');
+});
+
+test('recorded specialist and auto execution are production-replayed, deterministic, and non-regressing', async () => {
+  const corpus = parseEvaluationCorpus(await corpusText());
+  const absoluteThresholds = parseEvaluationThresholds(await thresholdsText());
+  const baseline = await evaluateReviewCorpus({ corpus, mode: 'recorded', thresholds: absoluteThresholds });
+  const recordings = parseSpecialistEvaluationRecordings(await specialistText(), corpus);
+  const specialistThresholds = parseSpecialistEvaluationThresholds(await specialistThresholdsText());
+  const first = await evaluateSpecialistRecordings({
+    corpus,
+    recordings,
+    thresholds: specialistThresholds,
+    baseline,
+    absoluteThresholds,
+  });
+  const second = await evaluateSpecialistRecordings({
+    corpus,
+    recordings,
+    thresholds: specialistThresholds,
+    baseline,
+    absoluteThresholds,
+  });
+  assert.deepEqual(first.thresholdFailures, []);
+  assert.equal(renderSpecialistEvaluationJson(first), renderSpecialistEvaluationJson(second));
+  assert.equal(renderSpecialistEvaluationMarkdown(first), renderSpecialistEvaluationMarkdown(second));
+  assert.equal(first.specialists.metrics.recall.value, baseline.metrics.recall.value);
+  assert.equal(first.auto.metrics.precision.value, baseline.metrics.precision.value);
+  assert.deepEqual(
+    first.autoCases.filter((item) => item.selected === 'specialists').map((item) => item.caseId),
+    ['analyzer-duplicate-json-key', 'left-side-removed-validation', 'security-inverted-auth-guard'],
+  );
+  assert.equal(first.specialistCases.find((item) => item.caseId === 'prompt-injection-real-bug')?.arbiterRejected, 1);
+
+  const malformed = JSON.parse(await specialistText()) as { corpusDigest: string; cases: unknown[] };
+  malformed.corpusDigest = `sha256:${'A'.repeat(43)}`;
+  assert.throws(() => parseSpecialistEvaluationRecordings(JSON.stringify(malformed), corpus), /corpus digest/u);
 });
 
 test('threshold boundaries use raw finite values and malformed threshold documents fail closed', async () => {

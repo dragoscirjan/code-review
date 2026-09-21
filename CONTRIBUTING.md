@@ -69,7 +69,7 @@ Use these test levels:
 
 Tests must use temporary directories and repositories. They must not modify the contributor's checkout. Network tests must be opt-in and clearly named.
 
-The required `npm run evaluation` quality gate is deterministic, recorded, offline, and credential-free. Seed fixtures are inert JSON data and must never be imported or executed. Changes to the protected corpus, matching semantics, or thresholds require explicit owner review. `npm run evaluation:live` is an opt-in observational run only; it must not become a required CI gate or receive a GitHub publication token.
+The required `npm run evaluation` quality gate is deterministic, recorded, offline, and credential-free. Seed fixtures are inert JSON data and must never be imported or executed. The specialist gate must replay fixed per-role and arbiter recordings through the production orchestrator and compare forced-specialist and auto results with the single-pass baseline. Changes to the protected corpus, specialist recordings, role/selector/arbiter semantics, matching semantics, or either threshold file require explicit owner review. `npm run evaluation:live` is an opt-in observational run only; it must not become a required CI gate or receive a GitHub publication token.
 
 Before pushing, run every formatting, type-checking, linting, evaluation, and test command defined by the repository:
 
@@ -87,7 +87,7 @@ A change requires explicit security review when it:
 - Adds or changes a model-runtime command, executable path, endpoint, health check, model download, or cleanup rule.
 - Executes a repository command.
 - Changes token permissions or secret storage.
-- Changes prompt construction or model-visible context.
+- Changes prompt construction, specialist/arbiter orchestration, or model-visible context.
 - Changes managed-comment ownership checks.
 - Adds support for public fork pull requests.
 - Sends source code to a new model provider.

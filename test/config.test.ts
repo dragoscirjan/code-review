@@ -35,6 +35,8 @@ test('loads explicit model config and safe action defaults', () => {
   assert.equal(config.minimumConfidence, 0);
   assert.equal(config.maxInlineComments, 0);
   assert.equal(config.deterministicAnalyzers, 'none');
+  assert.equal(config.reviewStrategy, 'auto');
+  assert.equal(config.specialistTokenBudget, 300_000);
   assert.equal(config.timeoutMs, 600_000);
   assert.equal(loadActionConfig({ ...base, INPUT_BACKEND: 'pi' }).backend, 'pi');
 });
@@ -76,6 +78,9 @@ test('validates action limits and executable selection', () => {
     ['INPUT_MAX_INLINE_COMMENTS', '-1', /max-inline-comments/],
     ['INPUT_MAX_INLINE_COMMENTS', '11', /max-inline-comments/],
     ['INPUT_DETERMINISTIC_ANALYZERS', 'eslint', /deterministic-analyzers/],
+    ['INPUT_REVIEW_STRATEGY', 'parallel', /review-strategy/],
+    ['INPUT_SPECIALIST_TOKEN_BUDGET', '19999', /specialist-token-budget/],
+    ['INPUT_SPECIALIST_TOKEN_BUDGET', '2000001', /specialist-token-budget/],
     ['INPUT_TIMEOUT_SECONDS', '0', /timeout-seconds/],
   ] as const) {
     assert.throws(() => loadActionConfig({ ...base, [name]: value }), message);
@@ -92,10 +97,13 @@ test('validates action limits and executable selection', () => {
     loadActionConfig({ ...base, INPUT_DETERMINISTIC_ANALYZERS: 'base-config' }).deterministicAnalyzers,
     'base-config',
   );
+  assert.equal(loadActionConfig({ ...base, INPUT_REVIEW_STRATEGY: 'single-pass' }).reviewStrategy, 'single-pass');
+  assert.equal(loadActionConfig({ ...base, INPUT_SPECIALIST_TOKEN_BUDGET: '20000' }).specialistTokenBudget, 20_000);
 });
 
 test('migrates both backend markers without collisions', () => {
   assert.deepEqual(managedCommentMarkers('opencode'), [
+    '<!-- code-review:opencode:v7 -->',
     '<!-- code-review:opencode:v6 -->',
     '<!-- code-review:opencode:v5 -->',
     '<!-- code-review:opencode:v4 -->',
@@ -104,6 +112,7 @@ test('migrates both backend markers without collisions', () => {
     '<!-- code-review:opencode-poc:v1 -->',
   ]);
   assert.deepEqual(managedCommentMarkers('pi'), [
+    '<!-- code-review:pi:v7 -->',
     '<!-- code-review:pi:v6 -->',
     '<!-- code-review:pi:v5 -->',
     '<!-- code-review:pi:v4 -->',

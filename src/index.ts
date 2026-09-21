@@ -7,7 +7,7 @@ import { truncateUtf8 } from './context-planner';
 import { GitHubClient, loadPullRequestEvent, selectManagedComment } from './github';
 import { planIncrementalReview } from './incremental-review';
 import { redactSecrets } from './model';
-import { MAX_REVIEW_PR_AUTHOR_BYTES, MAX_REVIEW_PR_BODY_BYTES, MAX_REVIEW_PR_TITLE_BYTES, runReview } from './review';
+import { MAX_REVIEW_PR_AUTHOR_BYTES, MAX_REVIEW_PR_BODY_BYTES, MAX_REVIEW_PR_TITLE_BYTES } from './review';
 import { assertLinkedIssuesFresh, buildReviewContext } from './review-context';
 import {
   parseReviewState,
@@ -19,6 +19,25 @@ import {
 } from './review-lifecycle';
 import { executeAndPublishReview } from './review-publication';
 import { acquireReviewedSnapshot, assertSnapshotFresh, SNAPSHOT_DIFF_TIMEOUT_MS } from './review-snapshot';
+import { executeReviewStrategy, noChangeExecutedReview } from './review-specialists';
+import {
+  MAX_ARBITER_CANDIDATES,
+  MAX_ARBITER_CONTEXT_BYTES,
+  MAX_ARBITER_PROMPT_BYTES,
+  MAX_FINDINGS_PER_SPECIALIST,
+  MAX_RAW_SPECIALIST_FINDINGS,
+  MAX_SPECIALIST_CONTEXT_BYTES,
+  REVIEW_SELECTOR_VERSION,
+  ROLE_CONTEXT_PROJECTION_VERSION,
+  SPECIALIST_REQUEST_OVERHEAD_TOKENS,
+  SPECIALIST_ROLES,
+  SPECIALIST_ROLE_SET_VERSION,
+  arbiterOutputTokens,
+  reviewStrategyPlanDigest,
+  selectReviewStrategy,
+  specialistOutputTokens,
+} from './review-strategy';
+import { SPECIALIST_ARBITER_CONTRACT_VERSION } from './specialist-contract';
 
 function workflowCommandValue(value: string): string {
   return value.replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
@@ -74,6 +93,12 @@ async function main(): Promise<void> {
     `Fetched ${fullDiff.originalBytes} diff bytes${fullDiff.truncated ? `; safely limited to ${config.maxDiffBytes}` : ''}`,
   );
 
+  const strategyPlan = selectReviewStrategy({
+    requested: config.reviewStrategy,
+    diff: fullDiff,
+    analyzerCoverage: analyzer.summary.coverage,
+  });
+  console.log(`Selected ${strategyPlan.selected} review strategy (${strategyPlan.reasons.join(', ')})`);
   const markers = managedCommentMarkers(config.backend);
   const managedSelection = selectManagedComment(await client.listComments(authoritativePullRequest), actor.id, markers);
   if (managedSelection.kind === 'ambiguous') throw new Error('Managed review comment ownership is ambiguous');
@@ -94,6 +119,26 @@ async function main(): Promise<void> {
     opencodeVersion: config.opencodeVersion,
     piVersion: config.piVersion,
     deterministicAnalyzerManifestDigest: analyzerConfiguration.manifestDigest,
+    requestedReviewStrategy: config.reviewStrategy,
+    specialistTokenBudget: config.specialistTokenBudget,
+    aggregateTimeoutMs: config.timeoutMs,
+    specialistPolicy: {
+      roleSetVersion: SPECIALIST_ROLE_SET_VERSION,
+      selectorVersion: REVIEW_SELECTOR_VERSION,
+      arbiterContractVersion: SPECIALIST_ARBITER_CONTRACT_VERSION,
+      contextProjectionVersion: ROLE_CONTEXT_PROJECTION_VERSION,
+      maximumRolePasses: SPECIALIST_ROLES.length,
+      maximumArbiterPasses: 1,
+      maximumFindingsPerRole: MAX_FINDINGS_PER_SPECIALIST,
+      maximumRawFindings: MAX_RAW_SPECIALIST_FINDINGS,
+      maximumArbiterCandidates: MAX_ARBITER_CANDIDATES,
+      maximumSpecialistContextBytes: MAX_SPECIALIST_CONTEXT_BYTES,
+      maximumArbiterContextBytes: MAX_ARBITER_CONTEXT_BYTES,
+      maximumArbiterPromptBytes: MAX_ARBITER_PROMPT_BYTES,
+      specialistRequestOverheadTokens: SPECIALIST_REQUEST_OVERHEAD_TOKENS,
+      specialistOutputTokens: specialistOutputTokens(config.connection.maxOutputTokens),
+      arbiterOutputTokens: arbiterOutputTokens(config.connection.maxOutputTokens),
+    },
   });
   if (config.codeIndexer !== 'none') {
     console.log(`Installing and running ${config.codeIndexer} against the exact base revision`);
@@ -121,6 +166,7 @@ async function main(): Promise<void> {
     },
     contextDigest: reviewContext.bundle.digest,
     analyzerResultDigest: analyzer.report.resultDigest,
+    executionPlanDigest: reviewStrategyPlanDigest(strategyPlan),
     linkedIssues: reviewContext.linkedIssueFingerprints,
   });
 
@@ -188,11 +234,20 @@ async function main(): Promise<void> {
 
   const lease = managedSelection.kind === 'none' ? null : managedSelection.lease;
   const assertStateFresh = () => client.assertManagedCommentLease(authoritativePullRequest, actor, lease, markers);
+  const assertReviewInputsFresh = async () => {
+    await assertSnapshotFresh(client, authoritativePullRequest, snapshot.revision);
+    await assertLinkedIssuesFresh(client, authoritativePullRequest, reviewContext.linkedIssueFingerprints);
+  };
+  const assertExecutionFresh = async () => {
+    await assertReviewInputsFresh();
+    await assertStateFresh();
+  };
   const publication = await executeAndPublishReview({
     executeReview: () =>
       incremental.mode === 'no-change'
-        ? Promise.resolve({ version: 1 as const, outcome: 'clean' as const, findings: [] as [] })
-        : runReview({
+        ? Promise.resolve(noChangeExecutedReview(strategyPlan))
+        : executeReviewStrategy({
+            plan: strategyPlan,
             backend: config.backend,
             containerEngine: config.containerEngine,
             connection: config.connection,
@@ -200,16 +255,19 @@ async function main(): Promise<void> {
             piVersion: config.piVersion,
             customPrompt: config.prompt,
             timeoutMs: config.timeoutMs,
+            specialistTokenBudget: config.specialistTokenBudget,
             pullRequest: authoritativePullRequest,
             diff,
             reviewContext: reviewContext.bundle,
             priorFindings: incremental.affected,
+            policy: {
+              minimumConfidence: config.minimumConfidence,
+              maximumInlineComments: config.maxInlineComments,
+            },
             secrets,
+            assertFresh: assertExecutionFresh,
           }),
-    assertFresh: async () => {
-      await assertSnapshotFresh(client, authoritativePullRequest, snapshot.revision);
-      await assertLinkedIssuesFresh(client, authoritativePullRequest, reviewContext.linkedIssueFingerprints);
-    },
+    assertFresh: assertReviewInputsFresh,
     assertStateFresh,
     client,
     pullRequest: authoritativePullRequest,
@@ -249,6 +307,10 @@ async function main(): Promise<void> {
   await setOutput('context-truncated', String(reviewContext.bundle.metadata.truncated));
   await setOutput('context-unavailable-source-count', String(reviewContext.bundle.metadata.unavailableSourceCount));
   await setOutput('review-mode', incremental.mode);
+  await setOutput('review-strategy', publication.executionSummary?.plan.selected ?? strategyPlan.selected);
+  await setOutput('specialist-role-count', String(publication.executionSummary?.rolesCompleted ?? 0));
+  await setOutput('specialist-candidate-count', String(publication.executionSummary?.validatedCandidateCount ?? 0));
+  await setOutput('arbiter-rejected-count', String(publication.executionSummary?.arbiterRejectedCount ?? 0));
   await setOutput('analyzer-coverage', analyzer.summary.coverage);
   await setOutput('analyzer-run-count', String(analyzer.summary.runCount));
   await setOutput('analyzer-observation-count', String(analyzer.summary.acceptedObservations));

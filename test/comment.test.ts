@@ -126,6 +126,36 @@ test('renders accepted counts and keeps Markdown, HTML, mentions, bidi, and mark
   assert.equal(comment.trimEnd().split(/\r?\n/).at(-1), '<!-- managed -->');
 });
 
+test('renders only host-generated specialist execution metadata', () => {
+  const comment = renderComment({
+    assessment: assessment([], 'clean'),
+    backend: 'opencode',
+    model: 'model',
+    headSha: '1'.repeat(40),
+    actor: 'reviewer',
+    diffTruncated: false,
+    originalDiffBytes: 1,
+    executionSummary: {
+      plan: { version: 1, requested: 'auto', selected: 'specialists', reasons: ['sensitive-surface'] },
+      rolesAttempted: 4,
+      rolesCompleted: 4,
+      arbiterRan: true,
+      rawCandidateCount: 2,
+      validatedCandidateCount: 1,
+      preArbiterOmittedCount: 0,
+      arbiterRejectedCount: 1,
+      reservedTokens: 123_456,
+    },
+    marker: '<!-- managed -->',
+  });
+  assert.match(comment, /Requested review strategy: auto/u);
+  assert.match(comment, /Selected review strategy: specialists/u);
+  assert.match(comment, /Strategy reasons: sensitive-surface/u);
+  assert.match(comment, /Specialist roles completed: 4/u);
+  assert.match(comment, /Candidates rejected by arbiter: 1/u);
+  assert.match(comment, /Reserved specialist token units: 123456/u);
+});
+
 test('renders a bounded inline comment with all format controls visible and the deterministic marker last', () => {
   const comment = renderInlineComment(
     finding({
