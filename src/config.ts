@@ -2,6 +2,7 @@ import ms, { type StringValue } from 'ms';
 import type { DeterministicAnalyzerMode } from './analyzer-config';
 import { loadModelConfiguration, type ModelConnection } from './model';
 import type { ReviewBackend } from './review';
+import type { ReviewMemoryMode } from './review-memory';
 import type { RequestedReviewStrategy } from './review-strategy';
 
 export const DEFAULT_BACKEND: ReviewBackend = 'opencode';
@@ -32,13 +33,15 @@ export interface ActionConfig {
   minimumConfidence: number;
   maxInlineComments: number;
   deterministicAnalyzers: DeterministicAnalyzerMode;
+  reviewMemory: ReviewMemoryMode;
   reviewStrategy: RequestedReviewStrategy;
   specialistTokenBudget: number;
   timeoutMs: number;
 }
 
 export function managedCommentMarkers(backend: ReviewBackend): string[] {
-  const current = `<!-- code-review:${backend}:v7 -->`;
+  const current = `<!-- code-review:${backend}:v8 -->`;
+  const memory = `<!-- code-review:${backend}:v7 -->`;
   const specialists = `<!-- code-review:${backend}:v6 -->`;
   const incremental = `<!-- code-review:${backend}:v5 -->`;
   const validated = `<!-- code-review:${backend}:v4 -->`;
@@ -47,6 +50,7 @@ export function managedCommentMarkers(backend: ReviewBackend): string[] {
   return backend === 'opencode'
     ? [
         current,
+        memory,
         specialists,
         incremental,
         validated,
@@ -54,7 +58,7 @@ export function managedCommentMarkers(backend: ReviewBackend): string[] {
         providerNeutral,
         '<!-- code-review:opencode-poc:v1 -->',
       ]
-    : [current, specialists, incremental, validated, structured, providerNeutral];
+    : [current, memory, specialists, incremental, validated, structured, providerNeutral];
 }
 
 function inputCandidates(name: string): string[] {
@@ -182,6 +186,10 @@ export function loadActionConfig(environment: NodeJS.ProcessEnv = process.env): 
   if (deterministicAnalyzers !== 'none' && deterministicAnalyzers !== 'base-config') {
     throw new Error('deterministic-analyzers must be none or base-config');
   }
+  const reviewMemory = getActionInput('review-memory', environment) ?? 'none';
+  if (reviewMemory !== 'none' && reviewMemory !== 'base-config') {
+    throw new Error('review-memory must be none or base-config');
+  }
   const reviewStrategy = getActionInput('review-strategy', environment) ?? 'auto';
   if (reviewStrategy !== 'single-pass' && reviewStrategy !== 'specialists' && reviewStrategy !== 'auto') {
     throw new Error('review-strategy must be single-pass, specialists, or auto');
@@ -215,6 +223,7 @@ export function loadActionConfig(environment: NodeJS.ProcessEnv = process.env): 
     minimumConfidence,
     maxInlineComments,
     deterministicAnalyzers,
+    reviewMemory,
     reviewStrategy,
     specialistTokenBudget,
     timeoutMs: timeoutSeconds * 1_000,

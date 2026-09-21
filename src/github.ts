@@ -43,7 +43,14 @@ export interface RepositoryTextResult {
   bytes: number;
   truncated: boolean;
   blobSha?: string;
-  reason?: 'not-found-or-forbidden' | 'not-a-regular-file' | 'invalid-utf8' | 'too-large' | 'fetch-error';
+  reason?:
+    | 'not-found'
+    | 'not-a-regular-file'
+    | 'ambiguous-tree-entry'
+    | 'truncated-tree'
+    | 'invalid-utf8'
+    | 'too-large'
+    | 'fetch-error';
 }
 
 export interface GitHubIssueContext {
@@ -379,54 +386,130 @@ export class GitHubClient {
     const segments = repositoryPath.split('/');
     if (
       !segments.length ||
+      segments.length > 64 ||
       segments.some((segment) => !segment || segment === '.' || segment === '..' || /[\\\0\r\n]/u.test(segment))
     ) {
       throw new Error('Repository context path is unsafe');
     }
-    const encodedPath = segments.map((segment) => encodeURIComponent(segment)).join('/');
-    const path = `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/contents/${encodedPath}?ref=${encodeURIComponent(revision)}`;
-    const response = await this.fetchImplementation(`${this.apiUrl}${path}`, {
-      signal,
-      headers: {
-        Accept: 'application/vnd.github+json',
-        Authorization: `Bearer ${this.token}`,
-        'X-GitHub-Api-Version': '2022-11-28',
-        'User-Agent': 'code-review-action',
-      },
+    const repositoryPrefix = `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}`;
+    const getGitJson = async (path: string, label: string): Promise<{ status: number; value?: unknown }> => {
+      const response = await this.fetchImplementation(`${this.apiUrl}${path}`, {
+        signal,
+        headers: {
+          Accept: 'application/vnd.github+json',
+          Authorization: `Bearer ${this.token}`,
+          'X-GitHub-Api-Version': '2022-11-28',
+          'User-Agent': 'code-review-action',
+        },
+      });
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        return { status: response.status };
+      }
+      try {
+        return { status: response.status, value: await readBoundedJsonResponse(response, 2_000_000, label) };
+      } catch {
+        return { status: 0 };
+      }
+    };
+    const unavailable = (reason: RepositoryTextResult['reason'] = 'fetch-error'): RepositoryTextResult => ({
+      status: 'unavailable',
+      bytes: 0,
+      truncated: false,
+      reason,
     });
-    if (response.status === 403 || response.status === 404) {
-      await response.body?.cancel().catch(() => undefined);
-      return { status: 'not-found', bytes: 0, truncated: false, reason: 'not-found-or-forbidden' };
-    }
-    if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
-      return { status: 'unavailable', bytes: 0, truncated: false, reason: 'fetch-error' };
-    }
-    let value: unknown;
+    const missing = (): RepositoryTextResult => ({
+      status: 'not-found',
+      bytes: 0,
+      truncated: false,
+      reason: 'not-found',
+    });
+
+    const commitResponse = await getGitJson(
+      `${repositoryPrefix}/git/commits/${encodeURIComponent(revision)}`,
+      'GitHub repository commit',
+    );
+    if (commitResponse.status === 404) return missing();
+    if (commitResponse.status !== 200) return unavailable();
+    let currentTreeSha: string;
     try {
-      value = await readBoundedJsonResponse(
-        response,
-        Math.min(2_000_000, maximumBytes * 2 + 16_384),
-        'GitHub repository content',
+      const commit = record(commitResponse.value, 'repository commit');
+      const commitSha = text(commit.sha, 'repository commit.sha');
+      const tree = record(commit.tree, 'repository commit.tree');
+      currentTreeSha = text(tree.sha, 'repository commit.tree.sha');
+      if (commitSha !== revision || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(currentTreeSha)) return unavailable();
+    } catch {
+      return unavailable();
+    }
+
+    let blobSha: string | undefined;
+    for (let index = 0; index < segments.length; index += 1) {
+      const treeResponse = await getGitJson(
+        `${repositoryPrefix}/git/trees/${encodeURIComponent(currentTreeSha)}`,
+        'GitHub repository tree',
       );
-    } catch {
-      return { status: 'unavailable', bytes: 0, truncated: false, reason: 'fetch-error' };
+      if (treeResponse.status === 404) return missing();
+      if (treeResponse.status !== 200) return unavailable();
+      let tree: Record<string, unknown>;
+      try {
+        tree = record(treeResponse.value, 'repository tree');
+      } catch {
+        return unavailable();
+      }
+      if (tree.sha !== currentTreeSha || tree.truncated !== false || !Array.isArray(tree.tree)) {
+        return unavailable(tree.truncated === true ? 'truncated-tree' : 'fetch-error');
+      }
+      const entries: Record<string, unknown>[] = [];
+      try {
+        for (const value of tree.tree) {
+          const entry = record(value, 'repository tree entry');
+          if (
+            typeof entry.path !== 'string' ||
+            typeof entry.mode !== 'string' ||
+            typeof entry.type !== 'string' ||
+            typeof entry.sha !== 'string' ||
+            !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(entry.sha)
+          )
+            return unavailable();
+          entries.push(entry);
+        }
+      } catch {
+        return unavailable();
+      }
+      const matches = entries.filter((entry) => entry.path === segments[index]);
+      if (matches.length === 0) return missing();
+      if (matches.length !== 1) return unavailable('ambiguous-tree-entry');
+      const entry = matches[0] as Record<string, unknown> & { sha: string };
+      const last = index === segments.length - 1;
+      const entrySha = entry.sha;
+      if (!last) {
+        if (entry.type !== 'tree' || entry.mode !== '040000') return unavailable('not-a-regular-file');
+        currentTreeSha = entrySha;
+      } else {
+        if (entry.type !== 'blob' || (entry.mode !== '100644' && entry.mode !== '100755')) {
+          return unavailable('not-a-regular-file');
+        }
+        blobSha = entrySha;
+      }
     }
-    let entry: Record<string, unknown>;
+    if (!blobSha) return unavailable();
+
+    const blobResponse = await getGitJson(
+      `${repositoryPrefix}/git/blobs/${encodeURIComponent(blobSha)}`,
+      'GitHub repository blob',
+    );
+    if (blobResponse.status === 404) return missing();
+    if (blobResponse.status !== 200) return unavailable();
+    let blob: Record<string, unknown>;
     try {
-      entry = record(value, 'repository content');
+      blob = record(blobResponse.value, 'repository blob');
     } catch {
-      return { status: 'unavailable', bytes: 0, truncated: false, reason: 'fetch-error' };
+      return unavailable();
     }
-    if (entry.type !== 'file' || entry.target !== undefined || entry.submodule_git_url !== undefined) {
-      return { status: 'unavailable', bytes: 0, truncated: false, reason: 'not-a-regular-file' };
-    }
-    if (entry.encoding !== 'base64' || typeof entry.content !== 'string' || typeof entry.sha !== 'string') {
-      return { status: 'unavailable', bytes: 0, truncated: false, reason: 'fetch-error' };
-    }
-    const encodedContent = entry.content.replaceAll(/\s/gu, '');
+    if (blob.sha !== blobSha || blob.encoding !== 'base64' || typeof blob.content !== 'string') return unavailable();
+    const encodedContent = blob.content.replaceAll(/\s/gu, '');
     if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(encodedContent)) {
-      return { status: 'unavailable', bytes: 0, truncated: false, reason: 'fetch-error' };
+      return unavailable();
     }
     const bytes = Buffer.from(encodedContent, 'base64');
     let decoded: string;
@@ -436,15 +519,14 @@ export class GitHubClient {
       return { status: 'unavailable', bytes: bytes.length, truncated: false, reason: 'invalid-utf8' };
     }
     if (bytes.length <= maximumBytes) {
-      return { status: 'found', text: decoded, bytes: bytes.length, truncated: false, blobSha: entry.sha };
+      return { status: 'found', text: decoded, bytes: bytes.length, truncated: false, blobSha };
     }
-    const textPrefix = utf8Prefix(bytes, maximumBytes);
     return {
       status: 'found',
-      text: textPrefix,
+      text: utf8Prefix(bytes, maximumBytes),
       bytes: bytes.length,
       truncated: true,
-      blobSha: entry.sha,
+      blobSha,
       reason: 'too-large',
     };
   }

@@ -38,11 +38,14 @@ function assessment(
       unmapped: 0,
       duplicates: 0,
       belowThreshold: 0,
+      memorySuppressed: 0,
       inlineSelected: findings.length,
       inlineHistorySuppressed: 0,
       inlineLimitOmitted: 0,
       inlineOmitted: 0,
     },
+    memoryApplications: [],
+    memorySuppressedFindings: [],
   };
 }
 
@@ -210,7 +213,7 @@ test('keeps mandatory lifecycle metadata and final ownership marker under detail
     }),
   );
   const stateLine = serializeReviewState({
-    version: 1,
+    version: 2,
     apiUrl: 'https://api.github.com',
     repository: 'owner/repository',
     pullRequest: 22,
@@ -232,6 +235,15 @@ test('keeps mandatory lifecycle metadata and final ownership marker under detail
     }),
     inlineHistorySuppressed: 0,
     inlineLimitOmitted: 0,
+    memory: {
+      mode: 'none',
+      status: 'disabled',
+      effectiveDigest: `sha256:${'M'.repeat(43)}`,
+      activeSuppressions: 0,
+      activePreferences: 0,
+      suppressedCandidates: 0,
+      appliedEntries: [],
+    },
     coverageComplete: true,
     mode: 'full',
     fromHeadSha: null,

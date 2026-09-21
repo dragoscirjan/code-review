@@ -60,6 +60,10 @@ inputs:
     description: Fixed in-process analyzers. Accepted values are none and base-config
     required: false
     default: none
+  review-memory:
+    description: Exact-base repository review memory. Accepted values are none and base-config
+    required: false
+    default: none
   review-strategy:
     description: Review execution strategy. Accepted values are single-pass, specialists, and auto
     required: false
@@ -92,6 +96,16 @@ outputs:
     description: Number of validated model candidates presented to the arbiter
   arbiter-rejected-count:
     description: Number of validated candidate IDs rejected by the arbiter
+  review-memory-status:
+    description: Repository review-memory status (disabled, missing, or enabled)
+  memory-suppressed-count:
+    description: Number of validated candidates suppressed by exact-base repository memory
+  memory-active-suppression-count:
+    description: Number of active repository-memory suppression entries
+  memory-active-preference-count:
+    description: Number of active enhancement-only repository-memory preferences
+  memory-effective-digest:
+    description: Host-generated digest of the effective repository-memory policy
   new-finding-count:
     description: Number of active findings first seen at the reviewed head
   unchanged-finding-count:

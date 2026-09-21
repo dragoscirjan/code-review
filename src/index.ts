@@ -17,6 +17,7 @@ import {
   stateScopeMatches,
   type ReviewStateV1,
 } from './review-lifecycle';
+import { REVIEW_MEMORY_SEMANTIC_VERSION, assertReviewMemoryCurrent, loadReviewMemory } from './review-memory';
 import { executeAndPublishReview } from './review-publication';
 import { acquireReviewedSnapshot, assertSnapshotFresh, SNAPSHOT_DIFF_TIMEOUT_MS } from './review-snapshot';
 import { executeReviewStrategy, noChangeExecutedReview } from './review-specialists';
@@ -53,6 +54,7 @@ async function setOutput(name: string, value: string): Promise<void> {
 const secrets: string[] = [];
 
 async function main(): Promise<void> {
+  const reviewStartedAt = new Date();
   for (const name of ['github-token', 'model-credentials']) {
     const value = getActionInput(name, process.env);
     if (value) secrets.push(value);
@@ -72,6 +74,14 @@ async function main(): Promise<void> {
   const snapshot = await acquireReviewedSnapshot(client, pullRequest, config.maxDiffBytes);
   const authoritativePullRequest = snapshot.pullRequest;
   const fullDiff = snapshot.diff;
+  const memory = await loadReviewMemory({
+    client,
+    pullRequest: authoritativePullRequest,
+    mode: config.reviewMemory,
+    reviewStartedAt,
+    secrets,
+  });
+  await assertSnapshotFresh(client, authoritativePullRequest, snapshot.revision);
   const actor = await client.getAuthenticatedActor();
   const analyzerConfiguration = await loadAnalyzerConfiguration({
     client,
@@ -119,6 +129,8 @@ async function main(): Promise<void> {
     opencodeVersion: config.opencodeVersion,
     piVersion: config.piVersion,
     deterministicAnalyzerManifestDigest: analyzerConfiguration.manifestDigest,
+    repositoryMemoryMode: config.reviewMemory,
+    repositoryMemoryContractVersion: REVIEW_MEMORY_SEMANTIC_VERSION,
     requestedReviewStrategy: config.reviewStrategy,
     specialistTokenBudget: config.specialistTokenBudget,
     aggregateTimeoutMs: config.timeoutMs,
@@ -167,6 +179,7 @@ async function main(): Promise<void> {
     contextDigest: reviewContext.bundle.digest,
     analyzerResultDigest: analyzer.report.resultDigest,
     executionPlanDigest: reviewStrategyPlanDigest(strategyPlan),
+    repositoryMemoryDigest: memory.effectiveDigest,
     linkedIssues: reviewContext.linkedIssueFingerprints,
   });
 
@@ -194,6 +207,7 @@ async function main(): Promise<void> {
         ...expectedIdentity,
         policyDigest,
         reviewInputDigest: inputDigest,
+        repositoryMemoryDigest: memory.effectiveDigest,
       });
       fallbackReason = reuseAllowed ? 'compare-unavailable' : 'review-input-mismatch';
     } else {
@@ -235,6 +249,7 @@ async function main(): Promise<void> {
   const lease = managedSelection.kind === 'none' ? null : managedSelection.lease;
   const assertStateFresh = () => client.assertManagedCommentLease(authoritativePullRequest, actor, lease, markers);
   const assertReviewInputsFresh = async () => {
+    assertReviewMemoryCurrent(memory);
     await assertSnapshotFresh(client, authoritativePullRequest, snapshot.revision);
     await assertLinkedIssuesFresh(client, authoritativePullRequest, reviewContext.linkedIssueFingerprints);
   };
@@ -284,6 +299,7 @@ async function main(): Promise<void> {
       findings: incremental.mode === 'no-change' ? [] : analyzer.findings,
       summary: analyzer.summary,
     },
+    memory,
     lifecycle: {
       apiUrl,
       policyDigest,
@@ -311,6 +327,11 @@ async function main(): Promise<void> {
   await setOutput('specialist-role-count', String(publication.executionSummary?.rolesCompleted ?? 0));
   await setOutput('specialist-candidate-count', String(publication.executionSummary?.validatedCandidateCount ?? 0));
   await setOutput('arbiter-rejected-count', String(publication.executionSummary?.arbiterRejectedCount ?? 0));
+  await setOutput('review-memory-status', memory.status);
+  await setOutput('memory-suppressed-count', String(publication.assessment.counts.memorySuppressed));
+  await setOutput('memory-active-suppression-count', String(memory.activeSuppressions.length));
+  await setOutput('memory-active-preference-count', String(memory.activePreferences.length));
+  await setOutput('memory-effective-digest', memory.effectiveDigest);
   await setOutput('analyzer-coverage', analyzer.summary.coverage);
   await setOutput('analyzer-run-count', String(analyzer.summary.runCount));
   await setOutput('analyzer-observation-count', String(analyzer.summary.acceptedObservations));

@@ -135,11 +135,12 @@ Omit `model-credentials` for keyless servers. The harness adapters use a non-sec
 | `minimum-confidence`      | `0`                             | Inclusive confidence threshold from `0` through `1`.                          |
 | `max-inline-comments`     | `0`                             | Inline comment cap from `0` through `10`; `0` keeps summary-only behavior.    |
 | `deterministic-analyzers` | `none`                          | `none` or `base-config`; trusted workflow gate for fixed parse-only checks.   |
+| `review-memory`           | `none`                          | `none` or `base-config`; exact-base reviewer memory gate.                     |
 | `review-strategy`         | `auto`                          | `single-pass`, `specialists`, or deterministic `auto` selection.              |
 | `specialist-token-budget` | `300000`                        | Conservative aggregate specialist prompt/output reservation.                  |
 | `timeout-seconds`         | `600`                           | One call in single-pass mode; aggregate role/arbiter time in specialist mode. |
 
-Outputs: `comment-url`, `review-url`, `inline-comment-count`, `inline-history-suppressed-count`, `inline-limit-omitted-count`, `diff-truncated`, `context-truncated`, `context-unavailable-source-count`, `review-mode`, `review-strategy`, `specialist-role-count`, `specialist-candidate-count`, `arbiter-rejected-count`, `new-finding-count`, `unchanged-finding-count`, `resolved-finding-count`, `superseded-finding-count`, `analyzer-coverage`, `analyzer-run-count`, `analyzer-observation-count`, `analyzer-skipped-file-count`, `code-indexer`, `code-index-cache-hit`.
+Outputs: `comment-url`, `review-url`, `inline-comment-count`, `inline-history-suppressed-count`, `inline-limit-omitted-count`, `diff-truncated`, `context-truncated`, `context-unavailable-source-count`, `review-mode`, `review-strategy`, `specialist-role-count`, `specialist-candidate-count`, `arbiter-rejected-count`, `review-memory-status`, `memory-suppressed-count`, `memory-active-suppression-count`, `memory-active-preference-count`, `memory-effective-digest`, `new-finding-count`, `unchanged-finding-count`, `resolved-finding-count`, `superseded-finding-count`, `analyzer-coverage`, `analyzer-run-count`, `analyzer-observation-count`, `analyzer-skipped-file-count`, `code-indexer`, `code-index-cache-hit`.
 
 ## Deterministic analyzers
 
@@ -172,6 +173,55 @@ Every observation is bound to fixed tool/rule/version provenance and an immutabl
 
 Project-aware type checking, dependency resolution, builds, tests, plugins, downloaded rules, arbitrary commands, deleted-line analysis, and repository-defined analyzer versions remain unsupported.
 
+## Repository review memory
+
+A trusted workflow may set `review-memory: base-config`. The action then reads the one fixed file `.github/code-review-memory.json` only from the captured **base SHA**. A pull request cannot suppress findings about itself by adding or changing its head copy. `none` performs no repository read; a missing base file is reported as `missing` and applies no memory. When enabled, an unavailable, non-regular/symlink, truncated, oversized, invalid-UTF-8, duplicate-keyed, malformed, unknown-version, expired, secret-bearing, or otherwise unsafe file aborts before any model backend or publication. The complete file is limited to 32 KiB, 32 suppressions, 32 preferences, eight paths per entry, and 256 paths total.
+
+Version 1 uses exact objects and mandatory audit metadata:
+
+```json
+{
+  "version": 1,
+  "suppressions": [
+    {
+      "id": "generated-correctness-noise",
+      "paths": ["generated/**/*.ts"],
+      "scope": { "kind": "category", "category": "correctness" },
+      "fingerprint": null,
+      "reason": "Reviewed generator output is intentionally compatible.",
+      "provenance": { "author": "maintainer", "kind": "issue", "reference": "#123" },
+      "createdAt": "2026-01-01T00:00:00Z",
+      "expiresAt": "2026-06-01T00:00:00Z"
+    }
+  ],
+  "preferences": [
+    {
+      "id": "payments-testing-focus",
+      "paths": ["src/payments/**"],
+      "categories": ["security", "testing"],
+      "reason": "Prefer already accepted payment findings when inline publication is capped.",
+      "provenance": {
+        "author": "security-team",
+        "kind": "policy",
+        "reference": "https://example.test/review/payments"
+      },
+      "createdAt": "2026-01-01T00:00:00Z",
+      "expiresAt": "2026-06-01T00:00:00Z"
+    }
+  ]
+}
+```
+
+Category suppressions apply only to host-labelled model findings. A `security` category suppression, and any actual suppression match against a critical finding, requires one full `sha256:` finding fingerprint plus an exact canonical path without wildcards. Fixed analyzer findings require an `analyzer-rule` scope containing the exact allowlisted `analyzer`, `rule`, and rule `revision`, plus the same full fingerprint and exact-path binding. Broad non-security category/path suppressions and stable exact-fingerprint replay across heads/backends are intentional for byte/anchor/explanation-identical false positives, bounded by exact-base code review and expiry. Broad category or wildcard policy cannot disable fixed analyzer/security controls, and memory cannot alter validation, sandbox, analyzer, arbiter, secret, freshness, or publication controls. Model output cannot forge origin or rule provenance.
+
+Path matching is case-sensitive over canonical repository-relative POSIX paths. `*` matches within one segment, `?` matches one character within one segment, and a complete `**` segment matches zero or more segments. Negation, escaping, bracket/brace classes, extglobs, embedded `**`, absolute paths, backslashes, empty/`.`/`..` segments, and control/format characters are rejected. Matching uses bounded dynamic programming rather than repository-provided regular expressions.
+
+Every entry requires a lowercase ASCII ID, a bounded nonblank reason, a repository-declared ASCII author plus an issue, pull request, commit, or absolute credential-free HTTPS policy reference, and canonical UTC-second `createdAt`/`expiresAt` values. The declared author is repository-recorded text, not an authenticated GitHub identity; code review of the exact-base memory-file change is the trust source. Creation cannot be in the future, expiry is exclusive, and lifetime cannot exceed 366 days. An enabled file containing any expired entry is invalid and aborts rather than silently making the entry inactive. The file is public repository policy: never put credentials or sensitive incident detail in it. Reasons, references, paths, fingerprints, and raw file content never enter model/arbiter prompts, logs, comments, outputs, lifecycle state, or evaluation artifacts. Summaries/state expose only bounded counts plus escaped, non-mentioning IDs, explicitly labelled repository-declared authors, and host-generated entry/effective digests.
+
+Memory runs only after strict result parsing, exact changed-line/evidence mapping, confidence and secret checks, host provenance assignment, and canonical anchor deduplication. Canonical winner selection is independent of memory: suppressing the winner never reveals a lower-ranked same-anchor variant. Suppression then runs before the fixed baseline severity/confidence/deterministic ranking and global ten-finding cap, so a suppressed canonical finding cannot occupy a slot. Multiple actual matching suppressions are ambiguous and abort rather than using order. Preferences never change that globally accepted set or summary order. They can only reorder equally severe unprotected findings inside the accepted set for inline selection. Security-category, critical-severity, and analyzer-origin findings are ordered ahead of unprotected findings, and comparisons between two protected findings always use the exact baseline comparator without consulting memory, so preferences cannot change protected selection or cause protected inline omission. Preferences cannot suppress, mutate, lower confidence, change role/analyzer selection, alter prompts, or bypass any cap, freshness, sandbox, tool, credential, arbiter, analyzer, validation, secret, or publication rule. The normal quality corpus remains memory-disabled so memory cannot improve measured quality.
+
+The fixed file is resolved only from the captured exact base commit. Before its blob is fetched, bounded exact Git-tree traversal must prove one unambiguous regular-file entry (`100644` or `100755`) at every segment; symlinks, submodules, trees at the final path, duplicate entries, truncated/malformed metadata, permission/rate-limit failures, and unavailable blobs abort enabled memory. Only authoritative absence/HTTP 404 becomes `missing`. The canonical effective-memory digest and contract version bind incremental reuse. A file/mode/semantic change forces a full review; crossing expiry during a run aborts before the next write. State version 2 and managed marker v8 intentionally migrate older summaries through a full baseline. Suppressed findings do not enter active lifecycle state or historical inline markers; removing memory permits a later full review to report them again.
+
 ## Specialist review strategy
 
 `review-strategy: auto` keeps the existing single review call for small, low-risk changes. It deterministically selects the fixed correctness, security, testing, and compatibility passes when the authoritative full diff is truncated, has more than two commentable files, has more than 80 changed lines, exceeds 24 KiB, has partial analyzer coverage, or touches a fixed sensitive surface such as workflows/actions, authentication, credentials/secrets, configuration, manifests/lockfiles, migrations/schemas, API/routes/interfaces, or canonical container/build metadata (`Dockerfile`, `Containerfile`, bounded suffixed variants, Compose files, and action metadata). Sensitive names use exact normalized path segments, filenames, or dot/dash/underscore-delimited filename tokens rather than substring matches. `single-pass` and `specialists` force either path. Pull-request content can trigger only these fixed effort-allocation signals; it cannot add, remove, reorder, or retry roles.
@@ -186,7 +236,7 @@ All roles and the arbiter use the same configured model/provider and selected pr
 
 `npm run evaluation` replays the checked-in version 1 seeded-defect corpus through the production result parser, unified-diff parser, exact evidence mapper, deterministic analyzer merge, and deduplicator. The corpus covers correctness, security, regression, testing, prompt injection, HTML-like syntax, clean changes, LEFT-side findings, and analyzer evidence. Every protected baseline recording is contract-valid, exactly mapped, and deduplicated; focused adversarial unit fixtures cover malformed, duplicate, unmapped, rejected, and false-positive outputs. The corpus records exact acceptable locations and intentional non-findings.
 
-The deterministic gate reports precision, recall, line-mapping accuracy, duplicate rate, evidence/secret rejection rate, global finding-cap omission rate, malformed-output rate, execution-failure rate, clean-case accuracy, intentional non-finding hits, and recorded latency. It also replays fixed per-role and arbiter recordings through the production specialist orchestrator, verifies expected auto routes, and requires forced-specialist and auto precision/recall/mapping/clean accuracy plus per-case matches to be no worse than the single-pass baseline. Error counts cannot increase, p95 latency is bounded, and reservations must remain within the checked budget. This recorded non-regression gate enabled the `auto` default while retaining single-pass behavior for low-risk changes.
+The deterministic gate reports precision, recall, line-mapping accuracy, duplicate rate, evidence/secret rejection rate, global finding-cap omission rate, repository-memory suppression count (zero in the protected memory-disabled corpus), malformed-output rate, execution-failure rate, clean-case accuracy, intentional non-finding hits, and recorded latency. It also replays fixed per-role and arbiter recordings through the production specialist orchestrator, verifies expected auto routes, and requires forced-specialist and auto precision/recall/mapping/clean accuracy plus per-case matches to be no worse than the single-pass baseline. Error counts cannot increase, p95 latency is bounded, and reservations must remain within the checked budget. This recorded non-regression gate enabled the `auto` default while retaining single-pass behavior for low-risk changes.
 
 The gate writes canonical JSON and Markdown baseline and specialist reports to a newly created private directory directly below `RUNNER_TEMP` (or the operating-system temporary directory) and fails after writing when versioned thresholds regress. Normal CI is offline and credential-free; fixture content is inert JSON data and is never imported, compiled, installed, or executed.
 
