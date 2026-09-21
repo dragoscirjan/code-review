@@ -42,6 +42,9 @@ function renderAssessment(assessment: ReviewAssessment): string {
   if (assessment.findings.length > 0) {
     return assessment.findings.map((finding, index) => renderFinding(finding, index + 1)).join('\n\n');
   }
+  if (assessment.counts.memorySuppressed > 0) {
+    return 'No validated findings remain after repository-memory suppressions.';
+  }
   if (assessment.modelOutcome === 'clean') return 'No validated findings were returned for the supplied context.';
   return 'No findings passed diff and evidence validation.';
 }
@@ -68,6 +71,14 @@ export function renderComment(input: {
   contextMetadata?: ReviewContextMetadata;
   analyzerSummary?: AnalyzerSummary;
   executionSummary?: ReviewExecutionSummary;
+  memory?: {
+    mode: 'none' | 'base-config';
+    status: 'disabled' | 'missing' | 'enabled';
+    activeSuppressions: number;
+    activePreferences: number;
+    suppressedCandidates: number;
+    applications: readonly { id: string; repositoryDeclaredAuthor: string; digest: string }[];
+  };
   lifecycle?: {
     mode: ReviewMode;
     reason: string;
@@ -114,6 +125,22 @@ export function renderComment(input: {
 - Candidates rejected by arbiter: ${input.executionSummary.arbiterRejectedCount}
 - Reserved specialist token units: ${input.executionSummary.reservedTokens}`
     : '';
+  const memory = input.memory
+    ? `
+- Repository review memory: ${input.memory.status} (${input.memory.mode})
+- Active memory suppressions: ${input.memory.activeSuppressions}
+- Active additional-scrutiny preferences: ${input.memory.activePreferences}
+- Validated candidates suppressed by repository memory: ${input.memory.suppressedCandidates}${
+        input.memory.applications.length > 0
+          ? `\n- Applied repository-declared memory entries: ${input.memory.applications
+              .map(
+                (entry) =>
+                  `\`${entry.id}\` with repository-recorded author \`${entry.repositoryDeclaredAuthor}\` (\`${entry.digest}\`)`,
+              )
+              .join(', ')}`
+          : ''
+      }`
+    : '';
   const lifecycle = input.lifecycle
     ? `
 - Review mode: ${input.lifecycle.mode}
@@ -154,13 +181,14 @@ export function renderComment(input: {
     const comment = `## Code Review (\`${input.model}\` via ${backendLabel(input.backend)})
 
 - Head: \`${input.headSha.slice(0, 12)}\`${context}
-- Published through: \`@${input.actor}\`${analysis}${execution}${lifecycle}
+- Published through: \`@${input.actor}\`${analysis}${execution}${memory}${lifecycle}
 - Findings received: ${counts.received}
 - Accepted: ${counts.accepted}
 - Rejected (evidence or secret policy): ${counts.rejected}
 - Unmapped: ${counts.unmapped}
 - Duplicates removed: ${counts.duplicates}
 - Below confidence threshold: ${counts.belowThreshold}
+- Suppressed by repository memory: ${counts.memorySuppressed}
 - Inline comments published: ${counts.inlineSelected}
 - Inline comments suppressed by publication history: ${counts.inlineHistorySuppressed}
 - Accepted findings omitted from inline comments by limit: ${counts.inlineLimitOmitted}${truncation}

@@ -14,8 +14,9 @@ import type { ModelConnection } from '../src/model';
 import { ReviewExecutionError, type StructuredBackendRequest } from '../src/review';
 import { parseReviewResult, type ReviewFinding, type ReviewResultV1 } from '../src/review-contract';
 import { parseReviewState } from '../src/review-lifecycle';
+import { parseReviewMemory } from '../src/review-memory';
 import { executeAndPublishReview } from '../src/review-publication';
-import { executeReviewStrategy, type StructuredBackendRunner } from '../src/review-specialists';
+import { executeReviewStrategy, type ExecutedReview, type StructuredBackendRunner } from '../src/review-specialists';
 import { selectReviewStrategy } from '../src/review-strategy';
 import { parseUnifiedDiff, prepareReviewedDiff } from '../src/unified-diff';
 
@@ -186,7 +187,7 @@ const specialistConnection: ModelConnection = {
 };
 
 function input(
-  executeReview: () => Promise<ReviewResultV1>,
+  executeReview: () => Promise<ReviewResultV1 | ExecutedReview>,
   spy: ReturnType<typeof publicationSpy>,
   overrides: Partial<Parameters<typeof executeAndPublishReview>[0]> = {},
 ) {
@@ -329,6 +330,156 @@ test('invalid findings are omitted while summary reports unmapped and rejected c
   assert.match(spy.publishedBody(), /Rejected .*: 1/);
   assert.match(spy.publishedBody(), /Unmapped: 1/);
   assert.doesNotMatch(spy.publishedBody(), /missing\.ts|spoofed evidence/);
+});
+
+test('applies exact-base memory only after validation and publishes safe audit metadata', async () => {
+  const spy = publicationSpy();
+  const reason = 'Internal false-positive detail that must never be published';
+  const memory = parseReviewMemory(
+    JSON.stringify({
+      version: 1,
+      suppressions: [
+        {
+          id: 'accepted-correctness-false-positive',
+          paths: ['src/*.ts'],
+          scope: { kind: 'category', category: 'correctness' },
+          fingerprint: null,
+          reason,
+          provenance: { author: 'maintainer', kind: 'issue', reference: '#27' },
+          createdAt: '2026-01-01T00:00:00Z',
+          expiresAt: '2027-01-01T00:00:00Z',
+        },
+      ],
+      preferences: [],
+    }),
+    'a'.repeat(40),
+    'c'.repeat(40),
+    new Date('2026-06-01T00:00:00Z'),
+  );
+  const review = parseReviewResult(
+    JSON.stringify({ version: 1, outcome: 'findings', findings: [finding({ category: 'correctness' })] }),
+  );
+  const mismatchSpy = publicationSpy();
+  let mismatchedBackendCalls = 0;
+  await assert.rejects(
+    executeAndPublishReview(
+      input(
+        async () => {
+          mismatchedBackendCalls += 1;
+          return review;
+        },
+        mismatchSpy,
+        { memory },
+      ),
+    ),
+    /base revision/u,
+  );
+  assert.equal(mismatchedBackendCalls, 0);
+  assert.deepEqual(mismatchSpy.events, []);
+
+  const result = await executeAndPublishReview(
+    input(
+      async () => ({
+        review,
+        summary: {
+          plan: { version: 1, requested: 'specialists', selected: 'specialists', reasons: ['forced-specialists'] },
+          rolesAttempted: 4,
+          rolesCompleted: 4,
+          arbiterRan: true,
+          rawCandidateCount: 1,
+          validatedCandidateCount: 1,
+          preArbiterOmittedCount: 0,
+          arbiterRejectedCount: 0,
+          reservedTokens: 1,
+        },
+      }),
+      spy,
+      { maximumInlineComments: 10, memory, pullRequest: { ...pullRequest, baseSha: 'a'.repeat(40) } },
+    ),
+  );
+  assert.equal(result.executionSummary?.arbiterRan, true);
+  assert.equal(result.assessment.counts.memorySuppressed, 1);
+  assert.equal(result.assessment.findings.length, 0);
+  assert.deepEqual(spy.events, ['summary']);
+  assert.match(spy.publishedBody(), /accepted-correctness-false-positive/u);
+  assert.match(spy.publishedBody(), /maintainer/u);
+  assert.doesNotMatch(spy.publishedBody(), new RegExp(reason, 'u'));
+  assert.doesNotMatch(spy.publishedBody(), /src\/\*\.ts|#27/u);
+  assert.match(spy.publishedBody(), /repository-recorded author/u);
+  assert.doesNotMatch(spy.publishedBody(), /@maintainer/u);
+});
+
+test('preferences affect only inline order and cannot displace a protected accepted finding', async () => {
+  const preferenceMemory = parseReviewMemory(
+    JSON.stringify({
+      version: 1,
+      suppressions: [],
+      preferences: [
+        {
+          id: 'preferred-area',
+          paths: ['src/preferred.ts'],
+          categories: ['correctness'],
+          reason: 'Apply additional scrutiny to this accepted area.',
+          provenance: { author: 'maintainer', kind: 'issue', reference: '#27' },
+          createdAt: '2026-01-01T00:00:00Z',
+          expiresAt: '2027-01-01T00:00:00Z',
+        },
+      ],
+    }),
+    'a'.repeat(40),
+    'c'.repeat(40),
+    new Date('2026-06-01T00:00:00Z'),
+  );
+  const preferenceDiff = prepareReviewedDiff(
+    [
+      'diff --git a/src/preferred.ts b/src/preferred.ts',
+      '--- a/src/preferred.ts',
+      '+++ b/src/preferred.ts',
+      '@@ -0,0 +1 @@',
+      '+preferred();',
+      'diff --git a/src/security.ts b/src/security.ts',
+      '--- a/src/security.ts',
+      '+++ b/src/security.ts',
+      '@@ -0,0 +1 @@',
+      '+security();',
+    ].join('\n'),
+    10_000,
+  );
+  const resultReview = parseReviewResult(
+    JSON.stringify({
+      version: 1,
+      outcome: 'findings',
+      findings: [
+        finding({
+          category: 'correctness',
+          location: { path: 'src/preferred.ts', side: 'RIGHT', line: 1 },
+          evidence: 'preferred();',
+        }),
+        finding({
+          category: 'security',
+          severity: 'low',
+          location: { path: 'src/security.ts', side: 'RIGHT', line: 1 },
+          evidence: 'security();',
+        }),
+      ],
+    }),
+  );
+  const spy = publicationSpy();
+  const result = await executeAndPublishReview(
+    input(async () => resultReview, spy, {
+      diff: preferenceDiff,
+      maximumInlineComments: 1,
+      memory: preferenceMemory,
+      pullRequest: { ...pullRequest, baseSha: 'a'.repeat(40) },
+    }),
+  );
+  assert.deepEqual(
+    result.assessment.findings.map((entry) => entry.location.path),
+    ['src/preferred.ts', 'src/security.ts'],
+  );
+  assert.equal(spy.inlineComments()[0]?.path, 'src/security.ts');
+  assert.match(spy.publishedBody(), /src\/preferred\.ts/u);
+  assert.match(spy.publishedBody(), /src\/security\.ts/u);
 });
 
 test('cannot publish a malicious context-induced finding outside the reviewed diff', async () => {
@@ -505,7 +656,7 @@ test('publishes strict lifecycle metadata and keeps it immediately before the fi
   assert.equal(result.state?.completedThroughHeadSha, lifecyclePullRequest.headSha);
   const lines = spy.publishedBody().trimEnd().split(/\r?\n/u);
   assert.equal(lines.at(-1), '<!-- code-review:opencode:v5 -->');
-  assert.match(lines.at(-2) ?? '', /^<!-- code-review-state:v1:/u);
+  assert.match(lines.at(-2) ?? '', /^<!-- code-review-state:v2:/u);
   assert.equal(parseReviewState(spy.publishedBody(), '<!-- code-review:opencode:v5 -->').kind, 'valid');
 });
 

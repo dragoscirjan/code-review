@@ -1,6 +1,12 @@
 import type { AnalyzerFindingCandidate } from './analyzer-contract';
 import type { ReviewFinding, ReviewResultV1 } from './review-contract';
 import { fingerprintFinding, type FindingFingerprint } from './review-lifecycle';
+import {
+  applyReviewMemory,
+  memoryPreferencePriority,
+  type AppliedMemoryEntry,
+  type ReviewMemory,
+} from './review-memory';
 import type { UnifiedDiff, UnifiedDiffFile, UnifiedDiffLine } from './unified-diff';
 
 export interface FindingPolicy {
@@ -17,6 +23,7 @@ export interface ReviewCounts {
   unmapped: number;
   duplicates: number;
   belowThreshold: number;
+  memorySuppressed: number;
   inlineSelected: number;
   inlineHistorySuppressed: number;
   inlineLimitOmitted: number;
@@ -35,6 +42,8 @@ export interface ReviewAssessment {
   findings: ValidatedFinding[];
   inlineFindings: ValidatedFinding[];
   counts: ReviewCounts;
+  memoryApplications: AppliedMemoryEntry[];
+  memorySuppressedFindings: ValidatedFinding[];
 }
 
 const severityRank = { critical: 0, high: 1, medium: 2, low: 3 } as const;
@@ -101,6 +110,30 @@ function compareFindings(left: ValidatedFinding, right: ValidatedFinding): numbe
     compareText(lexicalFinding(left), lexicalFinding(right)) ||
     left.sourceIndex - right.sourceIndex
   );
+}
+
+function isProtectedFinding(finding: ValidatedFinding): boolean {
+  return finding.category === 'security' || finding.severity === 'critical' || finding.origin?.kind === 'analyzer';
+}
+
+/** Reorders only the already accepted set for bounded inline selection; it never changes summary acceptance. */
+export function orderAcceptedFindingsForInline(
+  findings: readonly ValidatedFinding[],
+  memory?: ReviewMemory,
+): ValidatedFinding[] {
+  if (!memory || memory.activePreferences.length === 0) return [...findings];
+  return [...findings].sort((left, right) => {
+    const leftProtected = isProtectedFinding(left);
+    const rightProtected = isProtectedFinding(right);
+    const protectedOrder = Number(rightProtected) - Number(leftProtected);
+    if (protectedOrder !== 0) return protectedOrder;
+    if (leftProtected && rightProtected) return compareFindings(left, right);
+    return (
+      severityRank[left.severity] - severityRank[right.severity] ||
+      memoryPreferencePriority(right, memory) - memoryPreferencePriority(left, memory) ||
+      compareFindings(left, right)
+    );
+  });
 }
 
 function anchorKey(finding: ReviewFinding): string {
@@ -184,6 +217,7 @@ export function assessReview(
   policy: FindingPolicy,
   secrets: readonly string[] = [],
   analyzerFindings: readonly AnalyzerFindingCandidate[] = [],
+  memory?: ReviewMemory,
 ): ReviewAssessment {
   if (
     !Number.isInteger(policy.maximumInlineComments) ||
@@ -193,19 +227,22 @@ export function assessReview(
     throw new Error('maximumInlineComments must be an integer between 0 and 10');
   }
   const validated = validateReviewCandidates(review, diff, policy.minimumConfidence, secrets, analyzerFindings);
-  const mapped = validated.findings;
   const winners = new Map<string, ValidatedFinding>();
-  for (const finding of mapped) {
+  for (const finding of validated.findings) {
     const key = anchorKey(finding);
     const previous = winners.get(key);
+    // Canonical winner selection is fixed review policy and is intentionally independent of repository memory.
     if (!previous || compareFindings(finding, previous) < 0) winners.set(key, finding);
   }
-  const uniqueFindings = [...winners.values()].sort(compareFindings);
-  const duplicates = mapped.length - uniqueFindings.length;
-  const findings = uniqueFindings.slice(0, 10);
-  const globalLimitOmitted = uniqueFindings.length - findings.length;
+  const canonicalFindings = [...winners.values()];
+  const duplicates = validated.findings.length - canonicalFindings.length;
+  // Memory is publication policy over canonical independently validated host findings; it never authorizes a candidate.
+  const memoryApplication = applyReviewMemory(canonicalFindings, memory);
+  const retainedFindings = memoryApplication.findings.sort(compareFindings);
+  const findings = retainedFindings.slice(0, 10);
+  const globalLimitOmitted = retainedFindings.length - findings.length;
   const rejected = validated.evidenceRejected + globalLimitOmitted;
-  const inlineFindings = findings.slice(0, policy.maximumInlineComments);
+  const inlineFindings = orderAcceptedFindingsForInline(findings, memory).slice(0, policy.maximumInlineComments);
   const counts: ReviewCounts = {
     received: validated.received,
     accepted: findings.length,
@@ -215,6 +252,7 @@ export function assessReview(
     unmapped: validated.unmapped,
     duplicates,
     belowThreshold: validated.belowThreshold,
+    memorySuppressed: memoryApplication.suppressedCount,
     inlineSelected: inlineFindings.length,
     inlineHistorySuppressed: 0,
     inlineLimitOmitted: findings.length - inlineFindings.length,
@@ -222,9 +260,21 @@ export function assessReview(
   };
   if (
     counts.received !==
-    counts.accepted + counts.rejected + counts.unmapped + counts.duplicates + counts.belowThreshold
+    counts.accepted +
+      counts.rejected +
+      counts.unmapped +
+      counts.duplicates +
+      counts.belowThreshold +
+      counts.memorySuppressed
   ) {
     throw new Error('Review assessment counts are inconsistent');
   }
-  return { modelOutcome: review.outcome, findings, inlineFindings, counts };
+  return {
+    modelOutcome: review.outcome,
+    findings,
+    inlineFindings,
+    counts,
+    memoryApplications: memoryApplication.appliedEntries,
+    memorySuppressedFindings: memoryApplication.suppressedFindings,
+  };
 }

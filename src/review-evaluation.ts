@@ -157,6 +157,7 @@ export interface EvaluationMetrics {
   evidenceRejectedFindingRate: MetricRatio;
   globalLimitOmittedFindings: number;
   globalLimitOmittedFindingRate: MetricRatio;
+  memorySuppressedFindings: number;
   belowThresholdFindings: number;
   duplicateFindings: number;
   duplicateFindingRate: MetricRatio;
@@ -194,6 +195,7 @@ export interface EvaluationCaseResult {
   rejectedFindings: number;
   evidenceRejectedFindings: number;
   globalLimitOmittedFindings: number;
+  memorySuppressedFindings: number;
   duplicateFindings: number;
   intentionalNonFindingHits: number;
   matchedExpectationIds: string[];
@@ -739,7 +741,7 @@ async function analyzerForCase(fixture: EvaluationCase, secrets: readonly string
             truncated: false,
             blobSha: file.blobSha,
           }
-        : { status: 'not-found', bytes: 0, truncated: false, reason: 'not-found-or-forbidden' };
+        : { status: 'not-found', bytes: 0, truncated: false, reason: 'not-found' };
     },
   };
   return runDeterministicAnalysis({
@@ -843,6 +845,7 @@ export async function evaluateReviewCorpus(input: {
           rejectedFindings: 0,
           evidenceRejectedFindings: 0,
           globalLimitOmittedFindings: 0,
+          memorySuppressedFindings: 0,
           duplicateFindings: 0,
           intentionalNonFindingHits: 0,
           matchedExpectationIds: [],
@@ -875,6 +878,7 @@ export async function evaluateReviewCorpus(input: {
         rejectedFindings: assessment.counts.rejected,
         evidenceRejectedFindings: assessment.counts.evidenceRejected,
         globalLimitOmittedFindings: assessment.counts.globalLimitOmitted,
+        memorySuppressedFindings: assessment.counts.memorySuppressed,
         duplicateFindings: assessment.counts.duplicates,
         intentionalNonFindingHits,
         matchedExpectationIds: matching.matched.map((entry) => entry.expectedId),
@@ -932,6 +936,7 @@ export async function evaluateReviewCorpus(input: {
     evidenceRejectedFindingRate: ratio(sum('evidenceRejectedFindings'), candidateFindings),
     globalLimitOmittedFindings: sum('globalLimitOmittedFindings'),
     globalLimitOmittedFindingRate: ratio(sum('globalLimitOmittedFindings'), candidateFindings),
+    memorySuppressedFindings: sum('memorySuppressedFindings'),
     belowThresholdFindings: 0,
     duplicateFindings,
     duplicateFindingRate: ratio(duplicateFindings, candidateFindings),
@@ -1077,6 +1082,7 @@ export function renderEvaluationMarkdown(report: EvaluationReport): string {
     '',
     `- Evidence or secret rejected findings: ${metrics.evidenceRejectedFindings}`,
     `- Global finding-cap omissions: ${metrics.globalLimitOmittedFindings}`,
+    `- Repository-memory suppressed findings: ${metrics.memorySuppressedFindings}`,
     `- Below-confidence-threshold findings: ${metrics.belowThresholdFindings}`,
     `- Intentional non-finding hits: ${metrics.intentionalNonFindingHits}`,
     '',

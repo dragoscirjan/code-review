@@ -56,7 +56,7 @@ function priorFinding(): ReviewStateFinding {
 
 function state(overrides: Partial<ReviewStateV1> = {}): ReviewStateV1 {
   return {
-    version: 1,
+    version: 2,
     apiUrl: 'https://api.github.com',
     repository: 'owner/repository',
     pullRequest: 22,
@@ -71,6 +71,15 @@ function state(overrides: Partial<ReviewStateV1> = {}): ReviewStateV1 {
     publicationDigest: `sha256:${'E'.repeat(43)}`,
     inlineHistorySuppressed: 0,
     inlineLimitOmitted: 0,
+    memory: {
+      mode: 'none',
+      status: 'disabled',
+      effectiveDigest: `sha256:${'M'.repeat(43)}`,
+      activeSuppressions: 0,
+      activePreferences: 0,
+      suppressedCandidates: 0,
+      appliedEntries: [],
+    },
     coverageComplete: true,
     mode: 'full',
     fromHeadSha: null,

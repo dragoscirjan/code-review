@@ -4,22 +4,24 @@ import type { ReviewBackend } from './review';
 import type { FindingCategory, FindingSeverity } from './review-contract';
 import type { UnifiedDiff, UnifiedDiffFile, UnifiedDiffHunk, UnifiedDiffLine } from './unified-diff';
 
-export const REVIEW_STATE_VERSION = 1 as const;
-export const REVIEW_INPUT_DIGEST_VERSION = 1 as const;
+export const REVIEW_STATE_VERSION = 2 as const;
+export const REVIEW_INPUT_DIGEST_VERSION = 2 as const;
 export interface ReviewSemanticVersions {
   reviewPolicy: number;
   resultContract: number;
   fingerprint: number;
   analyzer: number;
   executionStrategy: number;
+  memory: number;
   state: number;
 }
 export const REVIEW_SEMANTIC_VERSIONS: Readonly<ReviewSemanticVersions> = Object.freeze({
-  reviewPolicy: 3,
+  reviewPolicy: 4,
   resultContract: 1,
   fingerprint: 2,
   analyzer: 1,
   executionStrategy: 1,
+  memory: 1,
   state: REVIEW_STATE_VERSION,
 });
 export const MAX_REVIEW_STATE_ENCODED_BYTES = 24_576;
@@ -51,6 +53,16 @@ export interface ReviewStateFinding extends FindingFingerprint {
   supersededBy: string | null;
 }
 
+export interface ReviewStateMemory {
+  mode: 'none' | 'base-config';
+  status: 'disabled' | 'missing' | 'enabled';
+  effectiveDigest: string;
+  activeSuppressions: number;
+  activePreferences: number;
+  suppressedCandidates: number;
+  appliedEntries: Array<{ id: string; repositoryDeclaredAuthor: string; digest: string }>;
+}
+
 export interface ReviewStateV1 {
   version: typeof REVIEW_STATE_VERSION;
   apiUrl: string;
@@ -67,6 +79,7 @@ export interface ReviewStateV1 {
   publicationDigest: string;
   inlineHistorySuppressed: number;
   inlineLimitOmitted: number;
+  memory: ReviewStateMemory;
   coverageComplete: boolean;
   mode: ReviewMode;
   fromHeadSha: string | null;
@@ -179,6 +192,78 @@ function parseStateFinding(value: unknown): ReviewStateFinding | undefined {
   };
 }
 
+function parseStateMemory(value: unknown): ReviewStateMemory | undefined {
+  const memory = record(value);
+  if (
+    !memory ||
+    !exactKeys(memory, [
+      'mode',
+      'status',
+      'effectiveDigest',
+      'activeSuppressions',
+      'activePreferences',
+      'suppressedCandidates',
+      'appliedEntries',
+    ]) ||
+    !DIGEST_PATTERN.test(String(memory.effectiveDigest)) ||
+    ![memory.activeSuppressions, memory.activePreferences, memory.suppressedCandidates].every(
+      (count) => Number.isSafeInteger(count) && (count as number) >= 0 && (count as number) <= 32,
+    ) ||
+    !Array.isArray(memory.appliedEntries) ||
+    memory.appliedEntries.length > 32
+  )
+    return undefined;
+  const appliedEntries: ReviewStateMemory['appliedEntries'] = [];
+  const ids = new Set<string>();
+  for (const value of memory.appliedEntries) {
+    const entry = record(value);
+    if (
+      !entry ||
+      !exactKeys(entry, ['id', 'repositoryDeclaredAuthor', 'digest']) ||
+      typeof entry.id !== 'string' ||
+      !/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/u.test(entry.id) ||
+      typeof entry.repositoryDeclaredAuthor !== 'string' ||
+      !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/u.test(entry.repositoryDeclaredAuthor) ||
+      !DIGEST_PATTERN.test(String(entry.digest)) ||
+      ids.has(entry.id)
+    )
+      return undefined;
+    ids.add(entry.id);
+    appliedEntries.push({
+      id: entry.id,
+      repositoryDeclaredAuthor: entry.repositoryDeclaredAuthor,
+      digest: entry.digest as string,
+    });
+  }
+  const modeAndStatusAreValid =
+    (memory.mode === 'none' && memory.status === 'disabled') ||
+    (memory.mode === 'base-config' && (memory.status === 'missing' || memory.status === 'enabled'));
+  const inactiveStateIsEmpty =
+    memory.status === 'disabled' || memory.status === 'missing'
+      ? memory.activeSuppressions === 0 &&
+        memory.activePreferences === 0 &&
+        memory.suppressedCandidates === 0 &&
+        appliedEntries.length === 0
+      : true;
+  if (
+    !modeAndStatusAreValid ||
+    !inactiveStateIsEmpty ||
+    appliedEntries.length > (memory.activeSuppressions as number) ||
+    appliedEntries.length > (memory.suppressedCandidates as number) ||
+    (memory.activeSuppressions === 0 && memory.suppressedCandidates !== 0)
+  )
+    return undefined;
+  return {
+    mode: memory.mode as ReviewStateMemory['mode'],
+    status: memory.status as ReviewStateMemory['status'],
+    effectiveDigest: memory.effectiveDigest as string,
+    activeSuppressions: memory.activeSuppressions as number,
+    activePreferences: memory.activePreferences as number,
+    suppressedCandidates: memory.suppressedCandidates as number,
+    appliedEntries,
+  };
+}
+
 function validateState(value: unknown): ReviewStateV1 | undefined {
   const object = record(value);
   const keys = [
@@ -197,6 +282,7 @@ function validateState(value: unknown): ReviewStateV1 | undefined {
     'publicationDigest',
     'inlineHistorySuppressed',
     'inlineLimitOmitted',
+    'memory',
     'coverageComplete',
     'mode',
     'fromHeadSha',
@@ -232,7 +318,9 @@ function validateState(value: unknown): ReviewStateV1 | undefined {
     (object.inlineHistorySuppressed as number) + (object.inlineLimitOmitted as number) > 10
   )
     return undefined;
+  const memory = parseStateMemory(object.memory);
   if (
+    !memory ||
     typeof object.coverageComplete !== 'boolean' ||
     !['full', 'incremental', 'migration', 'no-change'].includes(String(object.mode))
   )
@@ -270,6 +358,7 @@ function validateState(value: unknown): ReviewStateV1 | undefined {
     publicationDigest: object.publicationDigest as string,
     inlineHistorySuppressed: object.inlineHistorySuppressed as number,
     inlineLimitOmitted: object.inlineLimitOmitted as number,
+    memory,
     coverageComplete: object.coverageComplete,
     mode: object.mode as ReviewMode,
     fromHeadSha: object.fromHeadSha as string | null,
@@ -297,7 +386,7 @@ export function serializeReviewState(state: ReviewStateV1): string {
   if (Buffer.byteLength(encoded, 'utf8') > MAX_REVIEW_STATE_ENCODED_BYTES) {
     throw new Error('Review state exceeds metadata limit');
   }
-  return `<!-- code-review-state:v1:${encoded} -->`;
+  return `<!-- code-review-state:v${REVIEW_STATE_VERSION}:${encoded} -->`;
 }
 
 export function parseReviewState(body: string | null, currentMarker: string): ParsedReviewState {
@@ -445,6 +534,7 @@ export function reviewInputDigest(
     contextDigest: string;
     analyzerResultDigest?: string;
     executionPlanDigest?: string;
+    repositoryMemoryDigest?: string;
     linkedIssues: readonly { number: number; digest: string }[];
   },
   semanticVersions: Readonly<ReviewSemanticVersions> = REVIEW_SEMANTIC_VERSIONS,
@@ -455,6 +545,7 @@ export function reviewInputDigest(
     ...value,
     analyzerResultDigest: value.analyzerResultDigest ?? null,
     executionPlanDigest: value.executionPlanDigest ?? null,
+    repositoryMemoryDigest: value.repositoryMemoryDigest ?? null,
     linkedIssues: [...value.linkedIssues].sort((left, right) => left.number - right.number),
   });
 }
@@ -476,6 +567,8 @@ export function reviewPolicyDigest(value: {
   opencodeVersion: string;
   piVersion: string;
   deterministicAnalyzerManifestDigest?: string;
+  repositoryMemoryMode?: string;
+  repositoryMemoryContractVersion?: number;
   requestedReviewStrategy?: string;
   specialistTokenBudget?: number;
   aggregateTimeoutMs?: number;
@@ -500,6 +593,8 @@ export function reviewPolicyDigest(value: {
   return digest('code-review/policy/v1', {
     ...value,
     deterministicAnalyzerManifestDigest: value.deterministicAnalyzerManifestDigest ?? null,
+    repositoryMemoryMode: value.repositoryMemoryMode ?? null,
+    repositoryMemoryContractVersion: value.repositoryMemoryContractVersion ?? null,
     requestedReviewStrategy: value.requestedReviewStrategy ?? null,
     specialistTokenBudget: value.specialistTokenBudget ?? null,
     aggregateTimeoutMs: value.aggregateTimeoutMs ?? null,
@@ -529,12 +624,17 @@ export function stateIdentityMatches(state: ReviewStateV1, expected: ReviewState
 
 export function stateScopeMatches(
   state: ReviewStateV1,
-  expected: ReviewStateIdentity & { policyDigest: string; reviewInputDigest: string },
+  expected: ReviewStateIdentity & {
+    policyDigest: string;
+    reviewInputDigest: string;
+    repositoryMemoryDigest?: string;
+  },
 ): boolean {
   return (
     stateIdentityMatches(state, expected) &&
     state.policyDigest === expected.policyDigest &&
-    state.reviewInputDigest === expected.reviewInputDigest
+    state.reviewInputDigest === expected.reviewInputDigest &&
+    (expected.repositoryMemoryDigest === undefined || state.memory.effectiveDigest === expected.repositoryMemoryDigest)
   );
 }
 
@@ -562,6 +662,7 @@ export function reconcileFindingStates(
   prior: readonly ReviewStateFinding[],
   headSha: string,
   carried: readonly ReviewStateFinding[] = [],
+  memorySuppressed: readonly ValidatedFinding[] = [],
 ): ReviewLifecycleResult {
   const priorActive = prior.filter((finding) => finding.state === 'new' || finding.state === 'unchanged');
   const byFingerprint = new Map(priorActive.map((finding) => [finding.fingerprint, finding]));
@@ -572,10 +673,17 @@ export function reconcileFindingStates(
     }
   }
   const currentFingerprints = new Set(active.map((finding) => finding.fingerprint));
+  const memorySuppressedFingerprints = new Set(memorySuppressed.map((finding) => finding.fingerprint));
+  const memorySuppressedAnchors = new Set(memorySuppressed.map((finding) => finding.anchorFingerprint));
   const currentAnchors = new Map(active.map((finding) => [finding.anchorFingerprint, finding]));
   const tombstones: ReviewStateFinding[] = [];
   for (const previous of priorActive) {
-    if (currentFingerprints.has(previous.fingerprint)) continue;
+    if (
+      currentFingerprints.has(previous.fingerprint) ||
+      memorySuppressedFingerprints.has(previous.fingerprint) ||
+      memorySuppressedAnchors.has(previous.anchorFingerprint)
+    )
+      continue;
     const replacement = currentAnchors.get(previous.anchorFingerprint);
     tombstones.push({
       ...previous,
