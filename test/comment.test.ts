@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'vitest';
 import { MAX_GITHUB_COMMENT_BYTES, renderComment, renderInlineComment } from '../src/comment';
 import type { ReviewAssessment, ValidatedFinding } from '../src/finding-validation';
+import { publicationDigest, serializeReviewState } from '../src/review-lifecycle';
 
 function finding(overrides: Partial<ValidatedFinding> = {}): ValidatedFinding {
   return {
@@ -13,6 +14,9 @@ function finding(overrides: Partial<ValidatedFinding> = {}): ValidatedFinding {
     explanation: 'Requests bypass authorization.',
     fix: 'Restore the check.',
     sourceIndex: 0,
+    anchorFingerprint: `sha256:${'a'.repeat(43)}`,
+    evidenceDigest: `sha256:${'b'.repeat(43)}`,
+    fingerprint: `sha256:${'c'.repeat(43)}`,
     ...overrides,
   };
 }
@@ -33,6 +37,8 @@ function assessment(
       duplicates: 0,
       belowThreshold: 0,
       inlineSelected: findings.length,
+      inlineHistorySuppressed: 0,
+      inlineLimitOmitted: 0,
       inlineOmitted: 0,
     },
   };
@@ -156,4 +162,72 @@ test('renders accepted findings near the contract aggregate boundary within the 
     marker: '<!-- code-review:opencode:v4 -->',
   });
   assert.ok(Buffer.byteLength(comment, 'utf8') <= MAX_GITHUB_COMMENT_BYTES);
+});
+
+test('keeps mandatory lifecycle metadata and final ownership marker under detail size pressure', () => {
+  const findings = Array.from({ length: 10 }, (_, index) =>
+    finding({
+      sourceIndex: index,
+      fingerprint: `sha256:${String.fromCharCode(65 + index).repeat(43)}`,
+      anchorFingerprint: `sha256:${String.fromCharCode(75 + index).repeat(43)}`,
+      evidenceDigest: `sha256:${String.fromCharCode(85 + index).repeat(43)}`,
+      location: { path: `src/${index}.ts`, side: 'RIGHT', line: index + 1 },
+      evidence: '&'.repeat(1_000),
+      explanation: '&'.repeat(1_000),
+      fix: '&'.repeat(2_000),
+    }),
+  );
+  const stateLine = serializeReviewState({
+    version: 1,
+    apiUrl: 'https://api.github.com',
+    repository: 'owner/repository',
+    pullRequest: 22,
+    backend: 'opencode',
+    actorId: 7,
+    baseSha: 'a'.repeat(40),
+    headSha: 'b'.repeat(40),
+    completedThroughHeadSha: 'b'.repeat(40),
+    generation: 1,
+    policyDigest: `sha256:${'D'.repeat(43)}`,
+    reviewInputDigest: `sha256:${'I'.repeat(43)}`,
+    publicationDigest: publicationDigest({
+      repository: 'owner/repository',
+      pullRequest: 22,
+      backend: 'opencode',
+      actorId: 7,
+      headSha: 'b'.repeat(40),
+      fingerprints: [],
+    }),
+    inlineHistorySuppressed: 0,
+    inlineLimitOmitted: 0,
+    coverageComplete: true,
+    mode: 'full',
+    fromHeadSha: null,
+    findings: [],
+  });
+  const marker = '<!-- code-review:opencode:v5 -->';
+  const comment = renderComment({
+    assessment: assessment(findings),
+    backend: 'opencode',
+    model: 'm'.repeat(200),
+    headSha: 'b'.repeat(40),
+    actor: 'a'.repeat(39),
+    diffTruncated: false,
+    originalDiffBytes: 1,
+    lifecycle: {
+      mode: 'full',
+      reason: 'baseline',
+      fromHeadSha: null,
+      counts: { new: 10, unchanged: 0, resolved: 0, superseded: 0 },
+      active: [],
+      tombstones: [],
+      stateLine,
+    },
+    marker,
+  });
+  assert.ok(Buffer.byteLength(comment, 'utf8') <= MAX_GITHUB_COMMENT_BYTES);
+  const lines = comment.trimEnd().split(/\r?\n/u);
+  assert.equal(lines.at(-2), stateLine);
+  assert.equal(lines.at(-1), marker);
+  assert.match(comment, /detailed finding block/u);
 });

@@ -90,12 +90,14 @@ test('validates action limits and executable selection', () => {
 
 test('migrates both backend markers without collisions', () => {
   assert.deepEqual(managedCommentMarkers('opencode'), [
+    '<!-- code-review:opencode:v5 -->',
     '<!-- code-review:opencode:v4 -->',
     '<!-- code-review:opencode:v3 -->',
     '<!-- code-review:opencode:openrouter-poc:v2 -->',
     '<!-- code-review:opencode-poc:v1 -->',
   ]);
   assert.deepEqual(managedCommentMarkers('pi'), [
+    '<!-- code-review:pi:v5 -->',
     '<!-- code-review:pi:v4 -->',
     '<!-- code-review:pi:v3 -->',
     '<!-- code-review:pi:openrouter-poc:v2 -->',

@@ -1,6 +1,7 @@
 import type { ReviewContextMetadata } from './context-planner';
 import type { ReviewAssessment, ValidatedFinding } from './finding-validation';
 import type { ReviewBackend } from './review';
+import type { ReviewLifecycleCounts, ReviewMode, ReviewStateFinding } from './review-lifecycle';
 import { renderModelTextLiteral } from './review-text';
 
 export const MAX_GITHUB_COMMENT_BYTES = 65_536;
@@ -57,6 +58,15 @@ export function renderComment(input: {
   diffTruncated: boolean;
   originalDiffBytes: number;
   contextMetadata?: ReviewContextMetadata;
+  lifecycle?: {
+    mode: ReviewMode;
+    reason: string;
+    fromHeadSha: string | null;
+    counts: ReviewLifecycleCounts;
+    active: readonly ReviewStateFinding[];
+    tombstones: readonly ReviewStateFinding[];
+    stateLine: string;
+  };
   marker: string;
 }): string {
   const { counts } = input.assessment;
@@ -73,10 +83,47 @@ export function renderComment(input: {
 - Base configuration: ${input.contextMetadata.configuration.included} included, ${input.contextMetadata.configuration.unavailable} unavailable, ${input.contextMetadata.configuration.truncated} truncated
 - Linked issue criteria: ${input.contextMetadata.linkedIssues.fetched} included, ${input.contextMetadata.linkedIssues.unavailable} unavailable`
     : '';
-  const comment = `## Code Review (\`${input.model}\` via ${backendLabel(input.backend)})
+  const lifecycle = input.lifecycle
+    ? `
+- Review mode: ${input.lifecycle.mode}
+- Comparison head: ${input.lifecycle.fromHeadSha ? `\`${input.lifecycle.fromHeadSha.slice(0, 12)}\`` : 'none'}
+- Incremental fallback reason: ${input.lifecycle.reason}
+- New findings: ${input.lifecycle.counts.new}
+- Unchanged findings: ${input.lifecycle.counts.unchanged}
+- Resolved findings: ${input.lifecycle.counts.resolved}
+- Superseded findings: ${input.lifecycle.counts.superseded}`
+    : '';
+  const compact = input.lifecycle
+    ? [
+        ...input.lifecycle.active.map(
+          (finding) =>
+            `- ${finding.state}: ${finding.category}/${finding.severity} at ${renderModelTextLiteral(`${finding.path}:${finding.line} (${finding.side})`)}`,
+        ),
+        ...input.lifecycle.tombstones.map(
+          (finding) =>
+            `- ${finding.state}: ${finding.category}/${finding.severity} at ${renderModelTextLiteral(`${finding.path}:${finding.line} (${finding.side})`)}`,
+        ),
+      ].join('\n')
+    : '';
+  const details = [...input.assessment.findings];
+  let omitted = 0;
+  while (true) {
+    const detailAssessment: ReviewAssessment = {
+      ...input.assessment,
+      findings: details,
+      inlineFindings: input.assessment.inlineFindings.filter((finding) => details.includes(finding)),
+    };
+    const detailsText =
+      details.length === 0 && input.assessment.findings.length > 0 ? '' : renderAssessment(detailAssessment);
+    const omission =
+      omitted > 0
+        ? `\n\n> ${omitted} detailed finding block${omitted === 1 ? ' was' : 's were'} omitted to fit the GitHub comment limit.`
+        : '';
+    const state = input.lifecycle ? `\n${input.lifecycle.stateLine}` : '';
+    const comment = `## Code Review (\`${input.model}\` via ${backendLabel(input.backend)})
 
 - Head: \`${input.headSha.slice(0, 12)}\`${context}
-- Published through: \`@${input.actor}\`
+- Published through: \`@${input.actor}\`${lifecycle}
 - Model findings received: ${counts.received}
 - Accepted: ${counts.accepted}
 - Rejected (evidence or secret policy): ${counts.rejected}
@@ -84,10 +131,16 @@ export function renderComment(input: {
 - Duplicates removed: ${counts.duplicates}
 - Below confidence threshold: ${counts.belowThreshold}
 - Inline comments published: ${counts.inlineSelected}
-- Accepted findings omitted from inline comments by limit: ${counts.inlineOmitted}${truncation}
+- Inline comments suppressed by publication history: ${counts.inlineHistorySuppressed}
+- Accepted findings omitted from inline comments by limit: ${counts.inlineLimitOmitted}${truncation}
 
-${renderAssessment(input.assessment)}
-
+${compact ? `### Finding lifecycle\n${compact}\n\n` : ''}${detailsText}${omission}
+${state}
 ${input.marker}`;
-  return assertCommentSize(comment, 'Rendered review comment');
+    if (comment.length <= MAX_GITHUB_COMMENT_BYTES && Buffer.byteLength(comment, 'utf8') <= MAX_GITHUB_COMMENT_BYTES)
+      return comment;
+    if (details.length === 0) return assertCommentSize(comment, 'Rendered review comment');
+    details.pop();
+    omitted += 1;
+  }
 }

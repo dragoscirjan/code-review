@@ -8,8 +8,9 @@ import type {
   PullRequestContext,
 } from '../src/github';
 import { parseReviewResult, type ReviewFinding, type ReviewResultV1 } from '../src/review-contract';
+import { parseReviewState } from '../src/review-lifecycle';
 import { executeAndPublishReview } from '../src/review-publication';
-import { prepareReviewedDiff } from '../src/unified-diff';
+import { parseUnifiedDiff, prepareReviewedDiff } from '../src/unified-diff';
 
 const pullRequest: PullRequestContext = {
   owner: 'owner',
@@ -48,12 +49,39 @@ function finding(overrides: Partial<ReviewFinding> = {}): ReviewFinding {
   };
 }
 
-function publicationSpy(options: { inlineError?: boolean; summaryError?: boolean } = {}) {
+function publicationSpy(
+  options: {
+    inlineError?: boolean;
+    summaryError?: boolean;
+    reviewCommentBodies?: string[];
+    reviewBodies?: string[];
+  } = {},
+) {
   const events: string[] = [];
   let publishedBody = '';
   let inlineComments: readonly GitHubInlineCommentInput[] = [];
   return {
     client: {
+      async listPullRequestReviewComments() {
+        return (options.reviewCommentBodies ?? []).map((body, index) => ({
+          id: 100 + index,
+          body,
+          html_url: 'url',
+          user: actor,
+        }));
+      },
+      async listPullRequestReviews() {
+        return (options.reviewBodies ?? []).map((body, index) => ({
+          id: 200 + index,
+          body,
+          html_url: 'url',
+          user: actor,
+          commit_id: pullRequest.headSha,
+        }));
+      },
+      async assertManagedCommentLease() {
+        return undefined;
+      },
       async createOrReuseInlineReview(
         _context: PullRequestContext,
         _actor: AuthenticatedActor,
@@ -81,6 +109,26 @@ function publicationSpy(options: { inlineError?: boolean; summaryError?: boolean
     events,
     publishedBody: () => publishedBody,
     inlineComments: () => inlineComments,
+  };
+}
+
+const lifecyclePullRequest: PullRequestContext = {
+  ...pullRequest,
+  baseSha: 'a'.repeat(40),
+  headSha: 'b'.repeat(40),
+};
+
+function lifecycleInput() {
+  return {
+    apiUrl: 'https://api.github.com',
+    policyDigest: `sha256:${'D'.repeat(43)}`,
+    reviewInputDigest: `sha256:${'I'.repeat(43)}`,
+    mode: 'full' as const,
+    reason: 'no-valid-baseline',
+    fromHeadSha: null,
+    carried: [],
+    affected: [],
+    lease: null,
   };
 }
 
@@ -316,5 +364,318 @@ test('final payload scan blocks an unused credential in controlled summary metad
     executeAndPublishReview(input(async () => clean, spy, { model: 'unused-secret' })),
     /forbidden secret data/,
   );
+  assert.deepEqual(spy.events, []);
+});
+
+test('publishes strict lifecycle metadata and keeps it immediately before the final marker', async () => {
+  const spy = publicationSpy();
+  const review = parseReviewResult(JSON.stringify({ version: 1, outcome: 'findings', findings: [finding()] }));
+  const result = await executeAndPublishReview(
+    input(async () => review, spy, {
+      pullRequest: lifecyclePullRequest,
+      markers: ['<!-- code-review:opencode:v5 -->'],
+      maximumInlineComments: 1,
+      lifecycle: lifecycleInput(),
+    }),
+  );
+  assert.equal(result.lifecycle.counts.new, 1);
+  assert.equal(result.state?.completedThroughHeadSha, lifecyclePullRequest.headSha);
+  const lines = spy.publishedBody().trimEnd().split(/\r?\n/u);
+  assert.equal(lines.at(-1), '<!-- code-review:opencode:v5 -->');
+  assert.match(lines.at(-2) ?? '', /^<!-- code-review-state:v1:/u);
+  assert.equal(parseReviewState(spy.publishedBody(), '<!-- code-review:opencode:v5 -->').kind, 'valid');
+});
+
+test('suppresses duplicate inline fingerprints across retries and synchronize events', async () => {
+  const firstSpy = publicationSpy({ summaryError: true });
+  const review = parseReviewResult(JSON.stringify({ version: 1, outcome: 'findings', findings: [finding()] }));
+  await assert.rejects(
+    executeAndPublishReview(
+      input(async () => review, firstSpy, {
+        pullRequest: lifecyclePullRequest,
+        markers: ['<!-- code-review:opencode:v5 -->'],
+        maximumInlineComments: 1,
+        lifecycle: lifecycleInput(),
+      }),
+    ),
+    /summary failed/,
+  );
+  const priorInline = firstSpy.inlineComments()[0]?.body;
+  assert.ok(priorInline);
+  const retrySpy = publicationSpy({ reviewCommentBodies: [priorInline] });
+  const result = await executeAndPublishReview(
+    input(async () => review, retrySpy, {
+      pullRequest: lifecyclePullRequest,
+      markers: ['<!-- code-review:opencode:v5 -->'],
+      maximumInlineComments: 1,
+      lifecycle: lifecycleInput(),
+    }),
+  );
+  assert.deepEqual(retrySpy.events, ['summary']);
+  assert.equal(result.assessment.counts.inlineSelected, 0);
+});
+
+test('fills the inline limit after suppressing a higher-ranked historical finding', async () => {
+  const twoLineDiff = prepareReviewedDiff(
+    [
+      'diff --git a/src/file.ts b/src/file.ts',
+      '--- a/src/file.ts',
+      '+++ b/src/file.ts',
+      '@@ -1,2 +1,2 @@',
+      '-oldOne();',
+      '-oldTwo();',
+      '+unsafeOne();',
+      '+unsafeTwo();',
+    ].join('\n'),
+    10_000,
+  );
+  const firstFinding = finding({
+    severity: 'critical',
+    location: { path: 'src/file.ts', side: 'RIGHT', line: 1 },
+    evidence: 'unsafeOne();',
+    explanation: 'First problem.',
+  });
+  const secondFinding = finding({
+    location: { path: 'src/file.ts', side: 'RIGHT', line: 2 },
+    evidence: 'unsafeTwo();',
+    explanation: 'Second problem.',
+  });
+  const firstSpy = publicationSpy();
+  await executeAndPublishReview(
+    input(
+      async () => parseReviewResult(JSON.stringify({ version: 1, outcome: 'findings', findings: [firstFinding] })),
+      firstSpy,
+      { diff: twoLineDiff, maximumInlineComments: 1 },
+    ),
+  );
+  const historicalBody = firstSpy.inlineComments()[0]?.body;
+  assert.ok(historicalBody);
+  const secondSpy = publicationSpy({ reviewCommentBodies: [historicalBody] });
+  const result = await executeAndPublishReview(
+    input(
+      async () =>
+        parseReviewResult(JSON.stringify({ version: 1, outcome: 'findings', findings: [firstFinding, secondFinding] })),
+      secondSpy,
+      {
+        diff: twoLineDiff,
+        pullRequest: lifecyclePullRequest,
+        markers: ['<!-- code-review:opencode:v5 -->'],
+        maximumInlineComments: 1,
+        lifecycle: lifecycleInput(),
+      },
+    ),
+  );
+  assert.equal(secondSpy.inlineComments()[0]?.line, 2);
+  assert.equal(result.assessment.counts.inlineHistorySuppressed, 1);
+  assert.equal(result.assessment.counts.inlineLimitOmitted, 0);
+  assert.equal(result.state?.inlineHistorySuppressed, 1);
+  assert.equal(result.state?.inlineLimitOmitted, 0);
+  assert.match(secondSpy.publishedBody(), /suppressed by publication history: 1/u);
+  assert.match(secondSpy.publishedBody(), /omitted from inline comments by limit: 0/u);
+});
+
+test('legacy migration suppresses inline reposting and establishes a baseline', async () => {
+  const legacyMarker = '<!-- code-review-inline:opencode:v1:0123456789abcdef0123456789abcdef -->';
+  const spy = publicationSpy({ reviewBodies: [`legacy\n${legacyMarker}`] });
+  const review = parseReviewResult(JSON.stringify({ version: 1, outcome: 'findings', findings: [finding()] }));
+  const result = await executeAndPublishReview(
+    input(async () => review, spy, {
+      pullRequest: lifecyclePullRequest,
+      markers: ['<!-- code-review:opencode:v5 -->'],
+      maximumInlineComments: 1,
+      lifecycle: { ...lifecycleInput(), mode: 'migration' },
+    }),
+  );
+  assert.deepEqual(spy.events, ['summary']);
+  assert.equal(result.state?.findings.length, 1);
+});
+
+test('classifies changed findings at the same stable anchor as superseded', async () => {
+  const firstSpy = publicationSpy();
+  const firstReview = parseReviewResult(JSON.stringify({ version: 1, outcome: 'findings', findings: [finding()] }));
+  const first = await executeAndPublishReview(
+    input(async () => firstReview, firstSpy, {
+      pullRequest: lifecyclePullRequest,
+      markers: ['<!-- code-review:opencode:v5 -->'],
+      lifecycle: lifecycleInput(),
+    }),
+  );
+  assert.ok(first.state);
+  const nextRequest = { ...lifecyclePullRequest, headSha: 'c'.repeat(40) };
+  const secondSpy = publicationSpy();
+  const changedReview = parseReviewResult(
+    JSON.stringify({ version: 1, outcome: 'findings', findings: [finding({ explanation: 'Changed explanation.' })] }),
+  );
+  const second = await executeAndPublishReview(
+    input(async () => changedReview, secondSpy, {
+      pullRequest: nextRequest,
+      markers: ['<!-- code-review:opencode:v5 -->'],
+      lifecycle: {
+        ...lifecycleInput(),
+        mode: 'incremental',
+        fromHeadSha: lifecyclePullRequest.headSha,
+        priorState: first.state,
+        affected: first.state.findings.filter((prior) => prior.state === 'new' || prior.state === 'unchanged'),
+      },
+    }),
+  );
+  assert.deepEqual(second.lifecycle.counts, { new: 1, unchanged: 0, resolved: 0, superseded: 1 });
+  assert.match(secondSpy.publishedBody(), /Superseded findings: 1/u);
+});
+
+test('aborts truncated force-push fallback when a prior anchor disappeared before backend or writes', async () => {
+  const baselineSpy = publicationSpy();
+  const baseline = await executeAndPublishReview(
+    input(
+      async () => parseReviewResult(JSON.stringify({ version: 1, outcome: 'findings', findings: [finding()] })),
+      baselineSpy,
+      {
+        pullRequest: lifecyclePullRequest,
+        markers: ['<!-- code-review:opencode:v5 -->'],
+        lifecycle: lifecycleInput(),
+      },
+    ),
+  );
+  assert.ok(baseline.state);
+  const visibleRaw = [
+    'diff --git a/other.ts b/other.ts',
+    '--- a/other.ts',
+    '+++ b/other.ts',
+    '@@ -1 +1 @@',
+    '-old();',
+    '+new();',
+  ].join('\n');
+  const completeRaw = `${visibleRaw}\ndiff --git a/src/file.ts b/src/file.ts\n--- a/src/file.ts\n+++ b/src/file.ts\n@@ -1 +1 @@\n-old();\n+safe();`;
+  const complete = prepareReviewedDiff(completeRaw, 10_000);
+  const truncated = {
+    ...complete,
+    text: visibleRaw,
+    parsed: parseUnifiedDiff(visibleRaw),
+    completeParsed: parseUnifiedDiff(completeRaw),
+    truncated: true,
+  };
+  const spy = publicationSpy();
+  let backendCalls = 0;
+  const priorActive = baseline.state.findings.filter((prior) => prior.state === 'new' || prior.state === 'unchanged');
+  await assert.rejects(
+    executeAndPublishReview(
+      input(
+        async () => {
+          backendCalls += 1;
+          return parseReviewResult('{"version":1,"outcome":"clean","findings":[]}');
+        },
+        spy,
+        {
+          pullRequest: { ...lifecyclePullRequest, headSha: 'c'.repeat(40) },
+          diff: truncated,
+          markers: ['<!-- code-review:opencode:v5 -->'],
+          lifecycle: {
+            ...lifecycleInput(),
+            reason: 'compare-unavailable-or-nonlinear',
+            priorState: baseline.state,
+            affected: priorActive,
+          },
+        },
+      ),
+    ),
+    /cannot uniquely remap/u,
+  );
+  assert.equal(backendCalls, 0);
+  assert.deepEqual(spy.events, []);
+});
+
+test('aborts truncated compare-failure fallback when an affected hunk is omitted', async () => {
+  const baselineSpy = publicationSpy();
+  const baseline = await executeAndPublishReview(
+    input(
+      async () => parseReviewResult(JSON.stringify({ version: 1, outcome: 'findings', findings: [finding()] })),
+      baselineSpy,
+      {
+        pullRequest: lifecyclePullRequest,
+        markers: ['<!-- code-review:opencode:v5 -->'],
+        lifecycle: lifecycleInput(),
+      },
+    ),
+  );
+  assert.ok(baseline.state);
+  const visibleRaw = [
+    'diff --git a/other.ts b/other.ts',
+    '--- a/other.ts',
+    '+++ b/other.ts',
+    '@@ -1 +1 @@',
+    '-old();',
+    '+new();',
+  ].join('\n');
+  const targetRaw = [
+    'diff --git a/src/file.ts b/src/file.ts',
+    '--- a/src/file.ts',
+    '+++ b/src/file.ts',
+    '@@ -1 +1 @@',
+    '-old();',
+    '+unsafe();',
+  ].join('\n');
+  const completeRaw = `${visibleRaw}\n${targetRaw}`;
+  const complete = prepareReviewedDiff(completeRaw, 10_000);
+  const truncated = {
+    ...complete,
+    text: visibleRaw,
+    parsed: parseUnifiedDiff(visibleRaw),
+    completeParsed: parseUnifiedDiff(completeRaw),
+    truncated: true,
+  };
+  const spy = publicationSpy();
+  let backendCalls = 0;
+  const priorActive = baseline.state.findings.filter((prior) => prior.state === 'new' || prior.state === 'unchanged');
+  await assert.rejects(
+    executeAndPublishReview(
+      input(
+        async () => {
+          backendCalls += 1;
+          return parseReviewResult('{"version":1,"outcome":"clean","findings":[]}');
+        },
+        spy,
+        {
+          pullRequest: { ...lifecyclePullRequest, headSha: 'c'.repeat(40) },
+          diff: truncated,
+          markers: ['<!-- code-review:opencode:v5 -->'],
+          lifecycle: {
+            ...lifecycleInput(),
+            reason: 'compare-unavailable-or-nonlinear',
+            priorState: baseline.state,
+            affected: priorActive,
+          },
+        },
+      ),
+    ),
+    /cannot uniquely remap or cover/u,
+  );
+  assert.equal(backendCalls, 0);
+  assert.deepEqual(spy.events, []);
+});
+
+test('state freshness failure prevents backend and all publication', async () => {
+  const spy = publicationSpy();
+  let backendCalls = 0;
+  await assert.rejects(
+    executeAndPublishReview(
+      input(
+        async () => {
+          backendCalls += 1;
+          return parseReviewResult('{"version":1,"outcome":"clean","findings":[]}');
+        },
+        spy,
+        {
+          pullRequest: lifecyclePullRequest,
+          markers: ['<!-- code-review:opencode:v5 -->'],
+          lifecycle: lifecycleInput(),
+          assertStateFresh: async () => {
+            throw new Error('Managed review comment changed during review');
+          },
+        },
+      ),
+    ),
+    /comment changed/u,
+  );
+  assert.equal(backendCalls, 0);
   assert.deepEqual(spy.events, []);
 });

@@ -70,10 +70,24 @@ outputs:
     description: Whether any supplemental review context was truncated by a source or aggregate byte limit
   context-unavailable-source-count:
     description: Number of supplemental context sources unavailable, unsupported, timed out, or skipped by budget
+  review-mode:
+    description: Lifecycle mode used for this run (full, incremental, migration, or no-change)
+  new-finding-count:
+    description: Number of active findings first seen at the reviewed head
+  unchanged-finding-count:
+    description: Number of active findings retained from the previous completed review
+  resolved-finding-count:
+    description: Number of previous findings resolved in this generation
+  superseded-finding-count:
+    description: Number of previous findings replaced by a changed finding at the same stable anchor
   review-url:
     description: URL of the created or reused inline pull request review, empty when inline publication is disabled
   inline-comment-count:
     description: Number of validated inline comments selected for publication
+  inline-history-suppressed-count:
+    description: Number of accepted findings suppressed because their inline fingerprint was already published
+  inline-limit-omitted-count:
+    description: Number of new eligible findings omitted by max-inline-comments
   code-index-cache-hit:
     description: Whether a fresh code index database cache was restored
   code-indexer:

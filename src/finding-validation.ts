@@ -1,4 +1,5 @@
 import type { ReviewFinding, ReviewResultV1 } from './review-contract';
+import { fingerprintFinding, type FindingFingerprint } from './review-lifecycle';
 import type { UnifiedDiff, UnifiedDiffFile, UnifiedDiffLine } from './unified-diff';
 
 export interface FindingPolicy {
@@ -14,10 +15,12 @@ export interface ReviewCounts {
   duplicates: number;
   belowThreshold: number;
   inlineSelected: number;
+  inlineHistorySuppressed: number;
+  inlineLimitOmitted: number;
   inlineOmitted: number;
 }
 
-export interface ValidatedFinding extends ReviewFinding {
+export interface ValidatedFinding extends ReviewFinding, FindingFingerprint {
   sourceIndex: number;
 }
 
@@ -144,14 +147,15 @@ export function assessReview(
       belowThreshold += 1;
       return;
     }
-    mapped.push({
+    const validated = {
       ...finding,
       sourceIndex,
       location: { ...finding.location, path: file.apiPath },
       evidence,
       explanation: normalizeLineEndings(finding.explanation).trim(),
       fix: normalizeLineEndings(finding.fix).trim(),
-    });
+    };
+    mapped.push({ ...validated, ...fingerprintFinding(validated, diff) });
   });
 
   const winners = new Map<string, ValidatedFinding>();
@@ -171,6 +175,8 @@ export function assessReview(
     duplicates,
     belowThreshold,
     inlineSelected: inlineFindings.length,
+    inlineHistorySuppressed: 0,
+    inlineLimitOmitted: findings.length - inlineFindings.length,
     inlineOmitted: findings.length - inlineFindings.length,
   };
   if (

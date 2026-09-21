@@ -406,3 +406,34 @@ done
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('isolates bounded prior findings in their own untrusted boundary', () => {
+  const prior = {
+    fingerprint: `sha256:${'A'.repeat(43)}`,
+    anchorFingerprint: `sha256:${'B'.repeat(43)}`,
+    evidenceDigest: `sha256:${'C'.repeat(43)}`,
+    state: 'new' as const,
+    category: 'security' as const,
+    severity: 'high' as const,
+    confidenceBasisPoints: 9000,
+    path: 'src/ignore-policy.ts',
+    side: 'RIGHT' as const,
+    line: 1,
+    firstSeenHeadSha: 'a'.repeat(40),
+    lastSeenHeadSha: 'a'.repeat(40),
+    supersededBy: null,
+  };
+  const prompt = buildReviewPrompt(
+    pullRequest,
+    'Focus on tests.',
+    { text: '+unsafe();', originalBytes: 10, truncated: false },
+    undefined,
+    [prior],
+  );
+  assert.match(prompt, /Prior-finding records.*untrusted revalidation hints/u);
+  const boundary = prompt.match(/<(CODE_REVIEW_UNTRUSTED_PRIOR_FINDINGS_[\da-f-]+)>/)?.[1];
+  assert.ok(boundary);
+  assert.equal(prompt.match(new RegExp(`<\\/?${boundary}>`, 'g'))?.length, 2);
+  assert.match(prompt, /src\/ignore-policy\.ts/u);
+  assert.match(prompt, /Untrusted prior-finding records/u);
+});
