@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { AnalyzerSummary } from './analyzer';
 import type { CodeIndexer } from './config';
 import {
   MAX_BASE_GUIDANCE_BYTES_PER_FILE,
@@ -47,6 +48,8 @@ export interface BuildReviewContextInput {
   indexer: CodeIndexer;
   cacheKey: string;
   cacheTtlMs: number;
+  analyzerItems?: readonly ReviewContextItem[];
+  analyzerSummary?: AnalyzerSummary;
 }
 
 export interface BuiltReviewContext {
@@ -271,6 +274,8 @@ export async function buildReviewContext(input: BuildReviewContextInput): Promis
     }
   }
 
+  candidates.push(...(input.analyzerItems ?? []));
+
   const anchors = extractContextAnchors(input.diff.parsed);
   const queries = planContextQueries(anchors);
   let cacheHit = false;
@@ -335,6 +340,21 @@ export async function buildReviewContext(input: BuildReviewContextInput): Promis
 
   const runtime: ContextRuntimeSummary = {
     indexer: input.indexer,
+    ...(input.analyzerSummary
+      ? {
+          deterministicAnalysis: {
+            mode: input.analyzerSummary.mode,
+            configStatus: input.analyzerSummary.configStatus,
+            coverage: input.analyzerSummary.coverage,
+            runCount: input.analyzerSummary.runCount,
+            acceptedObservations: input.analyzerSummary.acceptedObservations,
+            skippedFiles: input.analyzerSummary.skippedFiles,
+            outOfScopeObservations: input.analyzerSummary.outOfScopeObservations,
+            contextTruncated: input.analyzerSummary.contextTruncated,
+            unavailableSourceCount: input.analyzerSummary.unavailableSourceCount,
+          },
+        }
+      : {}),
     anchorsPlanned: anchors.length,
     queriesPlanned: input.indexer === 'none' ? 0 : queries.length,
     queriesCompleted,

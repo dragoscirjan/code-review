@@ -34,6 +34,7 @@ test('loads explicit model config and safe action defaults', () => {
   assert.equal(config.maxDiffBytes, 120_000);
   assert.equal(config.minimumConfidence, 0);
   assert.equal(config.maxInlineComments, 0);
+  assert.equal(config.deterministicAnalyzers, 'none');
   assert.equal(config.timeoutMs, 600_000);
   assert.equal(loadActionConfig({ ...base, INPUT_BACKEND: 'pi' }).backend, 'pi');
 });
@@ -74,6 +75,7 @@ test('validates action limits and executable selection', () => {
     ['INPUT_MINIMUM_CONFIDENCE', '1.1', /minimum-confidence/],
     ['INPUT_MAX_INLINE_COMMENTS', '-1', /max-inline-comments/],
     ['INPUT_MAX_INLINE_COMMENTS', '11', /max-inline-comments/],
+    ['INPUT_DETERMINISTIC_ANALYZERS', 'eslint', /deterministic-analyzers/],
     ['INPUT_TIMEOUT_SECONDS', '0', /timeout-seconds/],
   ] as const) {
     assert.throws(() => loadActionConfig({ ...base, [name]: value }), message);
@@ -86,10 +88,15 @@ test('validates action limits and executable selection', () => {
     0.75,
   );
   assert.equal(loadActionConfig({ ...base, INPUT_MAX_INLINE_COMMENTS: '10' }).maxInlineComments, 10);
+  assert.equal(
+    loadActionConfig({ ...base, INPUT_DETERMINISTIC_ANALYZERS: 'base-config' }).deterministicAnalyzers,
+    'base-config',
+  );
 });
 
 test('migrates both backend markers without collisions', () => {
   assert.deepEqual(managedCommentMarkers('opencode'), [
+    '<!-- code-review:opencode:v6 -->',
     '<!-- code-review:opencode:v5 -->',
     '<!-- code-review:opencode:v4 -->',
     '<!-- code-review:opencode:v3 -->',
@@ -97,6 +104,7 @@ test('migrates both backend markers without collisions', () => {
     '<!-- code-review:opencode-poc:v1 -->',
   ]);
   assert.deepEqual(managedCommentMarkers('pi'), [
+    '<!-- code-review:pi:v6 -->',
     '<!-- code-review:pi:v5 -->',
     '<!-- code-review:pi:v4 -->',
     '<!-- code-review:pi:v3 -->',

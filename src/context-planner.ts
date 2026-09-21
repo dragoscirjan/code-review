@@ -22,7 +22,8 @@ export const MAX_ISSUE_CRITERIA_BYTES = 6_000;
 export type ContextQueryKind = 'definition-and-types' | 'callers-and-tests' | 'callees' | 'configuration';
 export type ContextSourceStatus =
   'included' | 'empty' | 'truncated' | 'unavailable' | 'timed-out' | 'budget-exhausted' | 'unsupported' | 'disabled';
-export type ContextSourceKind = 'base-guidance' | 'base-configuration' | 'code-index' | 'github-issue';
+export type ContextSourceKind =
+  'base-guidance' | 'base-configuration' | 'code-index' | 'github-issue' | 'deterministic-analysis';
 
 export interface DiffAnchorProvenance {
   path: string;
@@ -66,8 +67,21 @@ export interface ReviewContextItem {
   content?: string;
 }
 
+export interface DeterministicAnalysisContextSummary {
+  mode: 'none' | 'base-config';
+  configStatus: 'disabled' | 'missing' | 'enabled';
+  coverage: 'complete' | 'partial';
+  runCount: number;
+  acceptedObservations: number;
+  skippedFiles: number;
+  outOfScopeObservations: number;
+  contextTruncated: boolean;
+  unavailableSourceCount: number;
+}
+
 export interface ContextRuntimeSummary {
   indexer: 'none' | 'cgc' | 'gitnexus';
+  deterministicAnalysis?: DeterministicAnalysisContextSummary;
   anchorsPlanned: number;
   queriesPlanned: number;
   queriesCompleted: number;
@@ -93,6 +107,7 @@ export interface ReviewContextMetadata {
   queryByteLimitHits: number;
   queryBudgetSkipped: number;
   indexer: 'none' | 'cgc' | 'gitnexus';
+  deterministicAnalysis?: DeterministicAnalysisContextSummary;
   guidance: { agents: ContextSourceStatus; contributing: ContextSourceStatus };
   configuration: { candidates: number; included: number; unavailable: number; truncated: number };
   linkedIssues: { discovered: number; fetched: number; unavailable: number };
@@ -639,9 +654,10 @@ export function packReviewContext(
     break;
   }
   const contextText = serialized(items);
-  const unavailableSourceCount = candidates.filter((item) =>
-    ['unavailable', 'timed-out', 'budget-exhausted', 'unsupported'].includes(item.source.status),
-  ).length;
+  const unavailableSourceCount =
+    candidates.filter((item) =>
+      ['unavailable', 'timed-out', 'budget-exhausted', 'unsupported'].includes(item.source.status),
+    ).length + (runtime.deterministicAnalysis?.unavailableSourceCount ?? 0);
   const truncatedSourceCount = truncatedCandidateIndexes.size;
   const metadata: ReviewContextMetadata = {
     version: 1,
@@ -657,6 +673,7 @@ export function packReviewContext(
     queryByteLimitHits: runtime.queryByteLimitHits,
     queryBudgetSkipped: runtime.queryBudgetSkipped,
     indexer: runtime.indexer,
+    ...(runtime.deterministicAnalysis ? { deterministicAnalysis: runtime.deterministicAnalysis } : {}),
     guidance: runtime.guidance,
     configuration: runtime.configuration,
     linkedIssues: runtime.linkedIssues,

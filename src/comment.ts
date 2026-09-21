@@ -1,3 +1,4 @@
+import type { AnalyzerSummary } from './analyzer';
 import type { ReviewContextMetadata } from './context-planner';
 import type { ReviewAssessment, ValidatedFinding } from './finding-validation';
 import type { ReviewBackend } from './review';
@@ -22,7 +23,11 @@ function renderFinding(finding: ValidatedFinding, index?: number): string {
 
 - **Line:** ${finding.location.line} (${finding.location.side})
 - **Confidence:** ${Math.round(finding.confidence * 100)}%
-- **Path:**
+${
+  finding.origin?.kind === 'analyzer'
+    ? `- **Deterministic analyzer:** ${finding.origin.analyzer} (${finding.origin.analyzerVersion}), rule ${finding.origin.ruleId} r${finding.origin.ruleRevision}\n`
+    : ''
+}- **Path:**
 ${renderModelTextLiteral(finding.location.path)}
 - **Evidence:**
 ${renderModelTextLiteral(finding.evidence)}
@@ -33,9 +38,11 @@ ${renderModelTextLiteral(finding.fix)}`;
 }
 
 function renderAssessment(assessment: ReviewAssessment): string {
+  if (assessment.findings.length > 0) {
+    return assessment.findings.map((finding, index) => renderFinding(finding, index + 1)).join('\n\n');
+  }
   if (assessment.modelOutcome === 'clean') return 'No validated findings were returned for the supplied context.';
-  if (assessment.findings.length === 0) return 'No model findings passed diff and evidence validation.';
-  return assessment.findings.map((finding, index) => renderFinding(finding, index + 1)).join('\n\n');
+  return 'No findings passed diff and evidence validation.';
 }
 
 function assertCommentSize(comment: string, label: string): string {
@@ -58,6 +65,7 @@ export function renderComment(input: {
   diffTruncated: boolean;
   originalDiffBytes: number;
   contextMetadata?: ReviewContextMetadata;
+  analyzerSummary?: AnalyzerSummary;
   lifecycle?: {
     mode: ReviewMode;
     reason: string;
@@ -82,6 +90,15 @@ export function renderComment(input: {
 - Base guidance: AGENTS.md ${input.contextMetadata.guidance.agents}; CONTRIBUTING.md ${input.contextMetadata.guidance.contributing}
 - Base configuration: ${input.contextMetadata.configuration.included} included, ${input.contextMetadata.configuration.unavailable} unavailable, ${input.contextMetadata.configuration.truncated} truncated
 - Linked issue criteria: ${input.contextMetadata.linkedIssues.fetched} included, ${input.contextMetadata.linkedIssues.unavailable} unavailable`
+    : '';
+  const analysis = input.analyzerSummary
+    ? `
+- Deterministic analysis: ${input.analyzerSummary.configStatus}; ${input.analyzerSummary.coverage} coverage
+- Analyzer runs: ${input.analyzerSummary.runCount}
+- Analyzer observations accepted: ${input.analyzerSummary.acceptedObservations}
+- Analyzer files skipped: ${input.analyzerSummary.skippedFiles}
+- Analyzer observations outside changed additions: ${input.analyzerSummary.outOfScopeObservations}
+- Analyzer context truncated: ${input.analyzerSummary.contextTruncated ? 'yes' : 'no'}`
     : '';
   const lifecycle = input.lifecycle
     ? `
@@ -123,8 +140,8 @@ export function renderComment(input: {
     const comment = `## Code Review (\`${input.model}\` via ${backendLabel(input.backend)})
 
 - Head: \`${input.headSha.slice(0, 12)}\`${context}
-- Published through: \`@${input.actor}\`${lifecycle}
-- Model findings received: ${counts.received}
+- Published through: \`@${input.actor}\`${analysis}${lifecycle}
+- Findings received: ${counts.received}
 - Accepted: ${counts.accepted}
 - Rejected (evidence or secret policy): ${counts.rejected}
 - Unmapped: ${counts.unmapped}

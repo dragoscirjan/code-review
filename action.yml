@@ -56,6 +56,10 @@ inputs:
     description: Maximum validated findings published in one inline review batch (0 disables inline publication)
     required: false
     default: '0'
+  deterministic-analyzers:
+    description: Fixed in-process analyzers. Accepted values are none and base-config
+    required: false
+    default: none
   timeout-seconds:
     description: Maximum review backend execution time
     required: false
@@ -88,6 +92,14 @@ outputs:
     description: Number of accepted findings suppressed because their inline fingerprint was already published
   inline-limit-omitted-count:
     description: Number of new eligible findings omitted by max-inline-comments
+  analyzer-coverage:
+    description: Deterministic analyzer coverage (complete or partial)
+  analyzer-run-count:
+    description: Number of fixed deterministic analyzers run
+  analyzer-observation-count:
+    description: Number of analyzer observations accepted after exact diff mapping
+  analyzer-skipped-file-count:
+    description: Number of supported files skipped by deterministic analyzer limits or acquisition failures
   code-index-cache-hit:
     description: Whether a fresh code index database cache was restored
   code-indexer:

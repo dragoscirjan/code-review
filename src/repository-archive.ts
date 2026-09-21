@@ -17,7 +17,7 @@ export const DEFAULT_ARCHIVE_LIMITS: ArchiveLimits = {
   maximumMembers: 60_000,
   maximumDirectories: 10_000,
   maximumFiles: 50_000,
-  maximumFileBytes: 5 * 1024 * 1024,
+  maximumFileBytes: 16 * 1024 * 1024,
   maximumExpandedBytes: 512 * 1024 * 1024,
   maximumPathBytes: 1_024,
   maximumPathSegments: 64,

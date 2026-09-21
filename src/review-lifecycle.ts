@@ -10,12 +10,14 @@ export interface ReviewSemanticVersions {
   reviewPolicy: number;
   resultContract: number;
   fingerprint: number;
+  analyzer: number;
   state: number;
 }
 export const REVIEW_SEMANTIC_VERSIONS: Readonly<ReviewSemanticVersions> = Object.freeze({
-  reviewPolicy: 1,
+  reviewPolicy: 2,
   resultContract: 1,
-  fingerprint: 1,
+  fingerprint: 2,
+  analyzer: 1,
   state: REVIEW_STATE_VERSION,
 });
 export const MAX_REVIEW_STATE_ENCODED_BYTES = 24_576;
@@ -400,14 +402,23 @@ export function fingerprintFinding(
   const selected = changedLine(file, finding);
   if (!selected) throw new Error('Validated finding anchor is ambiguous');
   const { anchorFingerprint, evidenceDigest } = fingerprintAnchor(file, selected.hunk, selected.line);
+  const analyzerOrigin = finding.origin?.kind === 'analyzer' ? finding.origin : undefined;
   return {
     anchorFingerprint,
     evidenceDigest,
-    fingerprint: digest('code-review/finding/v1', [
-      anchorFingerprint,
-      finding.category,
-      normalizeExplanation(finding.explanation),
-    ]),
+    fingerprint: analyzerOrigin
+      ? digest('code-review/finding/v2', [
+          anchorFingerprint,
+          finding.category,
+          analyzerOrigin.analyzer,
+          analyzerOrigin.ruleId,
+          analyzerOrigin.ruleRevision,
+        ])
+      : digest('code-review/finding/v1', [
+          anchorFingerprint,
+          finding.category,
+          normalizeExplanation(finding.explanation),
+        ]),
   };
 }
 
@@ -430,6 +441,7 @@ export function reviewInputDigest(
     policyDigest: string;
     pullRequest: { title: string; body: string; author: string };
     contextDigest: string;
+    analyzerResultDigest?: string;
     linkedIssues: readonly { number: number; digest: string }[];
   },
   semanticVersions: Readonly<ReviewSemanticVersions> = REVIEW_SEMANTIC_VERSIONS,
@@ -438,6 +450,7 @@ export function reviewInputDigest(
     version: REVIEW_INPUT_DIGEST_VERSION,
     semanticVersions,
     ...value,
+    analyzerResultDigest: value.analyzerResultDigest ?? null,
     linkedIssues: [...value.linkedIssues].sort((left, right) => left.number - right.number),
   });
 }
@@ -458,8 +471,12 @@ export function reviewPolicyDigest(value: {
   indexer: string;
   opencodeVersion: string;
   piVersion: string;
+  deterministicAnalyzerManifestDigest?: string;
 }): string {
-  return digest('code-review/policy/v1', value);
+  return digest('code-review/policy/v1', {
+    ...value,
+    deterministicAnalyzerManifestDigest: value.deterministicAnalyzerManifestDigest ?? null,
+  });
 }
 
 export interface ReviewStateIdentity {

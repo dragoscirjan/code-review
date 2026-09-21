@@ -118,25 +118,57 @@ Omit `model-credentials` for keyless servers. The harness adapters use a non-sec
 
 ## Inputs
 
-| Input                  | Default                         | Description                                                                  |
-| ---------------------- | ------------------------------- | ---------------------------------------------------------------------------- |
-| `github-token`         | Required                        | PAT for PR API access and publication.                                       |
-| `model-config`         | Required                        | Provider/model JSON above.                                                   |
-| `model-credentials`    | `{}`                            | Secret JSON credential map; only the selected credential enters the backend. |
-| `backend`              | `opencode`                      | `opencode` or `pi`.                                                          |
-| `container-engine`     | `podman`                        | `podman` or validated `docker` fallback.                                     |
-| `prompt`               | Correctness and security review | Additional trusted review guidance.                                          |
-| `opencode-version`     | `1.18.31`                       | Exact npm package version.                                                   |
-| `pi-version`           | `0.85.1`                        | Exact npm package version.                                                   |
-| `code-indexer`         | `none`                          | `none`, `cgc` or `gitnexus`; exact base revision only.                       |
-| `code-index-cache-key` | `code-review-index-v1`          | Cache key prefix.                                                            |
-| `code-index-cache-ttl` | `24h`                           | Maximum cache age (`ms`, `s`, `m`, `h`, `d`).                                |
-| `max-diff-bytes`       | `120000`                        | Maximum model-visible diff bytes; only complete diff hunks are included.     |
-| `minimum-confidence`   | `0`                             | Inclusive confidence threshold from `0` through `1`.                         |
-| `max-inline-comments`  | `0`                             | Inline comment cap from `0` through `10`; `0` keeps summary-only behavior.   |
-| `timeout-seconds`      | `600`                           | Backend timeout.                                                             |
+| Input                     | Default                         | Description                                                                  |
+| ------------------------- | ------------------------------- | ---------------------------------------------------------------------------- |
+| `github-token`            | Required                        | PAT for PR API access and publication.                                       |
+| `model-config`            | Required                        | Provider/model JSON above.                                                   |
+| `model-credentials`       | `{}`                            | Secret JSON credential map; only the selected credential enters the backend. |
+| `backend`                 | `opencode`                      | `opencode` or `pi`.                                                          |
+| `container-engine`        | `podman`                        | `podman` or validated `docker` fallback.                                     |
+| `prompt`                  | Correctness and security review | Additional trusted review guidance.                                          |
+| `opencode-version`        | `1.18.31`                       | Exact npm package version.                                                   |
+| `pi-version`              | `0.85.1`                        | Exact npm package version.                                                   |
+| `code-indexer`            | `none`                          | `none`, `cgc` or `gitnexus`; exact base revision only.                       |
+| `code-index-cache-key`    | `code-review-index-v1`          | Cache key prefix.                                                            |
+| `code-index-cache-ttl`    | `24h`                           | Maximum cache age (`ms`, `s`, `m`, `h`, `d`).                                |
+| `max-diff-bytes`          | `120000`                        | Maximum model-visible diff bytes; only complete diff hunks are included.     |
+| `minimum-confidence`      | `0`                             | Inclusive confidence threshold from `0` through `1`.                         |
+| `max-inline-comments`     | `0`                             | Inline comment cap from `0` through `10`; `0` keeps summary-only behavior.   |
+| `deterministic-analyzers` | `none`                          | `none` or `base-config`; trusted workflow gate for fixed parse-only checks.  |
+| `timeout-seconds`         | `600`                           | Backend timeout.                                                             |
 
-Outputs: `comment-url`, `review-url`, `inline-comment-count`, `inline-history-suppressed-count`, `inline-limit-omitted-count`, `diff-truncated`, `context-truncated`, `context-unavailable-source-count`, `review-mode`, `new-finding-count`, `unchanged-finding-count`, `resolved-finding-count`, `superseded-finding-count`, `code-indexer`, `code-index-cache-hit`.
+Outputs: `comment-url`, `review-url`, `inline-comment-count`, `inline-history-suppressed-count`, `inline-limit-omitted-count`, `diff-truncated`, `context-truncated`, `context-unavailable-source-count`, `review-mode`, `new-finding-count`, `unchanged-finding-count`, `resolved-finding-count`, `superseded-finding-count`, `analyzer-coverage`, `analyzer-run-count`, `analyzer-observation-count`, `analyzer-skipped-file-count`, `code-indexer`, `code-index-cache-hit`.
+
+## Deterministic analyzers
+
+A trusted workflow may set `deterministic-analyzers: base-config`. The action then reads only `.github/code-review-analyzers.json` from the captured **base SHA**. A PR cannot enable analyzers for itself. Missing configuration disables analysis; malformed, truncated, duplicate-keyed, unknown, or capability-expanding configuration fails closed. The exact version 1 schema accepts only fixed analyzer IDs/rules and limits that tighten the defaults:
+
+```json
+{
+  "version": 1,
+  "analyzers": [
+    { "id": "conflict-markers", "rules": ["unresolved-conflict-marker"] },
+    { "id": "typescript-syntax", "rules": ["syntax-error"] },
+    { "id": "json-syntax", "rules": ["syntax-error", "duplicate-property"] }
+  ],
+  "limits": {
+    "maximumFiles": 32,
+    "maximumFileBytes": 262144,
+    "maximumTotalBytes": 4194304,
+    "maximumObservations": 50,
+    "timeoutSeconds": 30,
+    "contextBytes": 12000
+  }
+}
+```
+
+The initial adapters are fixed, in-process, single-file parsers. They never invoke a shell, package manager, repository binary, project compiler, build/test script, dependency installer, plugin, import resolver, native config, or autofix. Exact-head files are fetched individually through GitHub as bounded regular UTF-8 files and remain in memory; repository paths never become command arguments. Executable bits and shebangs are inert text. NUL/binary, symlink/submodule, oversized, stale, unavailable, or parser-resource-limited supported inputs are skipped with partial coverage rather than called clean. Unsupported files remain outside the deterministic analyzer scope and are still covered by the normal model review.
+
+Analyzer work is limited to at most 32 files, 256 KiB per file, 64 KiB per line, 4 MiB total source, 50 normalized observations, and a 30-second phase; exact-base configuration can only tighten these defaults. Fetch timeouts are derived from the phase time remaining, and the deadline is checked after each fetch and parser call. Because parsing stays in-process, one synchronous TypeScript or JSON parser call cannot be forcibly interrupted mid-call; fixed source ceilings bound that call, parser exceptions become partial coverage, and elapsed-time enforcement resumes immediately afterward.
+
+Every observation is bound to fixed tool/rule/version provenance and an immutable input/result digest, then remapped to one exact `RIGHT` addition with evidence copied from the authoritative diff. Raw parser messages are bounded untrusted context and never become publication prose. Trusted fixed rule text is merged with model findings through the same evidence, secret, deduplication, ten-finding, inline-history, and publication controls. Partial analyzer coverage is visible in the summary/outputs and prevents the incremental completed-through cursor from advancing. Analyzer manifest and result digests are part of lifecycle reuse binding.
+
+Project-aware type checking, dependency resolution, builds, tests, plugins, downloaded rules, arbitrary commands, deleted-line analysis, and repository-defined analyzer versions remain unsupported.
 
 ## Incremental reviews
 
@@ -154,12 +186,12 @@ The action derives at most six language-aware lexical anchors from the exact com
 
 Root `AGENTS.md` and `CONTRIBUTING.md` are read only from the captured base SHA. Independently of indexer selection, the action includes at most four allowlisted configuration files and 8 KB selected by changed-path proximity and lexical path, such as `package.json`, TypeScript/JavaScript project configs, `Cargo.toml`, `go.mod`, Python project configs, and supported build files. Acceptance criteria are fetched for at most three explicit same-repository references: canonical issue URLs or closing-keyword forms such as `Fixes #23`. Bare mentions, pull-request URLs, code-fenced references, and cross-repository references are not fetched. Optional context requests have bounded deadlines. Missing, timed-out, truncated, and unavailable sources are reported in the managed summary and action outputs.
 
-Repository guidance, issue criteria, PR metadata, paths, symbols, index output, and the diff all remain untrusted data inside collision-checked prompt boundaries. They cannot replace the immutable safety rules, tool denial, output contract, finding validation, or publication policy.
+Repository guidance, issue criteria, PR metadata, paths, symbols, index output, deterministic analyzer labels/messages, and the diff all remain untrusted data inside collision-checked prompt boundaries. They cannot replace the immutable safety rules, tool denial, output contract, finding validation, or publication policy.
 
 ## Security and limitations
 
 - GitHub-hosted runners and GitHub PAT publication. Pi still uses its CLI for this milestone.
-- No PR code execution. The diff, exact-base guidance, linked issue criteria, and bounded index results are untrusted prompt data.
+- No PR code execution. The diff, exact-base guidance, linked issue criteria, bounded index results, and analyzer messages are untrusted prompt data. Deterministic analyzers parse bounded in-memory text only.
 - The backend container is digest-pinned, mount-free, non-root, read-only, capability-dropped, resource-limited and denies added privileges. OpenCode denies all tools; Pi disables tools and resource discovery.
 - Native harness configuration is generated in container tmpfs with restrictive permissions. Fixed provider naming avoids built-in provider auto-configuration. Native interpolation syntax in credentials is handled without executing commands or loading referenced files.
 - GitHub credentials never enter the model container. Only the selected model credential is passed through environment—not arguments or prompt. Every validated credential value, including unused entries, remains host-side and is masked, scanned against the complete assembled prompt, redacted from findings, and included in the final publication scan. Output is bounded and raw provider errors are suppressed.
