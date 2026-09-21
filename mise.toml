@@ -49,6 +49,10 @@ run = "npm run format:check"
 description = "Audit dependencies for known vulnerabilities"
 run = "npm run audit"
 
+[tasks.evaluation]
+description = "Run the deterministic recorded review-quality gate"
+run = "npm run evaluation"
+
 [tasks.validate]
 description = "Run the local validation pipeline"
 run = [
@@ -56,6 +60,7 @@ run = [
   "mise run lint:check",
   "mise run typecheck",
   "mise run test",
+  "mise run evaluation",
   "mise run duplicate-check",
   "mise run audit",
   "mise run build",

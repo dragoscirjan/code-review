@@ -170,6 +170,28 @@ Every observation is bound to fixed tool/rule/version provenance and an immutabl
 
 Project-aware type checking, dependency resolution, builds, tests, plugins, downloaded rules, arbitrary commands, deleted-line analysis, and repository-defined analyzer versions remain unsupported.
 
+## Review quality evaluation
+
+`npm run evaluation` replays the checked-in version 1 seeded-defect corpus through the production result parser, unified-diff parser, exact evidence mapper, deterministic analyzer merge, and deduplicator. The corpus covers correctness, security, regression, testing, prompt injection, HTML-like syntax, clean changes, LEFT-side findings, and analyzer evidence. Every protected baseline recording is contract-valid, exactly mapped, and deduplicated; focused adversarial unit fixtures cover malformed, duplicate, unmapped, rejected, and false-positive outputs. The corpus records exact acceptable locations and intentional non-findings.
+
+The deterministic gate reports precision, recall, line-mapping accuracy, duplicate rate, evidence/secret rejection rate, global finding-cap omission rate, malformed-output rate, execution-failure rate, clean-case accuracy, intentional non-finding hits, and recorded latency. It writes canonical JSON and Markdown reports to a newly created private directory directly below `RUNNER_TEMP` (or the operating-system temporary directory) and fails after writing when the versioned thresholds regress. Normal CI is offline and credential-free; fixture content is inert JSON data and is never imported, compiled, installed, or executed.
+
+Live evaluation is observational and never runs in normal CI. It may send the public seeded fixture source to the explicitly configured provider and can incur charges:
+
+```bash
+# Populate this through a secret manager; expected shape:
+# {"review-provider":{"type":"bearer","value":"<provider token>"}}
+export REVIEW_MODEL_CREDENTIALS_JSON
+
+RUN_LLM_EVALUATION=1 \
+REVIEW_EVALUATION_BACKEND=opencode \
+REVIEW_EVALUATION_MODEL_CONFIG='{"version":1,"provider":{"api":"openai-completions","baseUrl":"https://openrouter.ai/api/v1","network":"remote","credential":"review-provider"},"model":{"id":"provider/model-id","contextWindow":128000,"maxOutputTokens":8192}}' \
+REVIEW_EVALUATION_MODEL_CREDENTIALS="${REVIEW_MODEL_CREDENTIALS_JSON:?set REVIEW_MODEL_CREDENTIALS_JSON through a secret manager}" \
+node scripts/run-review-evaluation.mjs --live
+```
+
+Live mode reuses the fixed sandbox and provider-neutral credential contract, runs cases serially, never reads a GitHub token, never publishes comments, and artifacts only aggregate safe identifiers and counters. Raw prompts, provider output/errors, finding prose, endpoints, credentials, and environment data are not stored. Set `REVIEW_EVALUATION_TIMEOUT_SECONDS` to a bounded per-case backend timeout or `REVIEW_EVALUATION_OUTPUT_DIR` to a new direct child of trusted temporary storage.
+
 ## Incremental reviews
 
 The managed summary stores a bounded, public, versioned state envelope immediately before its actor-owned final marker. State is bound to the API host, repository, pull request, backend, actor, base revision, and a versioned review-input digest. That digest covers non-secret policy/model settings, fixed review-policy/result-contract/fingerprint/state semantic versions, bounded authoritative PR title/body/author, the supplemental-context digest, and linked-issue fingerprints. Missing or mismatched input binding forces a full review. State contains only host-generated digests, fingerprints, anchors, locations, lifecycle/publication counts, and coverage metadata—never prompts, credentials, endpoints with secrets, or raw model prose.
@@ -219,8 +241,10 @@ Validation type-checks, runs tests, and rebuilds the committed `dist/index.js`. 
 CONTAINER_ENGINE=podman npm run test:models
 CONTAINER_ENGINE=docker npm run test:models
 
-# Live provider smoke test (optional, may incur provider charges):
-OPENROUTER_API_KEY=... npm run test:integration
+# Live provider evaluation (optional, may incur provider charges):
+# Configure RUN_LLM_EVALUATION, REVIEW_EVALUATION_MODEL_CONFIG, and
+# REVIEW_EVALUATION_MODEL_CREDENTIALS as shown in “Review quality evaluation”.
+npm run test:integration
 GITHUB_TOKEN=... CODE_INDEXER=cgc npm run test:indexers
 GITHUB_TOKEN=... CODE_INDEXER=gitnexus npm run test:indexers
 ```

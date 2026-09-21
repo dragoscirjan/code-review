@@ -25,6 +25,9 @@ coverage
 # Duplicate-code reports
 .jscpd/
 
+# Review evaluation reports (normal runs use trusted temporary storage)
+.review-evaluation/
+
 # nyc test coverage
 .nyc_output
 

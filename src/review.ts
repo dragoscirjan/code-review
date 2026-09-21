@@ -8,7 +8,7 @@ import type { PullRequestContext, PullRequestDiff } from './github';
 import { redactSecrets, validateModelEndpoint, type ModelConnection } from './model';
 import { buildOpenCodeCommand, extractOpenCodeAssistantText } from './opencode';
 import { extractPiAssistantText, buildPiCommand } from './pi';
-import { parseReviewResult, type ReviewResultV1 } from './review-contract';
+import { parseReviewResult, ReviewContractError, type ReviewResultV1 } from './review-contract';
 import type { ReviewStateFinding } from './review-lifecycle';
 import { buildHarnessConfig, SANDBOX_BOOTSTRAP } from './sandbox';
 
@@ -20,6 +20,17 @@ export const SANDBOX_IMAGE =
   'docker.io/library/node:24.14.0-bookworm-slim@sha256:4bd6219054c8bebcd26a66bfd8ca0bd6e1024b4b97474c59bb7ee3bbcbef4fe8';
 
 export type ReviewBackend = 'opencode' | 'pi';
+export type ReviewExecutionFailureKind = 'malformed-output' | 'backend-failure';
+
+export class ReviewExecutionError extends Error {
+  constructor(
+    readonly kind: ReviewExecutionFailureKind,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ReviewExecutionError';
+  }
+}
 
 export interface ReviewRequest {
   backend: ReviewBackend;
@@ -492,7 +503,10 @@ export async function runReview(request: ReviewRequest): Promise<ReviewResultV1>
       if (!cleanup.ok) {
         console.warn(`Unable to confirm cleanup of ${containerName}; engine details suppressed`);
       }
-      throw new Error(redactSecrets(error instanceof Error ? error.message : String(error), promptSecrets));
+      const message = redactSecrets(error instanceof Error ? error.message : String(error), promptSecrets);
+      if (error instanceof ReviewContractError) throw new ReviewExecutionError('malformed-output', message);
+      if (error instanceof ReviewExecutionError) throw error;
+      throw new ReviewExecutionError('backend-failure', message);
     }
   } finally {
     await rm(workspace, { recursive: true, force: true });

@@ -69,7 +69,9 @@ Use these test levels:
 
 Tests must use temporary directories and repositories. They must not modify the contributor's checkout. Network tests must be opt-in and clearly named.
 
-Before pushing, run every formatting, type-checking, linting, and test command defined by the repository:
+The required `npm run evaluation` quality gate is deterministic, recorded, offline, and credential-free. Seed fixtures are inert JSON data and must never be imported or executed. Changes to the protected corpus, matching semantics, or thresholds require explicit owner review. `npm run evaluation:live` is an opt-in observational run only; it must not become a required CI gate or receive a GitHub publication token.
+
+Before pushing, run every formatting, type-checking, linting, evaluation, and test command defined by the repository:
 
 ```bash
 mise run validate

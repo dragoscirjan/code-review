@@ -24,7 +24,20 @@ jobs:
       - name: Install mise
         uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
       - run: npm ci
-      - run: mise run validate
+      - name: Validate including recorded review evaluation
+        env:
+          REVIEW_EVALUATION_OUTPUT_DIR: ${{ runner.temp }}/review-evaluation
+        run: mise run validate
+      - name: Upload deterministic review evaluation reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: review-evaluation
+          path: |
+            ${{ runner.temp }}/review-evaluation/review-evaluation.json
+            ${{ runner.temp }}/review-evaluation/review-evaluation.md
+          if-no-files-found: warn
+          retention-days: 14
       - name: Verify Podman sandbox flags
         run: |
           podman --version
