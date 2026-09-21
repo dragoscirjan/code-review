@@ -402,7 +402,7 @@ done
     await assert.rejects(
       runReview({
         ...request('pi', directory),
-        timeoutMs: 20,
+        timeoutMs: 100,
         killGraceMs: 25,
       }),
       /timed out/,

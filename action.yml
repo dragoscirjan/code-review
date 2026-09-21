@@ -60,8 +60,16 @@ inputs:
     description: Fixed in-process analyzers. Accepted values are none and base-config
     required: false
     default: none
+  review-strategy:
+    description: Review execution strategy. Accepted values are single-pass, specialists, and auto
+    required: false
+    default: auto
+  specialist-token-budget:
+    description: Aggregate conservative prompt, envelope, and maximum-output token reservation for specialist review
+    required: false
+    default: '300000'
   timeout-seconds:
-    description: Maximum review backend execution time
+    description: Maximum single-pass execution time or aggregate specialist and arbiter execution time
     required: false
     default: '600'
 
@@ -76,6 +84,14 @@ outputs:
     description: Number of supplemental context sources unavailable, unsupported, timed out, or skipped by budget
   review-mode:
     description: Lifecycle mode used for this run (full, incremental, migration, or no-change)
+  review-strategy:
+    description: Selected execution strategy (single-pass or specialists)
+  specialist-role-count:
+    description: Number of fixed specialist roles completed
+  specialist-candidate-count:
+    description: Number of validated model candidates presented to the arbiter
+  arbiter-rejected-count:
+    description: Number of validated candidate IDs rejected by the arbiter
   new-finding-count:
     description: Number of active findings first seen at the reviewed head
   unchanged-finding-count:

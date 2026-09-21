@@ -237,6 +237,7 @@ test('same-head reuse rejects title, body, linked-issue, context, and fixed-poli
     pullRequest: { title: 'Title', body: 'Body', author: 'author' },
     contextDigest: `sha256:${'C'.repeat(43)}`,
     analyzerResultDigest: `sha256:${'A'.repeat(43)}`,
+    executionPlanDigest: `sha256:${'E'.repeat(43)}`,
     linkedIssues: [{ number: 22, digest: 'a'.repeat(64) }],
   };
   const original = reviewInputDigest(baseline);
@@ -246,6 +247,7 @@ test('same-head reuse rejects title, body, linked-issue, context, and fixed-poli
     reviewInputDigest({ ...baseline, pullRequest: { ...baseline.pullRequest, author: 'changed-author' } }),
     reviewInputDigest({ ...baseline, contextDigest: `sha256:${'D'.repeat(43)}` }),
     reviewInputDigest({ ...baseline, analyzerResultDigest: `sha256:${'B'.repeat(43)}` }),
+    reviewInputDigest({ ...baseline, executionPlanDigest: `sha256:${'F'.repeat(43)}` }),
     reviewInputDigest({ ...baseline, linkedIssues: [{ number: 22, digest: 'b'.repeat(64) }] }),
     reviewInputDigest(baseline, {
       ...REVIEW_SEMANTIC_VERSIONS,
@@ -289,11 +291,40 @@ test('policy and scope bind state without credential material', () => {
     opencodeVersion: '1.0.0',
     piVersion: '1.0.0',
     deterministicAnalyzerManifestDigest: `sha256:${'M'.repeat(43)}`,
+    requestedReviewStrategy: 'auto',
+    specialistTokenBudget: 300_000,
+    aggregateTimeoutMs: 600_000,
+    specialistPolicy: {
+      roleSetVersion: 1,
+      selectorVersion: 1,
+      arbiterContractVersion: 1,
+      contextProjectionVersion: 1,
+      maximumRolePasses: 4,
+      maximumArbiterPasses: 1,
+      maximumFindingsPerRole: 3,
+      maximumRawFindings: 12,
+      maximumArbiterCandidates: 10,
+      maximumSpecialistContextBytes: 20_000,
+      maximumArbiterContextBytes: 12_000,
+      maximumArbiterPromptBytes: 100_000,
+      specialistRequestOverheadTokens: 1_024,
+      specialistOutputTokens: 4_096,
+      arbiterOutputTokens: 2_048,
+    },
   } as const;
   const policy = reviewPolicyDigest(policyInput);
   assert.notEqual(
     policy,
     reviewPolicyDigest({ ...policyInput, deterministicAnalyzerManifestDigest: `sha256:${'N'.repeat(43)}` }),
+  );
+  assert.notEqual(policy, reviewPolicyDigest({ ...policyInput, requestedReviewStrategy: 'single-pass' }));
+  assert.notEqual(policy, reviewPolicyDigest({ ...policyInput, specialistTokenBudget: 400_000 }));
+  assert.notEqual(
+    policy,
+    reviewPolicyDigest({
+      ...policyInput,
+      specialistPolicy: { ...policyInput.specialistPolicy, arbiterContractVersion: 2 },
+    }),
   );
   assert.match(policy, /^sha256:[A-Za-z0-9_-]{43}$/u);
   const value = state({ policyDigest: policy });

@@ -198,6 +198,7 @@ export function addressAllowed(address: string, network: ModelConnection['networ
 export async function validateModelEndpoint(
   connection: ModelConnection,
   resolve: (host: string) => Promise<{ address: string }[]> = (host) => lookup(host, { all: true }),
+  timeoutMs = 5_000,
 ): Promise<void> {
   const host = new URL(connection.baseUrl).hostname.replace(/^\[|\]$/g, '');
   // These names are provided by the container engine, not the runner's DNS.
@@ -209,7 +210,7 @@ export async function validateModelEndpoint(
       : await Promise.race([
           resolve(host),
           new Promise<never>((_, reject) => {
-            timer = setTimeout(() => reject(new Error('timeout')), 5000);
+            timer = setTimeout(() => reject(new Error('timeout')), Math.max(1, Math.min(5_000, timeoutMs)));
           }),
         ]);
     if (!addresses.length || addresses.some(({ address }) => !addressAllowed(address, connection.network))) {

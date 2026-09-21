@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'vitest';
 import type { AnalyzerSummary } from '../src/analyzer';
 import type { AnalyzerFindingCandidate } from '../src/analyzer-contract';
+import { packReviewContext, type ContextRuntimeSummary } from '../src/context-planner';
 import type {
   AuthenticatedActor,
   GitHubComment,
@@ -9,9 +10,13 @@ import type {
   GitHubReview,
   PullRequestContext,
 } from '../src/github';
+import type { ModelConnection } from '../src/model';
+import { ReviewExecutionError, type StructuredBackendRequest } from '../src/review';
 import { parseReviewResult, type ReviewFinding, type ReviewResultV1 } from '../src/review-contract';
 import { parseReviewState } from '../src/review-lifecycle';
 import { executeAndPublishReview } from '../src/review-publication';
+import { executeReviewStrategy, type StructuredBackendRunner } from '../src/review-specialists';
+import { selectReviewStrategy } from '../src/review-strategy';
 import { parseUnifiedDiff, prepareReviewedDiff } from '../src/unified-diff';
 
 const pullRequest: PullRequestContext = {
@@ -159,6 +164,27 @@ const analyzerSummary: AnalyzerSummary = {
   ],
 };
 
+const specialistRuntime: ContextRuntimeSummary = {
+  indexer: 'none',
+  anchorsPlanned: 0,
+  queriesPlanned: 0,
+  queriesCompleted: 0,
+  queriesTimedOut: 0,
+  queryByteLimitHits: 0,
+  queryBudgetSkipped: 0,
+  guidance: { agents: 'disabled', contributing: 'disabled' },
+  configuration: { candidates: 0, included: 0, unavailable: 0, truncated: 0 },
+  linkedIssues: { discovered: 0, fetched: 0, unavailable: 0 },
+};
+const specialistConnection: ModelConnection = {
+  api: 'openai-completions',
+  baseUrl: 'https://models.example.test/v1',
+  network: 'remote',
+  modelId: 'provider/model',
+  contextWindow: 200_000,
+  maxOutputTokens: 8_192,
+};
+
 function input(
   executeReview: () => Promise<ReviewResultV1>,
   spy: ReturnType<typeof publicationSpy>,
@@ -181,6 +207,52 @@ function input(
   };
 }
 
+async function executeTerminalFreshnessOverrun(path: 'no-candidate' | 'post-arbiter'): Promise<ReviewResultV1> {
+  const clean = '{"version":1,"outcome":"clean","findings":[]}';
+  const correctness = JSON.stringify({
+    version: 1,
+    outcome: 'findings',
+    findings: [finding({ category: 'correctness' })],
+  });
+  const outputs =
+    path === 'no-candidate'
+      ? [clean, clean, clean, clean]
+      : [correctness, clean, clean, clean, '{"version":1,"rejectedCandidateIds":[]}'];
+  let call = 0;
+  const runner: StructuredBackendRunner = async <T>(request: StructuredBackendRequest<T>) => {
+    const output = outputs[call++];
+    if (output === undefined) throw new Error('Unexpected specialist phase');
+    return request.parseAssistantText(output);
+  };
+  let time = 0;
+  let freshnessChecks = 0;
+  const expireAtCheck = path === 'no-candidate' ? 8 : 10;
+  const executed = await executeReviewStrategy({
+    plan: selectReviewStrategy({ requested: 'specialists', diff, analyzerCoverage: 'complete' }),
+    backend: 'opencode',
+    containerEngine: 'podman',
+    connection: specialistConnection,
+    opencodeVersion: '1.18.31',
+    piVersion: '0.85.1',
+    customPrompt: 'Review carefully.',
+    pullRequest,
+    diff,
+    reviewContext: packReviewContext([], specialistRuntime),
+    priorFindings: [],
+    policy: { minimumConfidence: 0, maximumInlineComments: 10 },
+    secrets: [],
+    assertFresh: async () => {
+      freshnessChecks += 1;
+      if (freshnessChecks === expireAtCheck) time = 60_001;
+    },
+    timeoutMs: 60_000,
+    specialistTokenBudget: 2_000_000,
+    now: () => time,
+    structuredRunner: runner,
+  });
+  return executed.review;
+}
+
 test('malformed backend output cannot reach publication', async () => {
   const spy = publicationSpy();
   await assert.rejects(
@@ -189,6 +261,30 @@ test('malformed backend output cannot reach publication', async () => {
   );
   assert.deepEqual(spy.events, []);
 });
+
+test('aggregate backend deadline failure cannot reach publication', async () => {
+  const spy = publicationSpy();
+  await assert.rejects(
+    executeAndPublishReview(
+      input(async () => {
+        throw new ReviewExecutionError('backend-failure', 'Review backend aggregate deadline expired');
+      }, spy),
+    ),
+    /aggregate deadline expired/u,
+  );
+  assert.deepEqual(spy.events, []);
+});
+
+for (const terminalPath of ['no-candidate', 'post-arbiter'] as const) {
+  test(`terminal ${terminalPath} freshness deadline overrun produces zero publication writes`, async () => {
+    const spy = publicationSpy();
+    await assert.rejects(
+      executeAndPublishReview(input(() => executeTerminalFreshnessOverrun(terminalPath), spy)),
+      /deadline expired/u,
+    );
+    assert.deepEqual(spy.events, []);
+  });
+}
 
 test('staleness between snapshot/indexing and backend invocation produces zero backend and publication calls', async () => {
   const spy = publicationSpy();

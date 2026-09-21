@@ -2,6 +2,7 @@ import ms, { type StringValue } from 'ms';
 import type { DeterministicAnalyzerMode } from './analyzer-config';
 import { loadModelConfiguration, type ModelConnection } from './model';
 import type { ReviewBackend } from './review';
+import type { RequestedReviewStrategy } from './review-strategy';
 
 export const DEFAULT_BACKEND: ReviewBackend = 'opencode';
 export const DEFAULT_OPENCODE_VERSION = '1.18.31';
@@ -31,18 +32,29 @@ export interface ActionConfig {
   minimumConfidence: number;
   maxInlineComments: number;
   deterministicAnalyzers: DeterministicAnalyzerMode;
+  reviewStrategy: RequestedReviewStrategy;
+  specialistTokenBudget: number;
   timeoutMs: number;
 }
 
 export function managedCommentMarkers(backend: ReviewBackend): string[] {
-  const current = `<!-- code-review:${backend}:v6 -->`;
+  const current = `<!-- code-review:${backend}:v7 -->`;
+  const specialists = `<!-- code-review:${backend}:v6 -->`;
   const incremental = `<!-- code-review:${backend}:v5 -->`;
   const validated = `<!-- code-review:${backend}:v4 -->`;
   const structured = `<!-- code-review:${backend}:v3 -->`;
   const providerNeutral = `<!-- code-review:${backend}:openrouter-poc:v2 -->`;
   return backend === 'opencode'
-    ? [current, incremental, validated, structured, providerNeutral, '<!-- code-review:opencode-poc:v1 -->']
-    : [current, incremental, validated, structured, providerNeutral];
+    ? [
+        current,
+        specialists,
+        incremental,
+        validated,
+        structured,
+        providerNeutral,
+        '<!-- code-review:opencode-poc:v1 -->',
+      ]
+    : [current, specialists, incremental, validated, structured, providerNeutral];
 }
 
 function inputCandidates(name: string): string[] {
@@ -170,6 +182,16 @@ export function loadActionConfig(environment: NodeJS.ProcessEnv = process.env): 
   if (deterministicAnalyzers !== 'none' && deterministicAnalyzers !== 'base-config') {
     throw new Error('deterministic-analyzers must be none or base-config');
   }
+  const reviewStrategy = getActionInput('review-strategy', environment) ?? 'auto';
+  if (reviewStrategy !== 'single-pass' && reviewStrategy !== 'specialists' && reviewStrategy !== 'auto') {
+    throw new Error('review-strategy must be single-pass, specialists, or auto');
+  }
+  const specialistTokenBudget = parseInteger(
+    getActionInput('specialist-token-budget', environment) ?? '300000',
+    'specialist-token-budget',
+    20_000,
+    2_000_000,
+  );
   const timeoutSeconds = parseInteger(
     getActionInput('timeout-seconds', environment) ?? '600',
     'timeout-seconds',
@@ -193,6 +215,8 @@ export function loadActionConfig(environment: NodeJS.ProcessEnv = process.env): 
     minimumConfidence,
     maxInlineComments,
     deterministicAnalyzers,
+    reviewStrategy,
+    specialistTokenBudget,
     timeoutMs: timeoutSeconds * 1_000,
   };
 }

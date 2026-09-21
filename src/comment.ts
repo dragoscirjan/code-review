@@ -3,6 +3,7 @@ import type { ReviewContextMetadata } from './context-planner';
 import type { ReviewAssessment, ValidatedFinding } from './finding-validation';
 import type { ReviewBackend } from './review';
 import type { ReviewLifecycleCounts, ReviewMode, ReviewStateFinding } from './review-lifecycle';
+import type { ReviewExecutionSummary } from './review-specialists';
 import { renderModelTextLiteral } from './review-text';
 
 export const MAX_GITHUB_COMMENT_BYTES = 65_536;
@@ -66,6 +67,7 @@ export function renderComment(input: {
   originalDiffBytes: number;
   contextMetadata?: ReviewContextMetadata;
   analyzerSummary?: AnalyzerSummary;
+  executionSummary?: ReviewExecutionSummary;
   lifecycle?: {
     mode: ReviewMode;
     reason: string;
@@ -99,6 +101,18 @@ export function renderComment(input: {
 - Analyzer files skipped: ${input.analyzerSummary.skippedFiles}
 - Analyzer observations outside changed additions: ${input.analyzerSummary.outOfScopeObservations}
 - Analyzer context truncated: ${input.analyzerSummary.contextTruncated ? 'yes' : 'no'}`
+    : '';
+  const execution = input.executionSummary
+    ? `
+- Requested review strategy: ${input.executionSummary.plan.requested}
+- Selected review strategy: ${input.executionSummary.plan.selected}
+- Strategy reasons: ${input.executionSummary.plan.reasons.join(', ')}
+- Specialist roles completed: ${input.executionSummary.rolesCompleted}
+- Raw specialist candidates: ${input.executionSummary.rawCandidateCount}
+- Candidates validated for arbitration: ${input.executionSummary.validatedCandidateCount}
+- Candidates omitted before arbitration: ${input.executionSummary.preArbiterOmittedCount}
+- Candidates rejected by arbiter: ${input.executionSummary.arbiterRejectedCount}
+- Reserved specialist token units: ${input.executionSummary.reservedTokens}`
     : '';
   const lifecycle = input.lifecycle
     ? `
@@ -140,7 +154,7 @@ export function renderComment(input: {
     const comment = `## Code Review (\`${input.model}\` via ${backendLabel(input.backend)})
 
 - Head: \`${input.headSha.slice(0, 12)}\`${context}
-- Published through: \`@${input.actor}\`${analysis}${lifecycle}
+- Published through: \`@${input.actor}\`${analysis}${execution}${lifecycle}
 - Findings received: ${counts.received}
 - Accepted: ${counts.accepted}
 - Rejected (evidence or secret policy): ${counts.rejected}

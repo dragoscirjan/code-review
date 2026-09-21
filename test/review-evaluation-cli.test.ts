@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, test } from 'vitest';
@@ -23,6 +23,17 @@ test('recorded CLI writes only fixed bounded reports under trusted temporary sto
   assert.equal(json.run.mode, 'recorded');
   assert.deepEqual(json.thresholdFailures, []);
   assert.match(await readFile(join(output, 'review-evaluation.md'), 'utf8'), /Thresholds: \*\*passed\*\*/u);
+  const specialist = JSON.parse(await readFile(join(output, 'review-specialist-evaluation.json'), 'utf8')) as {
+    thresholdFailures: string[];
+  };
+  assert.deepEqual(specialist.thresholdFailures, []);
+  assert.match(await readFile(join(output, 'review-specialist-evaluation.md'), 'utf8'), /Gate: pass/u);
+  assert.deepEqual((await readdir(output)).sort(), [
+    'review-evaluation.json',
+    'review-evaluation.md',
+    'review-specialist-evaluation.json',
+    'review-specialist-evaluation.md',
+  ]);
 });
 
 test('live CLI is doubly opt-in and credential/config failures create no artifacts or network calls', async () => {
