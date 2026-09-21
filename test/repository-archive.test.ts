@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
@@ -55,6 +55,13 @@ async function archiveFixture(setup: (root: string) => Promise<void>) {
   await create({ cwd: parent, gzip: true, file: archive, portable: true }, ['repository-root']);
   return { temporary, archive, destination };
 }
+
+test('default limits admit the committed action bundle while keeping a fixed ceiling', async () => {
+  assert.equal(DEFAULT_ARCHIVE_LIMITS.maximumFileBytes, 16 * 1024 * 1024);
+  const bundle = await stat(join(import.meta.dirname, '..', 'dist', 'index.js'));
+  assert.ok(bundle.isFile());
+  assert.ok(bundle.size <= DEFAULT_ARCHIVE_LIMITS.maximumFileBytes);
+});
 
 test('preflights and extracts a one-root regular-file archive', async () => {
   const fixture = await archiveFixture(async (root) => {
