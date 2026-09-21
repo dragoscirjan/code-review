@@ -5,6 +5,14 @@ const MAIN_SHA = '1111111111111111111111111111111111111111';
 const PRIOR_SHA = '2222222222222222222222222222222222222222';
 const OTHER_SHA = '3333333333333333333333333333333333333333';
 
+function ref(targetSha: string, objectType = 'commit') {
+  return { targetSha, objectType };
+}
+
+function release(tagName: string, overrides: Partial<{ draft: boolean; prerelease: boolean }> = {}) {
+  return { tagName, draft: false, prerelease: false, ...overrides };
+}
+
 function plan(overrides: Partial<Parameters<typeof planActionRelease>[0]> = {}): ReturnType<typeof planActionRelease> {
   return planActionRelease({
     version: 'v1.2.3',
@@ -12,7 +20,7 @@ function plan(overrides: Partial<Parameters<typeof planActionRelease>[0]> = {}):
     mainSha: MAIN_SHA,
     targetIsMainAncestor: true,
     refs: {},
-    releaseTags: [],
+    releases: [],
     ...overrides,
   });
 }
@@ -65,6 +73,7 @@ describe('planActionRelease', () => {
       },
       targetSha: MAIN_SHA,
       majorTargetSha: MAIN_SHA,
+      observedMajorTargetSha: null,
       latestMajorVersion: null,
       createVersionTag: true,
       updateMajorTag: true,
@@ -76,11 +85,12 @@ describe('planActionRelease', () => {
   test('advances a major alias only from a known earlier release', () => {
     expect(
       plan({
-        refs: { 'v1.2.2': PRIOR_SHA, v1: PRIOR_SHA },
-        releaseTags: ['v1.2.2'],
+        refs: { 'v1.2.2': ref(PRIOR_SHA), v1: ref(PRIOR_SHA) },
+        releases: [release('v1.2.2')],
       }),
     ).toMatchObject({
       majorTargetSha: MAIN_SHA,
+      observedMajorTargetSha: PRIOR_SHA,
       latestMajorVersion: 'v1.2.2',
       createVersionTag: true,
       updateMajorTag: true,
@@ -92,8 +102,8 @@ describe('planActionRelease', () => {
     expect(
       plan({
         version: 'v1.2.3',
-        refs: { 'v2.0.0': OTHER_SHA, v2: OTHER_SHA },
-        releaseTags: ['v2.0.0'],
+        refs: { 'v2.0.0': ref(OTHER_SHA), v2: ref(OTHER_SHA) },
+        releases: [release('v2.0.0')],
       }),
     ).toMatchObject({ latestMajorVersion: null, createVersionTag: true, updateMajorTag: true });
   });
@@ -101,8 +111,8 @@ describe('planActionRelease', () => {
   test('supports safe retries after partial or complete publication', () => {
     expect(
       plan({
-        refs: { 'v1.2.2': PRIOR_SHA, 'v1.2.3': MAIN_SHA, v1: PRIOR_SHA },
-        releaseTags: ['v1.2.2'],
+        refs: { 'v1.2.2': ref(PRIOR_SHA), 'v1.2.3': ref(MAIN_SHA), v1: ref(PRIOR_SHA) },
+        releases: [release('v1.2.2')],
       }),
     ).toMatchObject({
       createVersionTag: false,
@@ -112,8 +122,8 @@ describe('planActionRelease', () => {
     });
     expect(
       plan({
-        refs: { 'v1.2.3': MAIN_SHA, v1: MAIN_SHA },
-        releaseTags: ['v1.2.3'],
+        refs: { 'v1.2.3': ref(MAIN_SHA), v1: ref(MAIN_SHA) },
+        releases: [release('v1.2.3')],
       }),
     ).toMatchObject({
       createVersionTag: false,
@@ -130,12 +140,13 @@ describe('planActionRelease', () => {
         targetSha: PRIOR_SHA,
         mainSha: MAIN_SHA,
         targetIsMainAncestor: true,
-        refs: { 'v1.2.2': PRIOR_SHA, 'v1.2.3': MAIN_SHA, v1: MAIN_SHA },
-        releaseTags: ['v1.2.3'],
+        refs: { 'v1.2.2': ref(PRIOR_SHA), 'v1.2.3': ref(MAIN_SHA), v1: ref(MAIN_SHA) },
+        releases: [release('v1.2.3')],
       }),
     ).toMatchObject({
       targetSha: PRIOR_SHA,
       majorTargetSha: MAIN_SHA,
+      observedMajorTargetSha: MAIN_SHA,
       latestMajorVersion: 'v1.2.3',
       createVersionTag: false,
       updateMajorTag: false,
@@ -148,7 +159,7 @@ describe('planActionRelease', () => {
     expect(() =>
       plan({
         targetSha: PRIOR_SHA,
-        refs: { 'v1.2.3': PRIOR_SHA },
+        refs: { 'v1.2.3': ref(PRIOR_SHA) },
         targetIsMainAncestor: false,
       }),
     ).toThrow('retries must remain ancestors of main');
@@ -159,36 +170,64 @@ describe('planActionRelease', () => {
   });
 
   test('rejects immutable-tag conflicts and version regression', () => {
-    expect(() => plan({ refs: { 'v1.2.3': OTHER_SHA } })).toThrow(
+    expect(() => plan({ refs: { 'v1.2.3': ref(OTHER_SHA) } })).toThrow(
       'immutable tag v1.2.3 already points to another commit',
     );
     expect(() =>
       plan({
-        refs: { 'v1.2.4': OTHER_SHA, v1: OTHER_SHA },
-        releaseTags: ['v1.2.4'],
+        refs: { 'v1.2.4': ref(OTHER_SHA), v1: ref(OTHER_SHA) },
+        releases: [release('v1.2.4')],
       }),
     ).toThrow('v1.2.3 would regress v1 from v1.2.4');
   });
 
   test('rejects an alias that cannot be proven to be a known earlier release', () => {
-    expect(() => plan({ refs: { v1: OTHER_SHA } })).toThrow('v1 does not point to a known release');
+    expect(() => plan({ refs: { v1: ref(OTHER_SHA) } })).toThrow('v1 does not point to a known release');
     expect(() =>
       plan({
-        refs: { 'v1.2.2': PRIOR_SHA, v1: OTHER_SHA },
-        releaseTags: ['v1.2.2'],
+        refs: { 'v1.2.2': ref(PRIOR_SHA), v1: ref(OTHER_SHA) },
+        releases: [release('v1.2.2')],
       }),
     ).toThrow('v1 does not point to a known release');
   });
 
+  test('rejects orphaned, indirect, or unstable release provenance', () => {
+    expect(() => plan({ refs: { 'v1.2.2': ref(PRIOR_SHA) } })).toThrow(
+      'immutable tag v1.2.2 has no corresponding published GitHub Release',
+    );
+    expect(() => plan({ refs: { 'v1.2.3': ref(MAIN_SHA, 'tag') } })).toThrow(
+      'ref v1.2.3 must point directly to a commit',
+    );
+    expect(() =>
+      plan({
+        refs: { 'v1.2.3': ref(MAIN_SHA) },
+        releases: [release('v1.2.3', { draft: true })],
+      }),
+    ).toThrow('GitHub Release v1.2.3 must be published and stable');
+    expect(() =>
+      plan({
+        refs: { 'v1.2.3': ref(MAIN_SHA) },
+        releases: [release('v1.2.3', { prerelease: true })],
+      }),
+    ).toThrow('GitHub Release v1.2.3 must be published and stable');
+  });
+
   test('rejects malformed or inconsistent existing release state', () => {
-    expect(() => plan({ refs: { 'v1.2': PRIOR_SHA } })).toThrow('unsupported or ambiguous version ref v1.2');
-    expect(() => plan({ refs: { 'v1.2.2': 'ABC' } })).toThrow(
+    expect(() => plan({ refs: { 'v1.2': ref(PRIOR_SHA) } })).toThrow('unsupported or ambiguous version ref v1.2');
+    expect(() => plan({ refs: { 'v1.2.2': ref('ABC') } })).toThrow(
       'target for v1.2.2 must be a lowercase full 40-character commit SHA',
     );
-    expect(() => plan({ releaseTags: ['v1.2.2'] })).toThrow('GitHub Release v1.2.2 has no corresponding immutable tag');
-    expect(() => plan({ refs: { 'v1.2.2': PRIOR_SHA }, releaseTags: ['v1.2.2', 'v1.2.2'] })).toThrow(
-      'duplicate GitHub Release v1.2.2',
+    expect(() => plan({ releases: [release('v1.2.2')] })).toThrow(
+      'GitHub Release v1.2.2 has no corresponding immutable tag',
     );
-    expect(() => plan({ releaseTags: ['v1.2.3-rc.1'] })).toThrow('unsupported or ambiguous release tag v1.2.3-rc.1');
+    expect(() =>
+      plan({
+        refs: { 'v1.2.2': ref(PRIOR_SHA) },
+        releases: [release('v1.2.2'), release('v1.2.2')],
+      }),
+    ).toThrow('duplicate GitHub Release v1.2.2');
+    expect(() => plan({ releases: [release('v1.2.3-rc.1')] })).toThrow(
+      'unsupported or ambiguous release tag v1.2.3-rc.1',
+    );
   });
 });
