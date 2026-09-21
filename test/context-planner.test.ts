@@ -237,6 +237,43 @@ test('packs exact provenance-bearing JSON within an aggregate UTF-8 limit', () =
   );
 });
 
+test('records deterministic analyzer coverage and unavailability inside the existing aggregate context budget', () => {
+  const bundle = packReviewContext(
+    [
+      {
+        source: {
+          source: 'deterministic-analysis',
+          sourceId: 'analyzer-report:v1',
+          revision: 'b'.repeat(40),
+          status: 'truncated',
+          acquiredBytes: 2_000,
+          includedBytes: 0,
+          reason: 'partial-coverage',
+        },
+        content: '{"version":1,"trust":"untrusted"}',
+      },
+    ],
+    {
+      ...runtime(),
+      deterministicAnalysis: {
+        mode: 'base-config',
+        configStatus: 'enabled',
+        coverage: 'partial',
+        runCount: 2,
+        acceptedObservations: 1,
+        skippedFiles: 3,
+        outOfScopeObservations: 2,
+        contextTruncated: true,
+        unavailableSourceCount: 3,
+      },
+    },
+  );
+  assert.equal(bundle.metadata.deterministicAnalysis?.coverage, 'partial');
+  assert.equal(bundle.metadata.deterministicAnalysis?.skippedFiles, 3);
+  assert.equal(bundle.metadata.unavailableSourceCount, 3);
+  assert.equal(bundle.metadata.truncated, true);
+});
+
 test('extracts only an explicitly labeled acceptance section', () => {
   const issue: GitHubIssueContext = {
     id: 10,

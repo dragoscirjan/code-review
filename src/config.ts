@@ -1,4 +1,5 @@
 import ms, { type StringValue } from 'ms';
+import type { DeterministicAnalyzerMode } from './analyzer-config';
 import { loadModelConfiguration, type ModelConnection } from './model';
 import type { ReviewBackend } from './review';
 
@@ -29,17 +30,19 @@ export interface ActionConfig {
   maxDiffBytes: number;
   minimumConfidence: number;
   maxInlineComments: number;
+  deterministicAnalyzers: DeterministicAnalyzerMode;
   timeoutMs: number;
 }
 
 export function managedCommentMarkers(backend: ReviewBackend): string[] {
-  const current = `<!-- code-review:${backend}:v5 -->`;
+  const current = `<!-- code-review:${backend}:v6 -->`;
+  const incremental = `<!-- code-review:${backend}:v5 -->`;
   const validated = `<!-- code-review:${backend}:v4 -->`;
   const structured = `<!-- code-review:${backend}:v3 -->`;
   const providerNeutral = `<!-- code-review:${backend}:openrouter-poc:v2 -->`;
   return backend === 'opencode'
-    ? [current, validated, structured, providerNeutral, '<!-- code-review:opencode-poc:v1 -->']
-    : [current, validated, structured, providerNeutral];
+    ? [current, incremental, validated, structured, providerNeutral, '<!-- code-review:opencode-poc:v1 -->']
+    : [current, incremental, validated, structured, providerNeutral];
 }
 
 function inputCandidates(name: string): string[] {
@@ -163,6 +166,10 @@ export function loadActionConfig(environment: NodeJS.ProcessEnv = process.env): 
     0,
     10,
   );
+  const deterministicAnalyzers = getActionInput('deterministic-analyzers', environment) ?? 'none';
+  if (deterministicAnalyzers !== 'none' && deterministicAnalyzers !== 'base-config') {
+    throw new Error('deterministic-analyzers must be none or base-config');
+  }
   const timeoutSeconds = parseInteger(
     getActionInput('timeout-seconds', environment) ?? '600',
     'timeout-seconds',
@@ -185,6 +192,7 @@ export function loadActionConfig(environment: NodeJS.ProcessEnv = process.env): 
     maxDiffBytes,
     minimumConfidence,
     maxInlineComments,
+    deterministicAnalyzers,
     timeoutMs: timeoutSeconds * 1_000,
   };
 }

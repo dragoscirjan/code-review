@@ -236,6 +236,7 @@ test('same-head reuse rejects title, body, linked-issue, context, and fixed-poli
     policyDigest: `sha256:${'P'.repeat(43)}`,
     pullRequest: { title: 'Title', body: 'Body', author: 'author' },
     contextDigest: `sha256:${'C'.repeat(43)}`,
+    analyzerResultDigest: `sha256:${'A'.repeat(43)}`,
     linkedIssues: [{ number: 22, digest: 'a'.repeat(64) }],
   };
   const original = reviewInputDigest(baseline);
@@ -244,6 +245,7 @@ test('same-head reuse rejects title, body, linked-issue, context, and fixed-poli
     reviewInputDigest({ ...baseline, pullRequest: { ...baseline.pullRequest, body: 'Changed' } }),
     reviewInputDigest({ ...baseline, pullRequest: { ...baseline.pullRequest, author: 'changed-author' } }),
     reviewInputDigest({ ...baseline, contextDigest: `sha256:${'D'.repeat(43)}` }),
+    reviewInputDigest({ ...baseline, analyzerResultDigest: `sha256:${'B'.repeat(43)}` }),
     reviewInputDigest({ ...baseline, linkedIssues: [{ number: 22, digest: 'b'.repeat(64) }] }),
     reviewInputDigest(baseline, {
       ...REVIEW_SEMANTIC_VERSIONS,
@@ -270,7 +272,7 @@ test('same-head reuse rejects title, body, linked-issue, context, and fixed-poli
 });
 
 test('policy and scope bind state without credential material', () => {
-  const policy = reviewPolicyDigest({
+  const policyInput = {
     backend: 'opencode',
     model: 'model',
     modelApi: 'openai-completions',
@@ -286,7 +288,13 @@ test('policy and scope bind state without credential material', () => {
     indexer: 'gitnexus',
     opencodeVersion: '1.0.0',
     piVersion: '1.0.0',
-  });
+    deterministicAnalyzerManifestDigest: `sha256:${'M'.repeat(43)}`,
+  } as const;
+  const policy = reviewPolicyDigest(policyInput);
+  assert.notEqual(
+    policy,
+    reviewPolicyDigest({ ...policyInput, deterministicAnalyzerManifestDigest: `sha256:${'N'.repeat(43)}` }),
+  );
   assert.match(policy, /^sha256:[A-Za-z0-9_-]{43}$/u);
   const value = state({ policyDigest: policy });
   assert.equal(

@@ -1,3 +1,4 @@
+import type { AnalyzerFindingCandidate } from './analyzer-contract';
 import type { ReviewFinding, ReviewResultV1 } from './review-contract';
 import { fingerprintFinding, type FindingFingerprint } from './review-lifecycle';
 import type { UnifiedDiff, UnifiedDiffFile, UnifiedDiffLine } from './unified-diff';
@@ -20,8 +21,11 @@ export interface ReviewCounts {
   inlineOmitted: number;
 }
 
+export type FindingOrigin = { kind: 'model' } | AnalyzerFindingCandidate['origin'];
+
 export interface ValidatedFinding extends ReviewFinding, FindingFingerprint {
   sourceIndex: number;
+  origin?: FindingOrigin;
 }
 
 export interface ReviewAssessment {
@@ -76,6 +80,7 @@ function lexicalFinding(finding: ReviewFinding): string {
     finding.evidence,
     finding.explanation,
     finding.fix,
+    'origin' in finding ? finding.origin : undefined,
   ]);
 }
 
@@ -106,6 +111,7 @@ export function assessReview(
   diff: UnifiedDiff,
   policy: FindingPolicy,
   secrets: readonly string[] = [],
+  analyzerFindings: readonly AnalyzerFindingCandidate[] = [],
 ): ReviewAssessment {
   if (policy.minimumConfidence < 0 || policy.minimumConfidence > 1) {
     throw new Error('minimumConfidence must be between 0 and 1');
@@ -122,7 +128,15 @@ export function assessReview(
   let unmapped = 0;
   let belowThreshold = 0;
   const mapped: ValidatedFinding[] = [];
-  review.findings.forEach((finding, sourceIndex) => {
+  const candidates: Array<{ finding: ReviewFinding; origin: FindingOrigin; sourceIndex: number }> = [
+    ...review.findings.map((finding, sourceIndex) => ({ finding, origin: { kind: 'model' } as const, sourceIndex })),
+    ...analyzerFindings.map((finding, index) => ({
+      finding,
+      origin: finding.origin,
+      sourceIndex: review.findings.length + index,
+    })),
+  ];
+  candidates.forEach(({ finding, origin, sourceIndex }) => {
     const file = resolveFile(diff, finding.location.path, finding.location.side);
     if (!file?.apiPath) {
       unmapped += 1;
@@ -150,6 +164,7 @@ export function assessReview(
     const validated = {
       ...finding,
       sourceIndex,
+      origin,
       location: { ...finding.location, path: file.apiPath },
       evidence,
       explanation: normalizeLineEndings(finding.explanation).trim(),
@@ -164,11 +179,13 @@ export function assessReview(
     const previous = winners.get(key);
     if (!previous || compareFindings(finding, previous) < 0) winners.set(key, finding);
   }
-  const findings = [...winners.values()].sort(compareFindings);
-  const duplicates = mapped.length - findings.length;
+  const uniqueFindings = [...winners.values()].sort(compareFindings);
+  const duplicates = mapped.length - uniqueFindings.length;
+  const findings = uniqueFindings.slice(0, 10);
+  rejected += uniqueFindings.length - findings.length;
   const inlineFindings = findings.slice(0, policy.maximumInlineComments);
   const counts: ReviewCounts = {
-    received: review.findings.length,
+    received: candidates.length,
     accepted: findings.length,
     rejected,
     unmapped,

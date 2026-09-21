@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import type { AnalyzerSummary } from './analyzer';
+import type { AnalyzerFindingCandidate } from './analyzer-contract';
 import { renderComment, renderInlineComment } from './comment';
 import type { ReviewContextMetadata } from './context-planner';
 import { assessReview, type ReviewAssessment, type ValidatedFinding } from './finding-validation';
@@ -42,6 +44,7 @@ export interface ExecuteAndPublishReviewInput {
   minimumConfidence: number;
   maximumInlineComments: number;
   contextMetadata?: ReviewContextMetadata;
+  analyzer?: { findings: readonly AnalyzerFindingCandidate[]; summary: AnalyzerSummary };
   lifecycle?: {
     apiUrl: string;
     policyDigest: string;
@@ -222,6 +225,7 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
         maximumInlineComments: input.maximumInlineComments,
       },
       input.secrets,
+      input.analyzer?.findings ?? [],
     ),
     input.secrets,
   );
@@ -231,7 +235,10 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
   const carried = lifecycle?.carried ?? [];
   const reconciled = reconcileFindingStates(assessment.findings, priorActive, input.pullRequest.headSha, carried);
   const persistedActive = reconciled.active.slice(0, MAX_REVIEW_STATE_FINDINGS);
-  const coverageComplete = !input.diff.truncated && persistedActive.length === reconciled.active.length;
+  const coverageComplete =
+    !input.diff.truncated &&
+    input.analyzer?.summary.coverage !== 'partial' &&
+    persistedActive.length === reconciled.active.length;
   const completedThroughHeadSha = coverageComplete
     ? input.pullRequest.headSha
     : (lifecycle?.priorState?.completedThroughHeadSha ?? null);
@@ -321,6 +328,7 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
     diffTruncated: input.diff.truncated,
     originalDiffBytes: input.diff.originalBytes,
     contextMetadata: input.contextMetadata,
+    analyzerSummary: input.analyzer?.summary,
     ...(stateLine && lifecycle
       ? {
           lifecycle: {

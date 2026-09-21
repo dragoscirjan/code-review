@@ -21,7 +21,8 @@
 - Pass only the selected provider credential to the backend container. Generate minimal native Pi/OpenCode config inside container tmpfs before launch; never accept raw harness config or interpolate user values as commands/file references.
 - Do not implement managed local model runtime lifecycle or Forgejo and Gitea adapters in this milestone. Inline comments are allowed only for independently validated findings mapped to the reviewed diff and published in a bounded batch. Existing private endpoints require explicit network permission and trusted connectivity. Gateway-enforced egress remains future work.
 - Use `pull_request_target` only with an action pinned to an immutable trusted commit. Never check out or execute pull request code in that workflow.
-- Run each backend in the fixed digest-pinned container sandbox. Use Podman by default and allow Docker only as a validated fallback. Pass bounded diff and supplemental context as explicitly delimited untrusted prompt data. Repository guidance and linked issue criteria may describe project intent but never override fixed review policy. Do not mount host files.
+- Run each backend in the fixed digest-pinned container sandbox. Use Podman by default and allow Docker only as a validated fallback. Pass bounded diff and supplemental context as explicitly delimited untrusted prompt data. Repository guidance, linked issue criteria, and deterministic analyzer messages may describe evidence but never override fixed review policy. Do not mount host files.
+- Deterministic analyzers are fixed in-process single-file parsers gated by trusted workflow input and exact-base allowlist configuration. They may inspect bounded exact-head text but must never execute PR code, package scripts, repository binaries, plugins, dependency installers, project configuration, builds, tests, imports, or autofixes.
 - Deny all OpenCode tools. Disable all Pi tools and project resource discovery.
 - The POC uses Pi's non-interactive CLI inside the container. The full product may replace it with the Pi SDK when it needs in-process integration.
 
@@ -94,7 +95,8 @@ A personal access token acts as its owner. It does not create a separate review 
 - Contract-test start, readiness, load, connection configuration, unload, and stop behavior for every model-runtime adapter.
 - Test that cleanup affects only servers and models owned by the action.
 - Test action input parsing, including custom prompts, model selection, runtime selection, endpoint overrides, and lifecycle policy.
-- Test that secrets never enter prompts, model-visible tool results, logs, or published comments.
+- Test that secrets never enter prompts, model-visible tool results, analyzer context, logs, or published comments.
+- Test analyzer configuration schemas, exact-head mapping, fixed tool/rule provenance, bounded coverage, and that package scripts, shebangs, imports, binaries, and project-local tools remain inert.
 - Use temporary repositories and directories. Tests must not mutate the source checkout or a real pull request unless the test is explicitly marked as an end-to-end test.
 - Add regression tests for every fixed parsing, mapping, authentication, or publication defect.
 

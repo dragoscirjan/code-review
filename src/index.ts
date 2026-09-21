@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { appendFile } from 'node:fs/promises';
+import { emptyDeterministicAnalysis, runDeterministicAnalysis } from './analyzer';
+import { loadAnalyzerConfiguration } from './analyzer-config';
 import { getActionInput, loadActionConfig, managedCommentMarkers } from './config';
 import { truncateUtf8 } from './context-planner';
 import { GitHubClient, loadPullRequestEvent, selectManagedComment } from './github';
@@ -52,6 +54,22 @@ async function main(): Promise<void> {
   const authoritativePullRequest = snapshot.pullRequest;
   const fullDiff = snapshot.diff;
   const actor = await client.getAuthenticatedActor();
+  const analyzerConfiguration = await loadAnalyzerConfiguration({
+    client,
+    pullRequest: authoritativePullRequest,
+    mode: config.deterministicAnalyzers,
+  });
+  const analyzer =
+    analyzerConfiguration.analyzers.length === 0
+      ? emptyDeterministicAnalysis(analyzerConfiguration)
+      : await runDeterministicAnalysis({
+          client,
+          pullRequest: authoritativePullRequest,
+          diff: fullDiff,
+          configuration: analyzerConfiguration,
+          secrets,
+          assertFresh: () => assertSnapshotFresh(client, authoritativePullRequest, snapshot.revision),
+        });
   console.log(
     `Fetched ${fullDiff.originalBytes} diff bytes${fullDiff.truncated ? `; safely limited to ${config.maxDiffBytes}` : ''}`,
   );
@@ -75,6 +93,7 @@ async function main(): Promise<void> {
     indexer: config.codeIndexer,
     opencodeVersion: config.opencodeVersion,
     piVersion: config.piVersion,
+    deterministicAnalyzerManifestDigest: analyzerConfiguration.manifestDigest,
   });
   if (config.codeIndexer !== 'none') {
     console.log(`Installing and running ${config.codeIndexer} against the exact base revision`);
@@ -86,6 +105,8 @@ async function main(): Promise<void> {
     indexer: config.codeIndexer,
     cacheKey: config.codeIndexCacheKey,
     cacheTtlMs: config.codeIndexCacheTtlMs,
+    analyzerItems: analyzer.contextItems,
+    analyzerSummary: analyzer.summary,
   });
   const codeIndexCacheHit = reviewContext.cacheHit;
   console.log(
@@ -99,6 +120,7 @@ async function main(): Promise<void> {
       author: truncateUtf8(authoritativePullRequest.author, MAX_REVIEW_PR_AUTHOR_BYTES).value,
     },
     contextDigest: reviewContext.bundle.digest,
+    analyzerResultDigest: analyzer.report.resultDigest,
     linkedIssues: reviewContext.linkedIssueFingerprints,
   });
 
@@ -200,6 +222,10 @@ async function main(): Promise<void> {
     minimumConfidence: config.minimumConfidence,
     maximumInlineComments: config.maxInlineComments,
     contextMetadata: reviewContext.bundle.metadata,
+    analyzer: {
+      findings: incremental.mode === 'no-change' ? [] : analyzer.findings,
+      summary: analyzer.summary,
+    },
     lifecycle: {
       apiUrl,
       policyDigest,
@@ -223,6 +249,10 @@ async function main(): Promise<void> {
   await setOutput('context-truncated', String(reviewContext.bundle.metadata.truncated));
   await setOutput('context-unavailable-source-count', String(reviewContext.bundle.metadata.unavailableSourceCount));
   await setOutput('review-mode', incremental.mode);
+  await setOutput('analyzer-coverage', analyzer.summary.coverage);
+  await setOutput('analyzer-run-count', String(analyzer.summary.runCount));
+  await setOutput('analyzer-observation-count', String(analyzer.summary.acceptedObservations));
+  await setOutput('analyzer-skipped-file-count', String(analyzer.summary.skippedFiles));
   await setOutput('new-finding-count', String(publication.lifecycle.counts.new));
   await setOutput('unchanged-finding-count', String(publication.lifecycle.counts.unchanged));
   await setOutput('resolved-finding-count', String(publication.lifecycle.counts.resolved));

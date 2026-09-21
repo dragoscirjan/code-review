@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
+import type { AnalyzerSummary } from '../src/analyzer';
+import type { AnalyzerFindingCandidate } from '../src/analyzer-contract';
 import type {
   AuthenticatedActor,
   GitHubComment,
@@ -131,6 +133,31 @@ function lifecycleInput() {
     lease: null,
   };
 }
+
+const analyzerSummary: AnalyzerSummary = {
+  mode: 'base-config',
+  configStatus: 'enabled',
+  manifestDigest: `sha256:${'M'.repeat(43)}`,
+  inputDigest: `sha256:${'A'.repeat(43)}`,
+  resultDigest: `sha256:${'R'.repeat(43)}`,
+  coverage: 'complete',
+  runCount: 1,
+  acceptedObservations: 1,
+  skippedFiles: 0,
+  outOfScopeObservations: 0,
+  contextTruncated: false,
+  unavailableSourceCount: 0,
+  runs: [
+    {
+      analyzer: 'typescript-syntax',
+      analyzerVersion: 'typescript@5.9.3-syntax',
+      status: 'complete',
+      analyzedFiles: 1,
+      skippedFiles: 0,
+      acceptedObservations: 1,
+    },
+  ],
+};
 
 function input(
   executeReview: () => Promise<ReviewResultV1>,
@@ -651,6 +678,38 @@ test('aborts truncated compare-failure fallback when an affected hunk is omitted
   );
   assert.equal(backendCalls, 0);
   assert.deepEqual(spy.events, []);
+});
+
+test('analyzer candidates share publication validation and partial analyzer coverage cannot advance lifecycle completion', async () => {
+  const spy = publicationSpy();
+  const candidate: AnalyzerFindingCandidate = {
+    ...finding(),
+    origin: {
+      kind: 'analyzer',
+      analyzer: 'typescript-syntax',
+      analyzerVersion: 'typescript@5.9.3-syntax',
+      ruleId: 'syntax-error',
+      ruleRevision: 1,
+      observationDigest: `sha256:${'O'.repeat(43)}`,
+    },
+  };
+  const result = await executeAndPublishReview(
+    input(async () => parseReviewResult('{"version":1,"outcome":"clean","findings":[]}'), spy, {
+      pullRequest: lifecyclePullRequest,
+      markers: ['<!-- code-review:opencode:v6 -->'],
+      lifecycle: lifecycleInput(),
+      analyzer: {
+        findings: [candidate],
+        summary: { ...analyzerSummary, coverage: 'partial', skippedFiles: 1 },
+      },
+    }),
+  );
+  assert.equal(result.assessment.counts.accepted, 1);
+  assert.equal(result.assessment.findings[0]?.origin?.kind, 'analyzer');
+  assert.equal(result.state?.coverageComplete, false);
+  assert.equal(result.state?.completedThroughHeadSha, null);
+  assert.match(spy.publishedBody(), /typescript-syntax/);
+  assert.match(spy.publishedBody(), /partial coverage/);
 });
 
 test('state freshness failure prevents backend and all publication', async () => {
