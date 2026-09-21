@@ -89,6 +89,8 @@ test('rejects evidence spoofing, whitespace changes, Unicode substitutions, mult
     ['provider-secret'],
   );
   assert.equal(result.counts.rejected, 5);
+  assert.equal(result.counts.evidenceRejected, 5);
+  assert.equal(result.counts.globalLimitOmitted, 0);
 });
 
 test('treats findings in safely omitted truncated hunks as unmapped', () => {
@@ -127,28 +129,45 @@ test('applies an inclusive confidence threshold and zero/maximum inline limits',
   assert.equal(below.counts.accepted, 0);
 });
 
-test('selects the configured maximum of ten unique validated inline findings', () => {
-  const lines = Array.from({ length: 10 }, (_, index) => `line-${index + 1}`);
+test('selects the global maximum of ten unique validated findings and reports the omitted remainder', () => {
+  const lines = Array.from({ length: 11 }, (_, index) => `line-${index + 1}`);
   const tenLineDiff = parseUnifiedDiff(
     [
       'diff --git a/new.ts b/new.ts',
       '--- /dev/null',
       '+++ b/new.ts',
-      '@@ -0,0 +1,10 @@',
+      '@@ -0,0 +1,11 @@',
       ...lines.map((line) => `+${line}`),
     ].join('\n'),
   );
   const result = assessReview(
     review(
-      lines.map((evidence, index) =>
-        finding({ location: { path: 'new.ts', side: 'RIGHT', line: index + 1 }, evidence }),
-      ),
+      lines
+        .slice(0, 10)
+        .map((evidence, index) => finding({ location: { path: 'new.ts', side: 'RIGHT', line: index + 1 }, evidence })),
     ),
     tenLineDiff,
     { minimumConfidence: 0, maximumInlineComments: 10 },
+    [],
+    [
+      {
+        ...finding({ location: { path: 'new.ts', side: 'RIGHT', line: 11 }, evidence: 'line-11' }),
+        origin: {
+          kind: 'analyzer',
+          analyzer: 'conflict-markers',
+          analyzerVersion: 'code-review-conflict@1.0.0',
+          ruleId: 'unresolved-conflict-marker',
+          ruleRevision: 1,
+          observationDigest: `sha256:${'A'.repeat(43)}`,
+        },
+      },
+    ],
   );
   assert.equal(result.counts.accepted, 10);
   assert.equal(result.counts.inlineSelected, 10);
+  assert.equal(result.counts.rejected, 1);
+  assert.equal(result.counts.evidenceRejected, 0);
+  assert.equal(result.counts.globalLimitOmitted, 1);
 });
 
 test('deduplicates by canonical anchor despite category, prose, severity, and confidence variants', () => {

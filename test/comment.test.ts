@@ -33,6 +33,8 @@ function assessment(
       received: findings.length,
       accepted: findings.length,
       rejected: 0,
+      evidenceRejected: 0,
+      globalLimitOmitted: 0,
       unmapped: 0,
       duplicates: 0,
       belowThreshold: 0,

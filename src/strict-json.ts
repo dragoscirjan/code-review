@@ -55,9 +55,28 @@ export function parseStrictJson(raw: string, maximumBytes: number, maximumDepth 
   }
 
   function number(): void {
-    const match = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/u.exec(raw.slice(offset));
-    if (!match) fail('invalid-json', offset);
-    offset += match[0].length;
+    const start = offset;
+    if (raw[offset] === '-') offset += 1;
+    if (raw[offset] === '0') offset += 1;
+    else {
+      const first = raw[offset];
+      if (first === undefined || first < '1' || first > '9') fail('invalid-json', start);
+      do offset += 1;
+      while ((raw[offset] ?? '') >= '0' && (raw[offset] ?? '') <= '9');
+    }
+    if (raw[offset] === '.') {
+      offset += 1;
+      const fractionStart = offset;
+      while ((raw[offset] ?? '') >= '0' && (raw[offset] ?? '') <= '9') offset += 1;
+      if (offset === fractionStart) fail('invalid-json', offset);
+    }
+    if (raw[offset] === 'e' || raw[offset] === 'E') {
+      offset += 1;
+      if (raw[offset] === '+' || raw[offset] === '-') offset += 1;
+      const exponentStart = offset;
+      while ((raw[offset] ?? '') >= '0' && (raw[offset] ?? '') <= '9') offset += 1;
+      if (offset === exponentStart) fail('invalid-json', offset);
+    }
   }
 
   function value(depth: number): void {

@@ -1,54 +1,30 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'vitest';
-import { runReview, type ReviewBackend } from '../src/review';
+import { main } from '../src/review-evaluation-cli';
 
-const enabled = process.env.RUN_LLM_INTEGRATION === '1';
-const openRouterApiKey = process.env.OPENROUTER_API_KEY ?? '';
+const enabled = process.env.RUN_LLM_EVALUATION === '1';
 
-for (const backend of ['opencode', 'pi'] as const) {
-  test(`${backend} reviews a diff through OpenRouter`, { skip: !enabled }, async () => {
-    assert.ok(openRouterApiKey, 'OPENROUTER_API_KEY is required');
-    const review = await runReview({
-      backend: backend as ReviewBackend,
-      containerEngine: process.env.CONTAINER_ENGINE === 'docker' ? 'docker' : 'podman',
-      connection: {
-        api: 'openai-completions',
-        baseUrl: 'https://openrouter.ai/api/v1',
-        network: 'remote',
-        modelId: 'z-ai/glm-5.3-flash',
-        contextWindow: 131072,
-        maxOutputTokens: 8192,
-        credential: { type: 'bearer', value: openRouterApiKey },
-      },
-      opencodeVersion: '1.18.31',
-      piVersion: '0.85.1',
-      customPrompt: 'Identify the concrete regression.',
-      timeoutMs: 240_000,
-      pullRequest: {
-        owner: 'example',
-        repository: 'repository',
-        number: 1,
-        title: 'Change addition',
-        body: '',
-        baseSha: 'base',
-        headSha: 'head',
-        author: 'tester',
-        url: 'https://example.test/pull/1',
-      },
-      diff: {
-        text: [
-          'diff --git a/math.ts b/math.ts',
-          '--- a/math.ts',
-          '+++ b/math.ts',
-          '@@ -1 +1 @@',
-          '-export const add = (a: number, b: number) => a + b;',
-          '+export const add = (a: number, b: number) => a - b;',
-        ].join('\n'),
-        originalBytes: 190,
-        truncated: false,
-      },
+test('runs the opt-in provider-neutral live evaluation corpus', { skip: !enabled, timeout: 30 * 60_000 }, async () => {
+  assert.ok(process.env.REVIEW_EVALUATION_MODEL_CONFIG, 'REVIEW_EVALUATION_MODEL_CONFIG is required');
+  const root = await mkdtemp(join(tmpdir(), 'code-review-live-evaluation-'));
+  try {
+    const output = join(root, 'reports');
+    const result = await main(['--live'], {
+      ...process.env,
+      RUNNER_TEMP: root,
+      REVIEW_EVALUATION_OUTPUT_DIR: output,
     });
-    assert.equal(review.outcome, 'findings');
-    assert.match(JSON.stringify(review.findings), /subtract|subtraction/i);
-  });
-}
+    assert.equal(result, 0);
+    const report = JSON.parse(await readFile(join(output, 'review-evaluation.json'), 'utf8')) as {
+      run: { mode: string };
+      metrics: { totalRuns: number };
+    };
+    assert.equal(report.run.mode, 'live');
+    assert.ok(report.metrics.totalRuns > 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "minimumPrecision": 1,
+  "minimumRecall": 1,
+  "minimumLineMappingAccuracy": 1,
+  "minimumCleanCaseAccuracy": 1,
+  "maximumDuplicateFindingRate": 0,
+  "maximumEvidenceRejectedFindingRate": 0,
+  "maximumGlobalLimitOmittedFindingRate": 0,
+  "maximumMalformedOutputRate": 0,
+  "maximumExecutionFailureRate": 0,
+  "maximumP95LatencyMs": 250
+}

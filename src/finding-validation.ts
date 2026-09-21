@@ -12,6 +12,8 @@ export interface ReviewCounts {
   received: number;
   accepted: number;
   rejected: number;
+  evidenceRejected: number;
+  globalLimitOmitted: number;
   unmapped: number;
   duplicates: number;
   belowThreshold: number;
@@ -124,7 +126,7 @@ export function assessReview(
     throw new Error('maximumInlineComments must be an integer between 0 and 10');
   }
 
-  let rejected = 0;
+  let evidenceRejected = 0;
   let unmapped = 0;
   let belowThreshold = 0;
   const mapped: ValidatedFinding[] = [];
@@ -154,7 +156,7 @@ export function assessReview(
       containsSecret(finding.location.path, secrets) ||
       containsSecret(evidence, secrets)
     ) {
-      rejected += 1;
+      evidenceRejected += 1;
       return;
     }
     if (finding.confidence < policy.minimumConfidence) {
@@ -182,12 +184,15 @@ export function assessReview(
   const uniqueFindings = [...winners.values()].sort(compareFindings);
   const duplicates = mapped.length - uniqueFindings.length;
   const findings = uniqueFindings.slice(0, 10);
-  rejected += uniqueFindings.length - findings.length;
+  const globalLimitOmitted = uniqueFindings.length - findings.length;
+  const rejected = evidenceRejected + globalLimitOmitted;
   const inlineFindings = findings.slice(0, policy.maximumInlineComments);
   const counts: ReviewCounts = {
     received: candidates.length,
     accepted: findings.length,
     rejected,
+    evidenceRejected,
+    globalLimitOmitted,
     unmapped,
     duplicates,
     belowThreshold,

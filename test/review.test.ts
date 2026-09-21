@@ -22,6 +22,7 @@ import {
   buildReviewPrompt,
   runReview,
   wrapUntrustedData,
+  ReviewExecutionError,
   SANDBOX_IMAGE,
   type ReviewBackend,
 } from '../src/review';
@@ -306,7 +307,13 @@ for (const backend of ['opencode', 'pi'] as const) {
     await chmod(fakePodman, 0o755);
 
     try {
-      await assert.rejects(runReview(request(backend, directory)), /one valid JSON document/);
+      await assert.rejects(
+        runReview(request(backend, directory)),
+        (error: unknown) =>
+          error instanceof ReviewExecutionError &&
+          error.kind === 'malformed-output' &&
+          /one valid JSON document/u.test(error.message),
+      );
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
