@@ -10,7 +10,7 @@
   },
   "scripts": {
     "audit": "npm audit --audit-level=moderate",
-    "build": "esbuild src/index.ts --bundle --platform=node --target=node24 --format=cjs --minify-whitespace --legal-comments=none --outfile=dist/index.js && node scripts/normalize-bundle.mjs",
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node24 --format=cjs --minify-whitespace --legal-comments=none --outfile=dist/index.js && esbuild src/action-release-command.ts --bundle --platform=node --target=node24 --format=cjs --minify-whitespace --legal-comments=none --outfile=dist/action-release.js && node scripts/normalize-bundle.mjs",
     "commitlint": "commitlint --config commitlint.config.mjs",
     "duplicate-check": "jscpd ./src",
     "evaluation": "node scripts/run-review-evaluation.mjs --check",
@@ -21,6 +21,7 @@
     "lint:check": "eslint .",
     "lint-staged": "lint-staged",
     "prepare": "husky",
+    "release:plan": "node dist/action-release.js plan",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:integration": "npm run evaluation:live",

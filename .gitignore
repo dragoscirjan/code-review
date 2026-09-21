@@ -89,6 +89,7 @@ out
 dist
 !/dist/
 !/dist/index.js
+!/dist/action-release.js
 .output
 
 # Gatsby files
