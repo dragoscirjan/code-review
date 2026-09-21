@@ -14,7 +14,8 @@ export interface ActionReleaseState {
 export interface ActionReleasePlan {
   version: ActionReleaseVersion;
   targetSha: string;
-  previousMajorVersion: string | null;
+  majorTargetSha: string;
+  latestMajorVersion: string | null;
   createVersionTag: boolean;
   updateMajorTag: boolean;
   createGitHubRelease: boolean;
@@ -25,6 +26,7 @@ export interface PlanActionReleaseInput extends ActionReleaseState {
   version: string;
   targetSha: string;
   mainSha: string;
+  targetIsMainAncestor: boolean;
 }
 
 interface ParsedVersion extends ActionReleaseVersion {
@@ -120,36 +122,37 @@ export function planActionRelease(input: PlanActionReleaseInput): ActionReleaseP
   const version = parseVersion(input.version);
   assertCommitSha(input.targetSha, 'targetSha');
   assertCommitSha(input.mainSha, 'mainSha');
-  if (input.targetSha !== input.mainSha) {
-    throw releaseError('targetSha must equal the current default-branch revision');
-  }
 
   const { fullVersions, releaseTags } = validateState(input);
   const existingVersionTarget = input.refs[version.tag];
   if (existingVersionTarget && existingVersionTarget !== input.targetSha) {
     throw releaseError(`immutable tag ${version.tag} already points to another commit`);
   }
+  const isRetry = existingVersionTarget === input.targetSha;
+  if (input.targetSha !== input.mainSha && (!isRetry || !input.targetIsMainAncestor)) {
+    throw releaseError('a new target must be the current main revision; retries must remain ancestors of main');
+  }
 
   const sameMajor = fullVersions
     .filter((entry) => entry.version.major === version.major)
     .sort((left, right) => compareVersions(left.version, right.version));
   const latest = sameMajor.at(-1);
-  if (latest && compareVersions(version, latest.version) < 0) {
-    throw releaseError(`${version.tag} would regress ${version.majorTag} from ${latest.version.tag}`);
+  const comparedWithLatest = latest ? compareVersions(version, latest.version) : 1;
+  if (comparedWithLatest < 0 && !isRetry) {
+    throw releaseError(`${version.tag} would regress ${version.majorTag} from ${latest?.version.tag}`);
   }
 
+  const majorTargetSha = comparedWithLatest < 0 ? (latest?.targetSha as string) : input.targetSha;
   const currentMajorTarget = input.refs[version.majorTag];
-  if (currentMajorTarget && currentMajorTarget !== input.targetSha) {
-    const knownTargets = new Set(
-      sameMajor.filter((entry) => compareVersions(entry.version, version) < 0).map((entry) => entry.targetSha),
-    );
+  if (currentMajorTarget && currentMajorTarget !== majorTargetSha) {
+    const knownTargets = new Set(sameMajor.map((entry) => entry.targetSha));
     if (!knownTargets.has(currentMajorTarget)) {
-      throw releaseError(`${version.majorTag} does not point to a known earlier release in its major line`);
+      throw releaseError(`${version.majorTag} does not point to a known release in its major line`);
     }
   }
 
   const createVersionTag = existingVersionTarget === undefined;
-  const updateMajorTag = currentMajorTarget !== input.targetSha;
+  const updateMajorTag = currentMajorTarget !== majorTargetSha;
   const createGitHubRelease = !releaseTags.has(version.tag);
   return {
     version: {
@@ -160,7 +163,8 @@ export function planActionRelease(input: PlanActionReleaseInput): ActionReleaseP
       patch: version.patch,
     },
     targetSha: input.targetSha,
-    previousMajorVersion: latest && latest.version.tag !== version.tag ? latest.version.tag : null,
+    majorTargetSha,
+    latestMajorVersion: latest?.version.tag ?? null,
     createVersionTag,
     updateMajorTag,
     createGitHubRelease,

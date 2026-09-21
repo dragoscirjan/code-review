@@ -10,6 +10,7 @@ function plan(overrides: Partial<Parameters<typeof planActionRelease>[0]> = {}):
     version: 'v1.2.3',
     targetSha: MAIN_SHA,
     mainSha: MAIN_SHA,
+    targetIsMainAncestor: true,
     refs: {},
     releaseTags: [],
     ...overrides,
@@ -63,7 +64,8 @@ describe('planActionRelease', () => {
         patch: '3',
       },
       targetSha: MAIN_SHA,
-      previousMajorVersion: null,
+      majorTargetSha: MAIN_SHA,
+      latestMajorVersion: null,
       createVersionTag: true,
       updateMajorTag: true,
       createGitHubRelease: true,
@@ -78,7 +80,8 @@ describe('planActionRelease', () => {
         releaseTags: ['v1.2.2'],
       }),
     ).toMatchObject({
-      previousMajorVersion: 'v1.2.2',
+      majorTargetSha: MAIN_SHA,
+      latestMajorVersion: 'v1.2.2',
       createVersionTag: true,
       updateMajorTag: true,
       createGitHubRelease: true,
@@ -92,7 +95,7 @@ describe('planActionRelease', () => {
         refs: { 'v2.0.0': OTHER_SHA, v2: OTHER_SHA },
         releaseTags: ['v2.0.0'],
       }),
-    ).toMatchObject({ previousMajorVersion: null, createVersionTag: true, updateMajorTag: true });
+    ).toMatchObject({ latestMajorVersion: null, createVersionTag: true, updateMajorTag: true });
   });
 
   test('supports safe retries after partial or complete publication', () => {
@@ -120,8 +123,35 @@ describe('planActionRelease', () => {
     });
   });
 
+  test('finishes an existing older release without downgrading the major alias', () => {
+    expect(
+      plan({
+        version: 'v1.2.2',
+        targetSha: PRIOR_SHA,
+        mainSha: MAIN_SHA,
+        targetIsMainAncestor: true,
+        refs: { 'v1.2.2': PRIOR_SHA, 'v1.2.3': MAIN_SHA, v1: MAIN_SHA },
+        releaseTags: ['v1.2.3'],
+      }),
+    ).toMatchObject({
+      targetSha: PRIOR_SHA,
+      majorTargetSha: MAIN_SHA,
+      latestMajorVersion: 'v1.2.3',
+      createVersionTag: false,
+      updateMajorTag: false,
+      createGitHubRelease: true,
+    });
+  });
+
   test('rejects non-main and malformed commit identities', () => {
-    expect(() => plan({ targetSha: OTHER_SHA })).toThrow('targetSha must equal');
+    expect(() => plan({ targetSha: OTHER_SHA })).toThrow('a new target must be the current main revision');
+    expect(() =>
+      plan({
+        targetSha: PRIOR_SHA,
+        refs: { 'v1.2.3': PRIOR_SHA },
+        targetIsMainAncestor: false,
+      }),
+    ).toThrow('retries must remain ancestors of main');
     expect(() => plan({ targetSha: 'ABC', mainSha: 'ABC' })).toThrow(
       'targetSha must be a lowercase full 40-character commit SHA',
     );
@@ -141,13 +171,13 @@ describe('planActionRelease', () => {
   });
 
   test('rejects an alias that cannot be proven to be a known earlier release', () => {
-    expect(() => plan({ refs: { v1: OTHER_SHA } })).toThrow('v1 does not point to a known earlier release');
+    expect(() => plan({ refs: { v1: OTHER_SHA } })).toThrow('v1 does not point to a known release');
     expect(() =>
       plan({
         refs: { 'v1.2.2': PRIOR_SHA, v1: OTHER_SHA },
         releaseTags: ['v1.2.2'],
       }),
-    ).toThrow('v1 does not point to a known earlier release');
+    ).toThrow('v1 does not point to a known release');
   });
 
   test('rejects malformed or inconsistent existing release state', () => {
