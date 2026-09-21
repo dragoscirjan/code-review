@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "minimumPrecisionDelta": 0,
+  "minimumRecallDelta": 0,
+  "minimumLineMappingAccuracyDelta": 0,
+  "minimumCleanCaseAccuracyDelta": 0,
+  "maximumP95LatencyMultiplier": 5,
+  "maximumP95LatencyMs": 1250,
+  "maximumReservedTokens": 300000
+}

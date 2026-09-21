@@ -17,10 +17,27 @@ import {
   renderEvaluationMarkdown,
   type EvaluationRunner,
 } from './review-evaluation';
-import { createEvaluationOutputDirectory, writeEvaluationArtifacts } from './review-evaluation-artifacts';
+import {
+  createEvaluationOutputDirectory,
+  SPECIALIST_EVALUATION_JSON_FILENAME,
+  SPECIALIST_EVALUATION_MARKDOWN_FILENAME,
+  writeEvaluationArtifacts,
+} from './review-evaluation-artifacts';
+import {
+  evaluateSpecialistRecordings,
+  MAX_SPECIALIST_EVALUATION_BYTES,
+  parseSpecialistEvaluationRecordings,
+  parseSpecialistEvaluationThresholds,
+  renderSpecialistEvaluationJson,
+  renderSpecialistEvaluationMarkdown,
+} from './review-specialist-evaluation';
+import { executeReviewStrategy } from './review-specialists';
+import { selectReviewStrategy, type RequestedReviewStrategy } from './review-strategy';
 
 const CORPUS_PATH = 'test/fixtures/review-evaluation/corpus.v1.json';
 const THRESHOLDS_PATH = 'test/fixtures/review-evaluation/thresholds.v1.json';
+const SPECIALISTS_PATH = 'test/fixtures/review-evaluation/specialists.v1.json';
+const SPECIALIST_THRESHOLDS_PATH = 'test/fixtures/review-evaluation/specialist-thresholds.v1.json';
 
 async function readFixedRegularFile(path: string, maximumBytes: number): Promise<string> {
   const absolute = resolve(path);
@@ -87,9 +104,10 @@ export async function main(
     throw new Error('Live evaluation requires RUN_LLM_EVALUATION=1');
   }
   const corpus = parseEvaluationCorpus(await readFixedRegularFile(CORPUS_PATH, MAX_EVALUATION_CORPUS_BYTES));
-  const thresholds = check
-    ? parseEvaluationThresholds(await readFixedRegularFile(THRESHOLDS_PATH, MAX_EVALUATION_THRESHOLD_BYTES))
-    : undefined;
+  const absoluteThresholds = parseEvaluationThresholds(
+    await readFixedRegularFile(THRESHOLDS_PATH, MAX_EVALUATION_THRESHOLD_BYTES),
+  );
+  const thresholds = check ? absoluteThresholds : undefined;
   let runner: EvaluationRunner | undefined;
   let backend: 'opencode' | 'pi' | null = null;
   let model: string | null = null;
@@ -107,10 +125,22 @@ export async function main(
     model = loaded.connection.modelId;
     secrets = loaded.credentialValues;
     const timeoutMs = parsePositiveInteger(environment.REVIEW_EVALUATION_TIMEOUT_SECONDS, 600, 900) * 1_000;
+    const strategy = (environment.REVIEW_EVALUATION_STRATEGY ?? 'single-pass') as RequestedReviewStrategy;
+    if (strategy !== 'single-pass' && strategy !== 'specialists' && strategy !== 'auto') {
+      throw new Error('Invalid live evaluation strategy');
+    }
+    const specialistTokenBudget = parsePositiveInteger(
+      environment.REVIEW_EVALUATION_SPECIALIST_TOKEN_BUDGET,
+      300_000,
+      2_000_000,
+    );
+    if (specialistTokenBudget < 20_000) throw new Error('Live specialist token budget must be at least 20000');
     runner = async ({ fixture, analyzer }) => {
       const reviewContext = packReviewContext(analyzer.contextItems, evaluationRuntime(analyzer));
+      const diff = evaluationDiff(fixture);
       try {
-        const review = await runReview({
+        const executed = await executeReviewStrategy({
+          plan: selectReviewStrategy({ requested: strategy, diff, analyzerCoverage: analyzer.summary.coverage }),
           backend: requestedBackend,
           containerEngine: engine,
           connection: loaded.connection,
@@ -118,13 +148,18 @@ export async function main(
           piVersion: DEFAULT_PI_VERSION,
           customPrompt: 'Evaluate the supplied seeded change under the fixed review policy.',
           timeoutMs,
+          specialistTokenBudget,
           pullRequest: evaluationPullRequest(fixture),
-          diff: evaluationDiff(fixture),
+          diff,
           reviewContext,
+          priorFindings: [],
+          policy: { minimumConfidence: 0, maximumInlineComments: 10 },
           secrets,
           environment,
+          assertFresh: async () => undefined,
+          singleRunner: runReview,
         });
-        return { status: 'valid', review, latencyMs: 0 };
+        return { status: 'valid', review: executed.review, latencyMs: 0 };
       } catch (error) {
         return {
           status:
@@ -152,9 +187,40 @@ export async function main(
     markdown: renderEvaluationMarkdown(report),
     secrets,
   });
-  console.log(`Evaluation reports: ${artifacts.jsonPath} and ${artifacts.markdownPath}`);
-  if (check && report.thresholdFailures.length > 0) {
-    console.error(`Evaluation thresholds failed: ${report.thresholdFailures.join(', ')}`);
+  const thresholdFailures = [...report.thresholdFailures];
+  let specialistArtifactMessage = '';
+  if (!live) {
+    const recordings = parseSpecialistEvaluationRecordings(
+      await readFixedRegularFile(SPECIALISTS_PATH, MAX_SPECIALIST_EVALUATION_BYTES),
+      corpus,
+    );
+    const specialistThresholds = parseSpecialistEvaluationThresholds(
+      await readFixedRegularFile(SPECIALIST_THRESHOLDS_PATH, MAX_EVALUATION_THRESHOLD_BYTES),
+    );
+    const specialistReport = await evaluateSpecialistRecordings({
+      corpus,
+      recordings,
+      thresholds: specialistThresholds,
+      baseline: report,
+      absoluteThresholds,
+    });
+    thresholdFailures.push(...specialistReport.thresholdFailures);
+    const specialistArtifacts = await writeEvaluationArtifacts({
+      outputDirectory,
+      json: renderSpecialistEvaluationJson(specialistReport),
+      markdown: renderSpecialistEvaluationMarkdown(specialistReport),
+      secrets,
+      requireEmpty: false,
+      filenames: {
+        json: SPECIALIST_EVALUATION_JSON_FILENAME,
+        markdown: SPECIALIST_EVALUATION_MARKDOWN_FILENAME,
+      },
+    });
+    specialistArtifactMessage = `; specialist reports: ${specialistArtifacts.jsonPath} and ${specialistArtifacts.markdownPath}`;
+  }
+  console.log(`Evaluation reports: ${artifacts.jsonPath} and ${artifacts.markdownPath}${specialistArtifactMessage}`);
+  if (check && thresholdFailures.length > 0) {
+    console.error(`Evaluation thresholds failed: ${thresholdFailures.join(', ')}`);
     return 1;
   }
   return 0;

@@ -11,13 +11,15 @@ export interface ReviewSemanticVersions {
   resultContract: number;
   fingerprint: number;
   analyzer: number;
+  executionStrategy: number;
   state: number;
 }
 export const REVIEW_SEMANTIC_VERSIONS: Readonly<ReviewSemanticVersions> = Object.freeze({
-  reviewPolicy: 2,
+  reviewPolicy: 3,
   resultContract: 1,
   fingerprint: 2,
   analyzer: 1,
+  executionStrategy: 1,
   state: REVIEW_STATE_VERSION,
 });
 export const MAX_REVIEW_STATE_ENCODED_BYTES = 24_576;
@@ -442,6 +444,7 @@ export function reviewInputDigest(
     pullRequest: { title: string; body: string; author: string };
     contextDigest: string;
     analyzerResultDigest?: string;
+    executionPlanDigest?: string;
     linkedIssues: readonly { number: number; digest: string }[];
   },
   semanticVersions: Readonly<ReviewSemanticVersions> = REVIEW_SEMANTIC_VERSIONS,
@@ -451,6 +454,7 @@ export function reviewInputDigest(
     semanticVersions,
     ...value,
     analyzerResultDigest: value.analyzerResultDigest ?? null,
+    executionPlanDigest: value.executionPlanDigest ?? null,
     linkedIssues: [...value.linkedIssues].sort((left, right) => left.number - right.number),
   });
 }
@@ -472,10 +476,34 @@ export function reviewPolicyDigest(value: {
   opencodeVersion: string;
   piVersion: string;
   deterministicAnalyzerManifestDigest?: string;
+  requestedReviewStrategy?: string;
+  specialistTokenBudget?: number;
+  aggregateTimeoutMs?: number;
+  specialistPolicy?: {
+    roleSetVersion: number;
+    selectorVersion: number;
+    arbiterContractVersion: number;
+    contextProjectionVersion: number;
+    maximumRolePasses: number;
+    maximumArbiterPasses: number;
+    maximumFindingsPerRole: number;
+    maximumRawFindings: number;
+    maximumArbiterCandidates: number;
+    maximumSpecialistContextBytes: number;
+    maximumArbiterContextBytes: number;
+    maximumArbiterPromptBytes: number;
+    specialistRequestOverheadTokens: number;
+    specialistOutputTokens: number;
+    arbiterOutputTokens: number;
+  };
 }): string {
   return digest('code-review/policy/v1', {
     ...value,
     deterministicAnalyzerManifestDigest: value.deterministicAnalyzerManifestDigest ?? null,
+    requestedReviewStrategy: value.requestedReviewStrategy ?? null,
+    specialistTokenBudget: value.specialistTokenBudget ?? null,
+    aggregateTimeoutMs: value.aggregateTimeoutMs ?? null,
+    specialistPolicy: value.specialistPolicy ?? null,
   });
 }
 

@@ -5,6 +5,8 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 export const MAX_EVALUATION_ARTIFACT_BYTES = 1_048_576;
 export const EVALUATION_JSON_FILENAME = 'review-evaluation.json';
 export const EVALUATION_MARKDOWN_FILENAME = 'review-evaluation.md';
+export const SPECIALIST_EVALUATION_JSON_FILENAME = 'review-specialist-evaluation.json';
+export const SPECIALIST_EVALUATION_MARKDOWN_FILENAME = 'review-specialist-evaluation.md';
 
 function inside(root: string, candidate: string): boolean {
   const value = relative(root, candidate);
@@ -46,12 +48,34 @@ export async function writeEvaluationArtifacts(input: {
   json: string;
   markdown: string;
   secrets?: readonly string[];
+  filenames?: { json: string; markdown: string };
+  requireEmpty?: boolean;
 }): Promise<{ jsonPath: string; markdownPath: string }> {
   const directory = resolve(input.outputDirectory);
   const details = await lstat(directory);
   if (!details.isDirectory() || details.isSymbolicLink())
     throw new Error('Evaluation output is not a regular directory');
-  if ((await readdir(directory)).length !== 0) throw new Error('Evaluation output directory must be empty');
+  if ((input.requireEmpty ?? true) && (await readdir(directory)).length !== 0) {
+    throw new Error('Evaluation output directory must be empty');
+  }
+  const filenames = input.filenames ?? {
+    json: EVALUATION_JSON_FILENAME,
+    markdown: EVALUATION_MARKDOWN_FILENAME,
+  };
+  if (
+    ![filenames.json, filenames.markdown].every((name) => /^[a-z0-9][a-z0-9.-]{0,79}$/u.test(name)) ||
+    filenames.json === filenames.markdown
+  ) {
+    throw new Error('Evaluation artifact filenames are invalid');
+  }
+  const existing = new Set(await readdir(directory));
+  if (
+    [filenames.json, filenames.markdown, `.${filenames.json}.tmp`, `.${filenames.markdown}.tmp`].some((name) =>
+      existing.has(name),
+    )
+  ) {
+    throw new Error('Evaluation artifact path already exists');
+  }
   for (const [label, content] of [
     ['JSON', input.json],
     ['Markdown', input.markdown],
@@ -61,10 +85,10 @@ export async function writeEvaluationArtifacts(input: {
     }
     assertNoSecrets(content, input.secrets ?? []);
   }
-  const jsonPath = join(directory, EVALUATION_JSON_FILENAME);
-  const markdownPath = join(directory, EVALUATION_MARKDOWN_FILENAME);
-  const temporaryJsonPath = join(directory, '.review-evaluation.json.tmp');
-  const temporaryMarkdownPath = join(directory, '.review-evaluation.md.tmp');
+  const jsonPath = join(directory, filenames.json);
+  const markdownPath = join(directory, filenames.markdown);
+  const temporaryJsonPath = join(directory, `.${filenames.json}.tmp`);
+  const temporaryMarkdownPath = join(directory, `.${filenames.markdown}.tmp`);
   try {
     await writeFile(temporaryJsonPath, input.json, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     await writeFile(temporaryMarkdownPath, input.markdown, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
