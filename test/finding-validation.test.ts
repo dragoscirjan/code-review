@@ -52,6 +52,11 @@ test('accepts exact RIGHT and LEFT anchors and canonicalizes rename publication 
     ['new.ts', 'new.ts'],
   );
   assert.equal(result.findings[0]?.explanation, 'The value is wrong.');
+  for (const accepted of result.findings) {
+    assert.match(accepted.anchorFingerprint, /^sha256:[A-Za-z0-9_-]{43}$/u);
+    assert.match(accepted.evidenceDigest, /^sha256:[A-Za-z0-9_-]{43}$/u);
+    assert.match(accepted.fingerprint, /^sha256:[A-Za-z0-9_-]{43}$/u);
+  }
 });
 
 test('classifies wrong paths, sides, changed lines, and context-only locations as unmapped', () => {
@@ -110,6 +115,8 @@ test('applies an inclusive confidence threshold and zero/maximum inline limits',
   });
   assert.equal(atThreshold.counts.accepted, 1);
   assert.equal(atThreshold.counts.inlineSelected, 0);
+  assert.equal(atThreshold.counts.inlineHistorySuppressed, 0);
+  assert.equal(atThreshold.counts.inlineLimitOmitted, 1);
   assert.equal(atThreshold.counts.inlineOmitted, 1);
 
   const below = assessReview(review([finding({ confidence: 0.79 })]), diff, {

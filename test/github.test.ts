@@ -8,6 +8,7 @@ import {
   findManagedComment,
   GitHubClient,
   parsePullRequestEvent,
+  selectManagedComment,
   type GitHubComment,
   type PullRequestContext,
 } from '../src/github';
@@ -550,6 +551,7 @@ test('reuses only an owned inline review with the exact final marker', async () 
     body: `review\n\n${marker}`,
     html_url: 'https://example.test/review/9',
     user: { id: 20, login: 'bot' },
+    commit_id: 'head',
   };
   const client = new GitHubClient('token', 'https://api.example.test', async () => {
     calls += 1;
@@ -605,4 +607,193 @@ test('parses a pull request event', () => {
     author: 'contributor',
     url: 'https://github.com/owner/repository/pull/7',
   });
+});
+
+test('selects one actor-owned current summary and rejects ambiguous current state', () => {
+  const current = '<!-- code-review:opencode:v5 -->';
+  const legacy = '<!-- code-review:opencode:v4 -->';
+  const currentComment: GitHubComment = {
+    id: 11,
+    body: `current\n${current}`,
+    html_url: 'url',
+    user: { id: 20, login: 'bot' },
+  };
+  const legacyComment: GitHubComment = {
+    id: 12,
+    body: `legacy\n${legacy}`,
+    html_url: 'url',
+    user: { id: 20, login: 'bot' },
+  };
+  assert.equal(selectManagedComment([legacyComment, currentComment], 20, [current, legacy]).kind, 'current');
+  assert.equal(
+    selectManagedComment([currentComment, { ...currentComment, id: 13 }], 20, [current, legacy]).kind,
+    'ambiguous',
+  );
+  assert.equal(
+    selectManagedComment([{ ...currentComment, user: { id: 99, login: 'other' } }], 20, [current, legacy]).kind,
+    'none',
+  );
+});
+
+test('acquires a bounded strict-descendant compare with matching JSON and diff identities', async () => {
+  const base = 'a'.repeat(40);
+  const head = 'b'.repeat(40);
+  const diff = ['diff --git a/a.ts b/a.ts', '--- a/a.ts', '+++ b/a.ts', '@@ -1 +1 @@', '-old', '+new'].join('\n');
+  const responses = [
+    new Response(
+      JSON.stringify({
+        status: 'ahead',
+        ahead_by: 1,
+        behind_by: 0,
+        base_commit: { sha: base },
+        head_commit: { sha: head },
+        merge_base_commit: { sha: base },
+        commits: [{ sha: head }],
+        files: [{ filename: 'a.ts', status: 'modified' }],
+      }),
+      { status: 200 },
+    ),
+    new Response(diff, { status: 200 }),
+  ];
+  const requests: Array<{ url: string; accept: string }> = [];
+  const client = new GitHubClient('token', 'https://api.example.test', async (url, init) => {
+    requests.push({ url: String(url), accept: String((init?.headers as Record<string, string>).Accept) });
+    const response = responses.shift();
+    assert.ok(response);
+    return response;
+  });
+  const result = await client.getCompare(
+    {
+      owner: 'owner',
+      repository: 'repository',
+      number: 7,
+      title: 'Change',
+      body: '',
+      url: 'url',
+      baseSha: 'base',
+      headSha: head,
+      author: 'author',
+    },
+    base,
+    head,
+  );
+  assert.equal(result.status, 'ahead');
+  assert.deepEqual(result.paths, ['a.ts']);
+  assert.equal(result.diff.files[0]?.apiPath, 'a.ts');
+  assert.match(requests[0]?.url ?? '', new RegExp(`/compare/${base}\\.\\.\\.${head}$`, 'u'));
+  assert.equal(requests[0]?.accept, 'application/vnd.github+json');
+  assert.equal(requests[1]?.accept, 'application/vnd.github.v3.diff');
+});
+
+test('rejects nonlinear, truncated, and inconsistent compare responses', async () => {
+  const base = 'a'.repeat(40);
+  const head = 'b'.repeat(40);
+  const metadata = {
+    status: 'diverged',
+    ahead_by: 1,
+    behind_by: 1,
+    base_commit: { sha: base },
+    head_commit: { sha: head },
+    merge_base_commit: { sha: 'c'.repeat(40) },
+    commits: [],
+    files: [],
+  };
+  const client = new GitHubClient(
+    'token',
+    'https://api.example.test',
+    async () => new Response(JSON.stringify(metadata), { status: 200 }),
+  );
+  await assert.rejects(
+    client.getCompare(
+      {
+        owner: 'owner',
+        repository: 'repository',
+        number: 7,
+        title: '',
+        body: '',
+        url: '',
+        baseSha: base,
+        headSha: head,
+        author: '',
+      },
+      base,
+      head,
+    ),
+    /not a strict descendant/,
+  );
+  const tooMany = new GitHubClient(
+    'token',
+    'https://api.example.test',
+    async () =>
+      new Response(
+        JSON.stringify({
+          ...metadata,
+          status: 'ahead',
+          behind_by: 0,
+          merge_base_commit: { sha: base },
+          files: Array.from({ length: 300 }, (_, index) => ({ filename: `f${index}.ts`, status: 'modified' })),
+        }),
+        { status: 200 },
+      ),
+  );
+  await assert.rejects(
+    tooMany.getCompare(
+      {
+        owner: 'owner',
+        repository: 'repository',
+        number: 7,
+        title: '',
+        body: '',
+        url: '',
+        baseSha: base,
+        headSha: head,
+        author: '',
+      },
+      base,
+      head,
+    ),
+    /incomplete/,
+  );
+});
+
+test('lists paginated review comments and guards managed summary leases', async () => {
+  const current = '<!-- code-review:opencode:v5 -->';
+  const body = `summary\n${current}`;
+  const existing = { id: 11, body, html_url: 'url', user: { id: 20, login: 'bot' } };
+  const responses = [
+    new Response(JSON.stringify([{ ...existing, path: 'a.ts', line: 1, side: 'RIGHT' }]), { status: 200 }),
+    new Response(JSON.stringify([existing]), { status: 200 }),
+    new Response(JSON.stringify({ ...existing, body: `updated\n${current}` }), { status: 200 }),
+  ];
+  const requests: Array<{ url: string; method?: string }> = [];
+  const client = new GitHubClient('token', 'https://api.example.test', async (url, init) => {
+    requests.push({ url: String(url), method: init?.method });
+    const response = responses.shift();
+    assert.ok(response);
+    return response;
+  });
+  const context: PullRequestContext = {
+    owner: 'owner',
+    repository: 'repository',
+    number: 7,
+    title: '',
+    body: '',
+    url: '',
+    baseSha: 'base',
+    headSha: 'head',
+    author: '',
+  };
+  assert.equal((await client.listPullRequestReviewComments(context)).length, 1);
+  const selection = selectManagedComment([existing], 20, [current]);
+  assert.equal(selection.kind, 'current');
+  if (selection.kind !== 'current') throw new Error('expected current');
+  await client.upsertManagedComment(
+    context,
+    { id: 20, login: 'bot' },
+    [current],
+    `updated\n${current}`,
+    selection.lease,
+  );
+  assert.match(requests[0]?.url ?? '', /pulls\/7\/comments/);
+  assert.equal(requests[2]?.method, 'PATCH');
 });

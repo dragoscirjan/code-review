@@ -59,7 +59,7 @@ A personal access token acts as its owner. It does not create a separate review 
 - Publish an inline finding only when its path and line map to the reviewed diff.
 - Deduplicate findings and cap the number of published comments.
 - Mark managed comments with a machine-readable hidden marker. Check both the marker and expected author before updating or deleting a comment.
-- Prefer stateless operation. Store review state in managed comment metadata unless a later requirement justifies persistent storage.
+- Prefer stateless operation. Store only bounded, versioned, scope-bound lifecycle metadata in the actor-owned managed summary. Treat existing metadata as an untrusted optimization hint; malformed, stale, ambiguous, or unverifiable state must fall back to a full review and may never authorize publication or suppress review coverage.
 
 ## Security boundaries
 

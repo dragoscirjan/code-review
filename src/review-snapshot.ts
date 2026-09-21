@@ -17,7 +17,7 @@ function sameRevision(expected: PullRequestRevision, actual: PullRequestRevision
 export interface ReviewedSnapshot {
   revision: PullRequestRevision;
   pullRequest: PullRequestContext;
-  diff: PullRequestDiff & Required<Pick<PullRequestDiff, 'parsed' | 'totalFiles'>>;
+  diff: PullRequestDiff & Required<Pick<PullRequestDiff, 'parsed' | 'completeParsed' | 'totalFiles'>>;
 }
 
 /** Brackets the unversioned GitHub diff endpoint with revision reads before any model execution. */
@@ -35,7 +35,7 @@ export async function acquireReviewedSnapshot(
     maximumDiffBytes,
     AbortSignal.timeout(SNAPSHOT_DIFF_TIMEOUT_MS),
   );
-  if (!diff.parsed || diff.totalFiles !== revision.changedFiles) {
+  if (!diff.parsed || !diff.completeParsed || diff.totalFiles !== revision.changedFiles) {
     throw new Error('GitHub diff does not contain the complete changed-file set');
   }
   const after = await client.getPullRequestRevision(pullRequest, AbortSignal.timeout(SNAPSHOT_METADATA_TIMEOUT_MS));
@@ -50,7 +50,7 @@ export async function acquireReviewedSnapshot(
       baseSha: revision.baseSha,
       headSha: revision.headSha,
     },
-    diff: diff as PullRequestDiff & Required<Pick<PullRequestDiff, 'parsed' | 'totalFiles'>>,
+    diff: diff as PullRequestDiff & Required<Pick<PullRequestDiff, 'parsed' | 'completeParsed' | 'totalFiles'>>,
   };
 }
 

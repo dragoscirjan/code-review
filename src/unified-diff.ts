@@ -36,6 +36,7 @@ export interface PreparedReviewDiff {
   truncated: boolean;
   totalFiles: number;
   parsed: UnifiedDiff;
+  completeParsed: UnifiedDiff;
 }
 
 const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?$/;
@@ -364,7 +365,14 @@ export function prepareReviewedDiff(raw: string, maximumBytes: number): Prepared
   const normalized = normalizeLines(raw).text.replace(/\n$/, '');
   const complete = parseUnifiedDiff(normalized);
   if (Buffer.byteLength(normalized, 'utf8') <= maximumBytes) {
-    return { text: normalized, originalBytes, truncated: false, totalFiles: complete.files.length, parsed: complete };
+    return {
+      text: normalized,
+      originalBytes,
+      truncated: false,
+      totalFiles: complete.files.length,
+      parsed: complete,
+      completeParsed: complete,
+    };
   }
 
   const selectedHunks = new Map<number, UnifiedDiffHunk[]>();
@@ -406,5 +414,40 @@ export function prepareReviewedDiff(raw: string, maximumBytes: number): Prepared
     truncated: true,
     totalFiles: complete.files.length,
     parsed: parseUnifiedDiff(text),
+    completeParsed: complete,
+  };
+}
+
+/** Packs complete current-PR file sections selected by exact path identity. */
+export function selectReviewedDiff(
+  complete: UnifiedDiff,
+  paths: ReadonlySet<string>,
+  maximumBytes: number,
+  originalBytes: number,
+): PreparedReviewDiff {
+  const selectedFiles = complete.files.filter(
+    (file) =>
+      (file.oldPath !== undefined && paths.has(file.oldPath)) ||
+      (file.newPath !== undefined && paths.has(file.newPath)) ||
+      (file.apiPath !== undefined && paths.has(file.apiPath)),
+  );
+  const raw = selectedFiles.flatMap((file) => file.rawLines).join('\n');
+  if (!raw) {
+    return {
+      text: '',
+      originalBytes,
+      truncated: false,
+      totalFiles: complete.files.length,
+      parsed: { files: [] },
+      completeParsed: complete,
+    };
+  }
+  const prepared = prepareReviewedDiff(raw, maximumBytes);
+  return {
+    ...prepared,
+    originalBytes,
+    totalFiles: complete.files.length,
+    completeParsed: complete,
+    truncated: prepared.truncated,
   };
 }

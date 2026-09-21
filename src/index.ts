@@ -1,12 +1,22 @@
 import { randomUUID } from 'node:crypto';
 import { appendFile } from 'node:fs/promises';
 import { getActionInput, loadActionConfig, managedCommentMarkers } from './config';
-import { GitHubClient, loadPullRequestEvent } from './github';
+import { truncateUtf8 } from './context-planner';
+import { GitHubClient, loadPullRequestEvent, selectManagedComment } from './github';
+import { planIncrementalReview } from './incremental-review';
 import { redactSecrets } from './model';
-import { runReview } from './review';
+import { MAX_REVIEW_PR_AUTHOR_BYTES, MAX_REVIEW_PR_BODY_BYTES, MAX_REVIEW_PR_TITLE_BYTES, runReview } from './review';
 import { assertLinkedIssuesFresh, buildReviewContext } from './review-context';
+import {
+  parseReviewState,
+  reviewInputDigest,
+  reviewPolicyDigest,
+  stateIdentityMatches,
+  stateScopeMatches,
+  type ReviewStateV1,
+} from './review-lifecycle';
 import { executeAndPublishReview } from './review-publication';
-import { acquireReviewedSnapshot, assertSnapshotFresh } from './review-snapshot';
+import { acquireReviewedSnapshot, assertSnapshotFresh, SNAPSHOT_DIFF_TIMEOUT_MS } from './review-snapshot';
 
 function workflowCommandValue(value: string): string {
   return value.replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
@@ -14,9 +24,7 @@ function workflowCommandValue(value: string): string {
 
 async function setOutput(name: string, value: string): Promise<void> {
   const outputPath = process.env.GITHUB_OUTPUT;
-  if (!outputPath) {
-    return;
-  }
+  if (!outputPath) return;
   const delimiter = `code_review_${randomUUID()}`;
   await appendFile(outputPath, `${name}<<${delimiter}\n${value}\n${delimiter}\n`, 'utf8');
 }
@@ -32,31 +40,49 @@ async function main(): Promise<void> {
   secrets.push(...config.modelCredentialValues);
   for (const secret of secrets) console.log(`::add-mask::${workflowCommandValue(secret)}`);
   const eventPath = process.env.GITHUB_EVENT_PATH;
-  if (!eventPath) {
-    throw new Error('GITHUB_EVENT_PATH is required');
-  }
+  if (!eventPath) throw new Error('GITHUB_EVENT_PATH is required');
 
   const pullRequest = await loadPullRequestEvent(eventPath);
-  const client = new GitHubClient(config.githubToken, process.env.GITHUB_API_URL ?? 'https://api.github.com');
-
+  const apiUrl = process.env.GITHUB_API_URL ?? 'https://api.github.com';
+  const client = new GitHubClient(config.githubToken, apiUrl);
   console.log(
     `Reviewing ${pullRequest.owner}/${pullRequest.repository}#${pullRequest.number} at ${pullRequest.headSha.slice(0, 12)} with ${config.backend}`,
   );
   const snapshot = await acquireReviewedSnapshot(client, pullRequest, config.maxDiffBytes);
   const authoritativePullRequest = snapshot.pullRequest;
-  const diff = snapshot.diff;
+  const fullDiff = snapshot.diff;
   const actor = await client.getAuthenticatedActor();
   console.log(
-    `Fetched ${diff.originalBytes} diff bytes${diff.truncated ? `; safely limited to ${config.maxDiffBytes}` : ''}`,
+    `Fetched ${fullDiff.originalBytes} diff bytes${fullDiff.truncated ? `; safely limited to ${config.maxDiffBytes}` : ''}`,
   );
 
+  const markers = managedCommentMarkers(config.backend);
+  const managedSelection = selectManagedComment(await client.listComments(authoritativePullRequest), actor.id, markers);
+  if (managedSelection.kind === 'ambiguous') throw new Error('Managed review comment ownership is ambiguous');
+  const policyDigest = reviewPolicyDigest({
+    backend: config.backend,
+    model: config.connection.modelId,
+    modelApi: config.connection.api,
+    modelBaseUrl: config.connection.baseUrl,
+    modelNetwork: config.connection.network,
+    contextWindow: config.connection.contextWindow,
+    maximumOutputTokens: config.connection.maxOutputTokens,
+    containerEngine: config.containerEngine,
+    customPrompt: config.prompt,
+    minimumConfidence: config.minimumConfidence,
+    maximumInlineComments: config.maxInlineComments,
+    maximumDiffBytes: config.maxDiffBytes,
+    indexer: config.codeIndexer,
+    opencodeVersion: config.opencodeVersion,
+    piVersion: config.piVersion,
+  });
   if (config.codeIndexer !== 'none') {
     console.log(`Installing and running ${config.codeIndexer} against the exact base revision`);
   }
   const reviewContext = await buildReviewContext({
     client,
     pullRequest: authoritativePullRequest,
-    diff,
+    diff: fullDiff,
     indexer: config.codeIndexer,
     cacheKey: config.codeIndexCacheKey,
     cacheTtlMs: config.codeIndexCacheTtlMs,
@@ -65,27 +91,104 @@ async function main(): Promise<void> {
   console.log(
     `Prepared ${reviewContext.bundle.metadata.includedBytes} bounded review context bytes${codeIndexCacheHit ? ' from a fresh index cache' : ''}`,
   );
+  const inputDigest = reviewInputDigest({
+    policyDigest,
+    pullRequest: {
+      title: truncateUtf8(authoritativePullRequest.title, MAX_REVIEW_PR_TITLE_BYTES).value,
+      body: truncateUtf8(authoritativePullRequest.body, MAX_REVIEW_PR_BODY_BYTES).value,
+      author: truncateUtf8(authoritativePullRequest.author, MAX_REVIEW_PR_AUTHOR_BYTES).value,
+    },
+    contextDigest: reviewContext.bundle.digest,
+    linkedIssues: reviewContext.linkedIssueFingerprints,
+  });
 
-  const markers = managedCommentMarkers(config.backend);
+  let baselineState: ReviewStateV1 | undefined;
+  let reuseAllowed = false;
+  let fallbackReason =
+    managedSelection.kind === 'none'
+      ? 'no-managed-summary'
+      : managedSelection.kind === 'legacy'
+        ? 'legacy-summary'
+        : 'invalid-state';
+  if (managedSelection.kind === 'current') {
+    const parsed = parseReviewState(managedSelection.comment.body, markers[0] as string);
+    const expectedIdentity = {
+      apiUrl,
+      repository: `${authoritativePullRequest.owner}/${authoritativePullRequest.repository}`,
+      pullRequest: authoritativePullRequest.number,
+      backend: config.backend,
+      actorId: actor.id,
+      baseSha: authoritativePullRequest.baseSha,
+    };
+    if (parsed.kind === 'valid' && stateIdentityMatches(parsed.state, expectedIdentity)) {
+      baselineState = parsed.state;
+      reuseAllowed = stateScopeMatches(parsed.state, {
+        ...expectedIdentity,
+        policyDigest,
+        reviewInputDigest: inputDigest,
+      });
+      fallbackReason = reuseAllowed ? 'compare-unavailable' : 'review-input-mismatch';
+    } else {
+      fallbackReason = parsed.kind === 'unsupported' ? 'unsupported-state-version' : 'invalid-or-mismatched-state';
+    }
+  }
+
+  let compare;
+  if (
+    reuseAllowed &&
+    baselineState?.coverageComplete &&
+    baselineState.completedThroughHeadSha &&
+    baselineState.completedThroughHeadSha !== authoritativePullRequest.headSha
+  ) {
+    try {
+      await assertSnapshotFresh(client, authoritativePullRequest, snapshot.revision);
+      compare = await client.getCompare(
+        authoritativePullRequest,
+        baselineState.completedThroughHeadSha,
+        authoritativePullRequest.headSha,
+        AbortSignal.timeout(SNAPSHOT_DIFF_TIMEOUT_MS),
+      );
+      await assertSnapshotFresh(client, authoritativePullRequest, snapshot.revision);
+    } catch {
+      fallbackReason = 'compare-unavailable-or-nonlinear';
+    }
+  }
+  const incremental = planIncrementalReview({
+    currentDiff: fullDiff,
+    currentHeadSha: authoritativePullRequest.headSha,
+    maximumDiffBytes: config.maxDiffBytes,
+    prior: baselineState,
+    compare,
+    fallbackReason,
+    reuseAllowed,
+  });
+  const diff = incremental.diff;
+
+  const lease = managedSelection.kind === 'none' ? null : managedSelection.lease;
+  const assertStateFresh = () => client.assertManagedCommentLease(authoritativePullRequest, actor, lease, markers);
   const publication = await executeAndPublishReview({
     executeReview: () =>
-      runReview({
-        backend: config.backend,
-        containerEngine: config.containerEngine,
-        connection: config.connection,
-        opencodeVersion: config.opencodeVersion,
-        piVersion: config.piVersion,
-        customPrompt: config.prompt,
-        timeoutMs: config.timeoutMs,
-        pullRequest: authoritativePullRequest,
-        diff,
-        reviewContext: reviewContext.bundle,
-        secrets,
-      }),
+      incremental.mode === 'no-change'
+        ? Promise.resolve({ version: 1 as const, outcome: 'clean' as const, findings: [] as [] })
+        : runReview({
+            backend: config.backend,
+            containerEngine: config.containerEngine,
+            connection: config.connection,
+            opencodeVersion: config.opencodeVersion,
+            piVersion: config.piVersion,
+            customPrompt: config.prompt,
+            timeoutMs: config.timeoutMs,
+            pullRequest: authoritativePullRequest,
+            diff,
+            reviewContext: reviewContext.bundle,
+            priorFindings: incremental.affected,
+            secrets,
+          }),
     assertFresh: async () => {
       await assertSnapshotFresh(client, authoritativePullRequest, snapshot.revision);
       await assertLinkedIssuesFresh(client, authoritativePullRequest, reviewContext.linkedIssueFingerprints);
     },
+    assertStateFresh,
     client,
     pullRequest: authoritativePullRequest,
     diff,
@@ -97,14 +200,33 @@ async function main(): Promise<void> {
     minimumConfidence: config.minimumConfidence,
     maximumInlineComments: config.maxInlineComments,
     contextMetadata: reviewContext.bundle.metadata,
+    lifecycle: {
+      apiUrl,
+      policyDigest,
+      reviewInputDigest: inputDigest,
+      mode: incremental.mode,
+      reason: incremental.reason,
+      fromHeadSha: incremental.fromHeadSha,
+      priorState: incremental.prior,
+      carried: incremental.carried,
+      affected: incremental.affected,
+      lease,
+    },
   });
 
   await setOutput('comment-url', publication.comment.html_url);
   await setOutput('review-url', publication.inlineReview?.html_url ?? '');
   await setOutput('inline-comment-count', String(publication.assessment.counts.inlineSelected));
+  await setOutput('inline-history-suppressed-count', String(publication.assessment.counts.inlineHistorySuppressed));
+  await setOutput('inline-limit-omitted-count', String(publication.assessment.counts.inlineLimitOmitted));
   await setOutput('diff-truncated', String(diff.truncated));
   await setOutput('context-truncated', String(reviewContext.bundle.metadata.truncated));
   await setOutput('context-unavailable-source-count', String(reviewContext.bundle.metadata.unavailableSourceCount));
+  await setOutput('review-mode', incremental.mode);
+  await setOutput('new-finding-count', String(publication.lifecycle.counts.new));
+  await setOutput('unchanged-finding-count', String(publication.lifecycle.counts.unchanged));
+  await setOutput('resolved-finding-count', String(publication.lifecycle.counts.resolved));
+  await setOutput('superseded-finding-count', String(publication.lifecycle.counts.superseded));
   await setOutput('code-indexer', config.codeIndexer);
   await setOutput('code-index-cache-hit', String(codeIndexCacheHit));
   console.log(`Published review: ${publication.comment.html_url}`);

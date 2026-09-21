@@ -33,12 +33,13 @@ export interface ActionConfig {
 }
 
 export function managedCommentMarkers(backend: ReviewBackend): string[] {
-  const current = `<!-- code-review:${backend}:v4 -->`;
+  const current = `<!-- code-review:${backend}:v5 -->`;
+  const validated = `<!-- code-review:${backend}:v4 -->`;
   const structured = `<!-- code-review:${backend}:v3 -->`;
   const providerNeutral = `<!-- code-review:${backend}:openrouter-poc:v2 -->`;
   return backend === 'opencode'
-    ? [current, structured, providerNeutral, '<!-- code-review:opencode-poc:v1 -->']
-    : [current, structured, providerNeutral];
+    ? [current, validated, structured, providerNeutral, '<!-- code-review:opencode-poc:v1 -->']
+    : [current, validated, structured, providerNeutral];
 }
 
 function inputCandidates(name: string): string[] {

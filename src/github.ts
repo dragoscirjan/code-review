@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import { open, readFile, rm } from 'node:fs/promises';
-import { prepareReviewedDiff, type UnifiedDiff } from './unified-diff';
+import { parseUnifiedDiff, prepareReviewedDiff, type UnifiedDiff } from './unified-diff';
 
 export interface PullRequestContext {
   owner: string;
@@ -24,6 +25,7 @@ export interface PullRequestDiff {
   truncated: boolean;
   totalFiles?: number;
   parsed?: UnifiedDiff;
+  completeParsed?: UnifiedDiff;
 }
 
 export interface PullRequestRevision {
@@ -66,6 +68,24 @@ export interface GitHubComment {
 
 export interface GitHubReview extends GitHubComment {
   commit_id?: string;
+}
+
+export interface GitHubReviewComment extends GitHubComment {
+  path?: string;
+  line?: number | null;
+  side?: 'LEFT' | 'RIGHT';
+  in_reply_to_id?: number;
+}
+
+export interface GitHubCompareResult {
+  status: 'ahead' | 'identical';
+  baseSha: string;
+  headSha: string;
+  mergeBaseSha: string;
+  aheadBy: number;
+  behindBy: number;
+  paths: string[];
+  diff: UnifiedDiff;
 }
 
 export interface GitHubInlineCommentInput {
@@ -117,7 +137,7 @@ function utf8Prefix(bytes: Buffer, maximumBytes: number): string {
   return '';
 }
 
-async function readBoundedJsonResponse(response: Response, maximumBytes: number, label: string): Promise<unknown> {
+async function readBoundedTextResponse(response: Response, maximumBytes: number, label: string): Promise<string> {
   if (!response.body) throw new Error(`${label} response has no body`);
   const contentLength = Number(response.headers.get('content-length'));
   if (Number.isFinite(contentLength) && contentLength > maximumBytes) {
@@ -139,12 +159,15 @@ async function readBoundedJsonResponse(response: Response, maximumBytes: number,
     await reader.cancel().catch(() => undefined);
     throw error;
   }
-  let raw: string;
   try {
-    raw = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))));
+    return new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))));
   } catch {
     throw new Error(`${label} is not valid UTF-8`);
   }
+}
+
+async function readBoundedJsonResponse(response: Response, maximumBytes: number, label: string): Promise<unknown> {
+  const raw = await readBoundedTextResponse(response, maximumBytes, label);
   try {
     return JSON.parse(raw) as unknown;
   } catch {
@@ -240,11 +263,56 @@ export function findManagedComment(
   const acceptedMarkers = typeof markers === 'string' ? [markers] : markers;
   for (const marker of acceptedMarkers) {
     const match = comments.find((comment) => comment.user?.id === actorId && hasFinalMarker(comment, marker));
-    if (match) {
-      return match;
-    }
+    if (match) return match;
   }
   return undefined;
+}
+
+export interface ManagedCommentLease {
+  id: number;
+  bodyDigest: string;
+  marker: string;
+}
+
+export type ManagedCommentSelection =
+  | { kind: 'none' }
+  | { kind: 'current' | 'legacy'; comment: GitHubComment; lease: ManagedCommentLease }
+  | { kind: 'ambiguous' };
+
+function commentDigest(body: string): string {
+  return createHash('sha256').update(body).digest('hex');
+}
+
+export function selectManagedComment(
+  comments: readonly GitHubComment[],
+  actorId: number,
+  markers: readonly string[],
+): ManagedCommentSelection {
+  const current = markers[0];
+  if (!current) return { kind: 'none' };
+  const owned = comments.filter((comment) => comment.user?.id === actorId && typeof comment.body === 'string');
+  const currentMatches = owned.filter((comment) => hasFinalMarker(comment, current));
+  if (currentMatches.length > 1) return { kind: 'ambiguous' };
+  if (currentMatches.length === 1) {
+    const comment = currentMatches[0] as GitHubComment & { body: string };
+    return {
+      kind: 'current',
+      comment,
+      lease: { id: comment.id, bodyDigest: commentDigest(comment.body), marker: current },
+    };
+  }
+  const legacyMatches = owned.filter((comment) => markers.slice(1).some((marker) => hasFinalMarker(comment, marker)));
+  if (legacyMatches.length > 1) return { kind: 'ambiguous' };
+  if (legacyMatches.length === 1) {
+    const comment = legacyMatches[0] as GitHubComment & { body: string };
+    const marker = markers.slice(1).find((candidate) => hasFinalMarker(comment, candidate)) as string;
+    return {
+      kind: 'legacy',
+      comment,
+      lease: { id: comment.id, bodyDigest: commentDigest(comment.body), marker },
+    };
+  }
+  return { kind: 'none' };
 }
 
 export class GitHubClient {
@@ -276,7 +344,7 @@ export class GitHubClient {
 
   async getAuthenticatedActor(): Promise<AuthenticatedActor> {
     const actor = await this.request<{ id: number; login: string }>('/user');
-    return { id: actor.id, login: actor.login };
+    return { id: integer(actor.id, 'actor.id'), login: text(actor.login, 'actor.login') };
   }
 
   async getPullRequestRevision(context: PullRequestContext, signal?: AbortSignal): Promise<PullRequestRevision> {
@@ -521,6 +589,91 @@ export class GitHubClient {
     return prepareReviewedDiff(raw, maximumBytes);
   }
 
+  async getCompare(
+    context: PullRequestContext,
+    baseSha: string,
+    headSha: string,
+    signal?: AbortSignal,
+  ): Promise<GitHubCompareResult> {
+    if (!/^[0-9a-f]{40}$|^[0-9a-f]{64}$/u.test(baseSha) || !/^[0-9a-f]{40}$|^[0-9a-f]{64}$/u.test(headSha)) {
+      throw new Error('Compare revisions must be full lowercase hexadecimal SHAs');
+    }
+    const path = `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/compare/${baseSha}...${headSha}`;
+    const jsonResponse = await this.fetchImplementation(`${this.apiUrl}${path}`, {
+      signal,
+      headers: {
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${this.token}`,
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'code-review-action',
+      },
+    });
+    if (!jsonResponse.ok) {
+      await jsonResponse.body?.cancel().catch(() => undefined);
+      throw new Error(`GitHub compare metadata request failed with ${jsonResponse.status}`);
+    }
+    const value = record(await readBoundedJsonResponse(jsonResponse, 1_000_000, 'GitHub compare metadata'), 'compare');
+    if (value.status !== 'ahead' && value.status !== 'identical')
+      throw new Error('GitHub compare is not a strict descendant');
+    const baseCommit = record(value.base_commit, 'compare.base_commit');
+    const headCommit = record(value.head_commit, 'compare.head_commit');
+    const mergeBase = record(value.merge_base_commit, 'compare.merge_base_commit');
+    const commits = Array.isArray(value.commits) ? value.commits : undefined;
+    const files = Array.isArray(value.files) ? value.files : undefined;
+    if (!commits || !files || files.length >= 300) throw new Error('GitHub compare metadata is incomplete');
+    const aheadBy = nonnegativeInteger(value.ahead_by, 'compare.ahead_by');
+    const behindBy = nonnegativeInteger(value.behind_by, 'compare.behind_by');
+    const echoedBase = text(baseCommit.sha, 'compare.base_commit.sha');
+    const echoedHead = text(headCommit.sha, 'compare.head_commit.sha');
+    const mergeBaseSha = text(mergeBase.sha, 'compare.merge_base_commit.sha');
+    if (echoedBase !== baseSha || echoedHead !== headSha || mergeBaseSha !== baseSha || behindBy !== 0) {
+      throw new Error('GitHub compare ancestry mismatch');
+    }
+    if (
+      (value.status === 'ahead' && (aheadBy < 1 || files.length === 0 || commits.length !== aheadBy)) ||
+      (value.status === 'identical' &&
+        (aheadBy !== 0 || headSha !== baseSha || files.length !== 0 || commits.length !== 0))
+    ) {
+      throw new Error('GitHub compare status is inconsistent');
+    }
+    const paths = files.map((entry, index) => {
+      const file = record(entry, `compare.files[${index}]`);
+      const filename = text(file.filename, `compare.files[${index}].filename`);
+      if (
+        !filename ||
+        /[\0\r\n\\]/u.test(filename) ||
+        filename.startsWith('/') ||
+        filename.split('/').some((segment) => !segment || segment === '.' || segment === '..')
+      ) {
+        throw new Error('GitHub compare contains an unsafe path');
+      }
+      if (!['added', 'removed', 'modified', 'renamed', 'copied', 'changed'].includes(String(file.status))) {
+        throw new Error('GitHub compare contains an unsupported file status');
+      }
+      return filename;
+    });
+    const diffResponse = await this.fetchImplementation(`${this.apiUrl}${path}`, {
+      signal,
+      headers: {
+        Accept: 'application/vnd.github.v3.diff',
+        Authorization: `Bearer ${this.token}`,
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'code-review-action',
+      },
+    });
+    if (!diffResponse.ok) {
+      await diffResponse.body?.cancel().catch(() => undefined);
+      throw new Error(`GitHub compare diff request failed with ${diffResponse.status}`);
+    }
+    const raw = await readBoundedTextResponse(diffResponse, 10_000_000, 'GitHub compare diff');
+    const diff = parseUnifiedDiff(raw.replaceAll('\r\n', '\n').replace(/\n$/u, ''));
+    if (diff.files.length !== files.length) throw new Error('GitHub compare diff file count mismatch');
+    const diffPaths = diff.files.map((file) => file.apiPath);
+    if (diffPaths.some((pathValue, index) => pathValue !== paths[index]))
+      throw new Error('GitHub compare path identity mismatch');
+    return { status: value.status, baseSha: echoedBase, headSha, mergeBaseSha, aheadBy, behindBy, paths, diff };
+  }
+
   async listComments(context: PullRequestContext): Promise<GitHubComment[]> {
     const comments: GitHubComment[] = [];
     for (let page = 1; page <= 20; page += 1) {
@@ -532,6 +685,17 @@ export class GitHubClient {
       }
     }
     throw new Error('Pull request has more than 2000 comments');
+  }
+
+  async listPullRequestReviewComments(context: PullRequestContext): Promise<GitHubReviewComment[]> {
+    const comments: GitHubReviewComment[] = [];
+    for (let page = 1; page <= 20; page += 1) {
+      const path = `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/pulls/${context.number}/comments?per_page=100&page=${page}`;
+      const response = await this.request<GitHubReviewComment[]>(path);
+      comments.push(...response);
+      if (response.length < 100) return comments;
+    }
+    throw new Error('Pull request has more than 2000 review comments');
   }
 
   async listPullRequestReviews(context: PullRequestContext): Promise<GitHubReview[]> {
@@ -553,21 +717,57 @@ export class GitHubClient {
     comments: readonly GitHubInlineCommentInput[],
   ): Promise<GitHubReview> {
     if (comments.length === 0) throw new Error('Inline review requires at least one comment');
-    const existing = findManagedComment(await this.listPullRequestReviews(context), actor.id, marker);
+    const findExisting = async (): Promise<GitHubReview | undefined> => {
+      const matches = (await this.listPullRequestReviews(context)).filter(
+        (review) => review.user?.id === actor.id && review.commit_id === headSha && hasFinalMarker(review, marker),
+      );
+      if (matches.length > 1) throw new Error('Inline review operation is ambiguous');
+      return matches[0];
+    };
+    const existing = await findExisting();
     if (existing) return existing;
-    return this.request<GitHubReview>(
-      `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/pulls/${context.number}/reviews`,
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          commit_id: headSha,
-          event: 'COMMENT',
-          body: `Validated inline findings from code-review.\n\n${marker}`,
-          comments,
-        }),
-        headers: { 'Content-Type': 'application/json' },
-      },
-    );
+    try {
+      return await this.request<GitHubReview>(
+        `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/pulls/${context.number}/reviews`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            commit_id: headSha,
+            event: 'COMMENT',
+            body: `Validated inline findings from code-review.\n\n${marker}`,
+            comments,
+          }),
+          headers: { 'Content-Type': 'application/json' },
+        },
+      );
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith('GitHub API ')) throw error;
+      const reconciled = await findExisting();
+      if (reconciled) return reconciled;
+      throw error;
+    }
+  }
+
+  async assertManagedCommentLease(
+    context: PullRequestContext,
+    actor: AuthenticatedActor,
+    lease: ManagedCommentLease | null,
+    markers: readonly string[],
+  ): Promise<void> {
+    const selection = selectManagedComment(await this.listComments(context), actor.id, markers);
+    if (selection.kind === 'ambiguous') throw new Error('Managed review comment ownership is ambiguous');
+    if (lease === null) {
+      if (selection.kind !== 'none') throw new Error('Managed review comment changed during review');
+      return;
+    }
+    if (
+      (selection.kind !== 'current' && selection.kind !== 'legacy') ||
+      selection.lease.id !== lease.id ||
+      selection.lease.bodyDigest !== lease.bodyDigest ||
+      selection.lease.marker !== lease.marker
+    ) {
+      throw new Error('Managed review comment changed during review');
+    }
   }
 
   async upsertManagedComment(
@@ -575,9 +775,32 @@ export class GitHubClient {
     actor: AuthenticatedActor,
     markers: string | readonly string[],
     body: string,
+    lease?: ManagedCommentLease | null,
   ): Promise<GitHubComment> {
+    const acceptedMarkers = typeof markers === 'string' ? [markers] : markers;
+    if (lease !== undefined) {
+      await this.assertManagedCommentLease(context, actor, lease, acceptedMarkers);
+      if (lease) {
+        return this.request<GitHubComment>(
+          `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/issues/comments/${lease.id}`,
+          {
+            method: 'PATCH',
+            body: JSON.stringify({ body }),
+            headers: { 'Content-Type': 'application/json' },
+          },
+        );
+      }
+      return this.request<GitHubComment>(
+        `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/issues/${context.number}/comments`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ body }),
+          headers: { 'Content-Type': 'application/json' },
+        },
+      );
+    }
     const comments = await this.listComments(context);
-    const existing = findManagedComment(comments, actor.id, markers);
+    const existing = findManagedComment(comments, actor.id, acceptedMarkers);
     if (existing) {
       return this.request<GitHubComment>(
         `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/issues/comments/${existing.id}`,
@@ -588,7 +811,6 @@ export class GitHubClient {
         },
       );
     }
-
     return this.request<GitHubComment>(
       `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/issues/${context.number}/comments`,
       {
