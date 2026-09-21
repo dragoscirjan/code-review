@@ -191,6 +191,14 @@ describe('planActionRelease', () => {
     ).toThrow('v1 does not point to a known release');
   });
 
+  test('ignores unrelated refs without weakening the release namespace', () => {
+    expect(plan({ refs: { docs: ref(OTHER_SHA, 'tag') } })).toMatchObject({
+      createVersionTag: true,
+      updateMajorTag: true,
+      createGitHubRelease: true,
+    });
+  });
+
   test('rejects orphaned, indirect, or unstable release provenance', () => {
     expect(() => plan({ refs: { 'v1.2.2': ref(PRIOR_SHA) } })).toThrow(
       'immutable tag v1.2.2 has no corresponding published GitHub Release',

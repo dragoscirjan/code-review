@@ -138,14 +138,14 @@ function validateState(
 } {
   const versionRefs = new Map<string, { version: ParsedVersion; targetSha: string }>();
   for (const [tag, rawRef] of Object.entries(state.refs)) {
-    const ref = validateRef(rawRef, tag);
-    if (VERSION_PATTERN.test(tag)) {
-      versionRefs.set(tag, { version: parseVersion(tag), targetSha: ref.targetSha });
-      continue;
-    }
-    if (MAJOR_TAG_PATTERN.test(tag)) continue;
-    if (tag.startsWith('v')) {
+    if (!tag.startsWith('v')) continue;
+    const isVersion = VERSION_PATTERN.test(tag);
+    if (!isVersion && !MAJOR_TAG_PATTERN.test(tag)) {
       throw releaseError(`unsupported or ambiguous version ref ${tag}`);
+    }
+    const ref = validateRef(rawRef, tag);
+    if (isVersion) {
+      versionRefs.set(tag, { version: parseVersion(tag), targetSha: ref.targetSha });
     }
   }
 
