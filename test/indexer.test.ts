@@ -591,7 +591,7 @@ test('executes every GitNexus query category with fixed argument arrays', async 
           '--limit',
           '20',
         ],
-        ['query', 'reviewValue configuration', '--repo', 'code-review-base', '--limit', '3', '--content'],
+        ['query', 'reviewValue configuration', '--repo', 'code-review-base', '--limit', '3'],
       ],
     );
     assert.deepEqual(

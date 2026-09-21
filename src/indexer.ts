@@ -535,7 +535,7 @@ function queryArgumentSets(
       ],
     ];
   }
-  return [['query', `${anchor} configuration`, '--repo', 'code-review-base', '--limit', '3', '--content']];
+  return [['query', `${anchor} configuration`, '--repo', 'code-review-base', '--limit', '3']];
 }
 
 async function installCgc(toolsPath: string, options: CommandOptions, runner: CommandRunner): Promise<string> {

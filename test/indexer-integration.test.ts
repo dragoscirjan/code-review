@@ -101,7 +101,7 @@ test(
       assert.equal(first.results.length, queries.length);
       assert.ok(
         first.results.every((result) => ['included', 'empty', 'truncated'].includes(result.status)),
-        `expected every ${indexer} command category to complete`,
+        `expected every ${indexer} command category to complete: ${JSON.stringify(first.results.map(({ query, status, reason }) => ({ id: query.id, status, reason })))}`,
       );
 
       const second = await runCodeIndexer({
