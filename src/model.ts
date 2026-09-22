@@ -7,6 +7,7 @@ export interface ModelConnection {
   baseUrl: string;
   network: 'remote' | 'private';
   modelId: string;
+  reasoning?: boolean;
   contextWindow: number;
   maxOutputTokens: number;
   credential?: { type: 'bearer' | 'api-key'; value: string };
@@ -51,15 +52,19 @@ function identifier(value: unknown): string {
   return value;
 }
 
-function tokenLimit(value: unknown, fallback: number): number {
+function tokenLimit(value: unknown, name: string, fallback: number): number {
   if (value === undefined) return fallback;
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1 || value > 2_000_000) {
-    throw new Error('Model token limits must be integers between 1 and 2000000');
+    throw new Error(`${name} must be an integer between 1 and 2000000`);
   }
   return value;
 }
 
-export function loadModelConfiguration(config: string, credentials = '{}'): LoadedModelConfiguration {
+export function loadModelConfiguration(
+  config: string,
+  credentials = '{}',
+  reasoning = false,
+): LoadedModelConfiguration {
   const root = object(parse(config, 'model-config'), ['version', 'provider', 'model']);
   if (root.version !== 1) throw new Error('model-config version must be 1');
   const provider = object(root.provider, ['api', 'baseUrl', 'network', 'credential']);
@@ -130,8 +135,8 @@ export function loadModelConfiguration(config: string, credentials = '{}'): Load
   if (api === 'anthropic-messages' && credential?.value.includes('sk-ant-oat')) {
     throw new Error('Anthropic OAuth tokens are unsupported; supply an Anthropic API key');
   }
-  const contextWindow = tokenLimit(model.contextWindow, 128_000);
-  const maxOutputTokens = tokenLimit(model.maxOutputTokens, 8192);
+  const contextWindow = tokenLimit(model.contextWindow, 'contextWindow', 128_000);
+  const maxOutputTokens = tokenLimit(model.maxOutputTokens, 'maxOutputTokens', 8_192);
   if (maxOutputTokens >= contextWindow) throw new Error('maxOutputTokens must be less than contextWindow');
   return {
     connection: {
@@ -139,6 +144,7 @@ export function loadModelConfiguration(config: string, credentials = '{}'): Load
       baseUrl: url.href.replace(/\/$/, ''),
       network: provider.network,
       modelId: identifier(model.id),
+      reasoning,
       contextWindow,
       maxOutputTokens,
       credential,
@@ -147,8 +153,8 @@ export function loadModelConfiguration(config: string, credentials = '{}'): Load
   };
 }
 
-export function loadModelConnection(config: string, credentials = '{}'): ModelConnection {
-  return loadModelConfiguration(config, credentials).connection;
+export function loadModelConnection(config: string, credentials = '{}', reasoning = false): ModelConnection {
+  return loadModelConfiguration(config, credentials, reasoning).connection;
 }
 
 const privateAddresses = new BlockList();

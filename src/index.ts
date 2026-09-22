@@ -118,6 +118,7 @@ async function main(): Promise<void> {
     modelApi: config.connection.api,
     modelBaseUrl: config.connection.baseUrl,
     modelNetwork: config.connection.network,
+    modelReasoning: config.connection.reasoning === true,
     contextWindow: config.connection.contextWindow,
     maximumOutputTokens: config.connection.maxOutputTokens,
     containerEngine: config.containerEngine,

@@ -88,6 +88,13 @@ function parseInteger(value: string, name: string, minimum: number, maximum: num
   return parsed;
 }
 
+function parseBoolean(value: string, name: string): boolean {
+  if (value !== 'true' && value !== 'false') {
+    throw new Error(`${name} must be true or false`);
+  }
+  return value === 'true';
+}
+
 function parseConfidence(value: string): number {
   if (!/^(?:0(?:\.\d+)?|1(?:\.0+)?)$/.test(value)) {
     throw new Error('minimum-confidence must be a decimal between 0 and 1');
@@ -130,9 +137,11 @@ export function loadActionConfig(environment: NodeJS.ProcessEnv = process.env): 
   }
   const modelConfig = getActionInput('model-config', environment);
   if (!modelConfig) throw new Error('model-config is required; see README for OpenRouter and local examples');
+  const reasoning = parseBoolean(getActionInput('reasoning', environment) ?? 'false', 'reasoning');
   const { connection, credentialValues: modelCredentialValues } = loadModelConfiguration(
     modelConfig,
     getActionInput('model-credentials', environment),
+    reasoning,
   );
 
   const backend = getActionInput('backend', environment) ?? DEFAULT_BACKEND;

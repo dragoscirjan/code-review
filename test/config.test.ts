@@ -12,7 +12,7 @@ const base = {
       network: 'remote',
       credential: 'router',
     },
-    model: { id: 'z-ai/glm-5.3-flash' },
+    model: { id: 'z-ai/glm-5.3-flash', contextWindow: 1_048_576, maxOutputTokens: 943_718 },
   }),
   INPUT_MODEL_CREDENTIALS: JSON.stringify({ router: { type: 'bearer', value: 'provider-secret' } }),
 };
@@ -27,6 +27,7 @@ test('loads explicit model config and safe action defaults', () => {
   assert.equal(config.backend, 'opencode');
   assert.equal(config.containerEngine, 'podman');
   assert.equal(config.connection.modelId, 'z-ai/glm-5.3-flash');
+  assert.equal(config.connection.reasoning, false);
   assert.deepEqual(config.modelCredentialValues, ['provider-secret']);
   assert.equal(config.codeIndexer, 'none');
   assert.equal(config.codeIndexCacheKey, 'code-review-index-v1');
@@ -40,6 +41,7 @@ test('loads explicit model config and safe action defaults', () => {
   assert.equal(config.specialistTokenBudget, 300_000);
   assert.equal(config.timeoutMs, 600_000);
   assert.equal(loadActionConfig({ ...base, INPUT_BACKEND: 'pi' }).backend, 'pi');
+  assert.equal(loadActionConfig({ ...base, INPUT_REASONING: 'true' }).connection.reasoning, true);
 });
 
 test('retains every validated credential value for host-only publication protection', () => {
@@ -66,6 +68,7 @@ test('requires explicit credentials and configuration; rejects legacy input', ()
 test('validates action limits and executable selection', () => {
   for (const [name, value, message] of [
     ['INPUT_BACKEND', 'bash', /backend must/],
+    ['INPUT_REASONING', 'yes', /reasoning must be true or false/],
     ['INPUT_CONTAINER_ENGINE', 'sh', /container-engine must/],
     ['INPUT_OPENCODE_VERSION', 'latest', /exact semantic version/],
     ['INPUT_PI_VERSION', 'next', /exact semantic version/],

@@ -40,6 +40,7 @@ jobs:
         with:
           github-token: ${{ secrets.GH_TOKEN }}
           backend: ${{ matrix.backend }}
+          reasoning: true
           model-config: |
             {
               "version": 1,
@@ -51,8 +52,8 @@ jobs:
               },
               "model": {
                 "id": "z-ai/glm-5.3-flash",
-                "contextWindow": 131072,
-                "maxOutputTokens": 8192
+                "contextWindow": 1048576,
+                "maxOutputTokens": 943718
               }
             }
           model-credentials: ${{ secrets.REVIEW_MODEL_CREDENTIALS }}
@@ -65,18 +66,18 @@ Do not add checkout or execute PR code in this `pull_request_target` job. Never 
 
 `model-config` is **our strict versioned schema**, not native Pi/OpenCode configuration. The action translates it into the selected harness's native configuration inside its disposable container, before launching the harness. Host/user configuration is never modified.
 
-One invocation selects one provider/model. Use workflow matrices or separate invocations for more. Non-secret configuration can be inline workflow JSON or `${{ vars.REVIEW_MODEL_CONFIG }}`. Secrets belong only in `model-credentials`.
+One invocation selects one provider/model. Use workflow matrices or separate invocations for more. Non-secret configuration can be inline workflow JSON or `${{ vars.REVIEW_MODEL_CONFIG }}`. Secrets belong only in `model-credentials`. Set the action-level `reasoning` input to `true` when the selected model supports or requires reasoning; it is translated into both native harness configurations. The action does not choose a model or reasoning cost for consumers.
 
-| Field                   | Meaning                                                                                                                                                  |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `version`               | Required; `1`.                                                                                                                                           |
-| `provider.api`          | Required; one of the protocols below.                                                                                                                    |
-| `provider.baseUrl`      | Required API base URL; no URL credentials, query, fragment, or interpolation.                                                                            |
-| `provider.network`      | Required; `remote` explicitly permits sending source to a public HTTPS provider; `private` explicitly permits a private-network endpoint (HTTP allowed). |
-| `provider.credential`   | Optional reference into `model-credentials`; never an environment variable or token.                                                                     |
-| `model.id`              | Required exact provider model ID, not a Pi/OpenCode selector.                                                                                            |
-| `model.contextWindow`   | Positive integer, default `128000`, maximum `2000000`. Set to the model's actual capability.                                                             |
-| `model.maxOutputTokens` | Positive integer, default `8192`, strictly below `contextWindow`.                                                                                        |
+| Field                   | Meaning                                                                                                                                                                          |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `version`               | Required; `1`.                                                                                                                                                                   |
+| `provider.api`          | Required; one of the protocols below.                                                                                                                                            |
+| `provider.baseUrl`      | Required API base URL; no URL credentials, query, fragment, or interpolation.                                                                                                    |
+| `provider.network`      | Required; `remote` explicitly permits sending source to a public HTTPS provider; `private` explicitly permits a private-network endpoint (HTTP allowed).                         |
+| `provider.credential`   | Optional reference into `model-credentials`; never an environment variable or token.                                                                                             |
+| `model.id`              | Required exact provider model ID, not a Pi/OpenCode selector.                                                                                                                    |
+| `model.contextWindow`   | Optional positive integer, default `128000`, maximum `2000000`. Set it to the model's actual capability.                                                                         |
+| `model.maxOutputTokens` | Optional positive integer, default `8192`, maximum `2000000` and strictly below `contextWindow`. Set it to the model's actual capability; consumers own their model/cost choice. |
 
 Unknown fields are rejected. Each JSON input is capped at 32,000 UTF-8 bytes; at most 16 credentials, with tokens limited to 8,192 printable non-whitespace ASCII characters. References/model IDs use letters, digits, `.`, `_`, `:`, `/`, `-` (maximum 200 characters, starting with a letter/digit).
 
@@ -90,7 +91,7 @@ Unknown fields are rejected. Each JSON input is capped at 32,000 UTF-8 bytes; at
 
 For Anthropic, use `{"review-provider":{"type":"api-key","value":"YOUR_ANTHROPIC_API_KEY"}}` as the secret. The adapter accounts for the harnesses' different Anthropic base URL conventions. A bearer credential may be an API key or an already-issued access token; the action does not log in, refresh OAuth tokens, or run credential commands. Anthropic OAuth tokens containing `sk-ant-oat` are rejected because Pi would reinterpret them as OAuth rather than `x-api-key` authentication.
 
-Support means the configured endpoint must implement the selected protocol. It does not imply support for every vendor's native authentication, reasoning options, or proprietary extensions. Google/Azure/Bedrock-specific protocols, arbitrary headers, plugins, shell commands, environment forwarding, raw harness config, and `model-config-file` are not supported in this milestone. Add explicit adapters rather than passing through arbitrary harness settings.
+Support means the configured endpoint must implement the selected protocol. The `reasoning` input declares model capability to the harnesses; it does not expose provider-specific reasoning effort, token budgets, or proprietary controls. Google/Azure/Bedrock-specific protocols, arbitrary headers, plugins, shell commands, environment forwarding, raw harness config, and `model-config-file` are not supported in this milestone. Add explicit adapters rather than passing through arbitrary harness settings.
 
 ### Existing local/private models
 
@@ -123,6 +124,7 @@ Omit `model-credentials` for keyless servers. The harness adapters use a non-sec
 | `github-token`            | Required                        | PAT for PR API access and publication.                                        |
 | `model-config`            | Required                        | Provider/model JSON above.                                                    |
 | `model-credentials`       | `{}`                            | Secret JSON credential map; only the selected credential enters the backend.  |
+| `reasoning`               | `false`                         | Set `true` when the selected model supports or requires reasoning.            |
 | `backend`                 | `opencode`                      | `opencode` or `pi`.                                                           |
 | `container-engine`        | `podman`                        | `podman` or validated `docker` fallback.                                      |
 | `prompt`                  | Correctness and security review | Additional trusted review guidance.                                           |

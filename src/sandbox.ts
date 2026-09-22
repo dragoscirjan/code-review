@@ -14,7 +14,7 @@ export function buildHarnessConfig(connection: ModelConnection, backend: ReviewB
             {
               id: connection.modelId,
               input: ['text'],
-              reasoning: false,
+              reasoning: connection.reasoning === true,
               contextWindow: connection.contextWindow,
               maxTokens: connection.maxOutputTokens,
               ...(connection.api === 'openai-completions'
@@ -54,7 +54,7 @@ export function buildHarnessConfig(connection: ModelConnection, backend: ReviewB
             id: connection.modelId,
             name: 'Review model',
             limit: { context: connection.contextWindow, output: connection.maxOutputTokens },
-            reasoning: false,
+            reasoning: connection.reasoning === true,
             tool_call: false,
           },
         },

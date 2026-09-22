@@ -139,6 +139,7 @@ for (const backend of ['opencode', 'pi'] as const) {
               baseUrl: `http://${host}:${address.port}${api === 'anthropic-messages' ? '' : '/v1'}`,
               network: 'private',
               modelId: 'contract-model',
+              reasoning: true,
               contextWindow: 128000,
               maxOutputTokens: 8192,
               credential: { type: api === 'anthropic-messages' ? 'api-key' : 'bearer', value: credential },
