@@ -21,11 +21,12 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Review pull request
-        uses: dragoscirjan/code-review@f931037fb9dc59b9f989b500237fd5acd1f6930b
+        uses: dragoscirjan/code-review@a68f9b719ab3b8980b351df539d0d269512f7281
         with:
           github-token: ${{ secrets.GH_TOKEN }}
           container-engine: podman
           backend: pi
+          reasoning: true
           model-config: |
             {
               "version": 1,
@@ -37,8 +38,8 @@ jobs:
               },
               "model": {
                 "id": "z-ai/glm-5.3-flash",
-                "contextWindow": 131072,
-                "maxOutputTokens": 8192
+                "contextWindow": 1048576,
+                "maxOutputTokens": 943718
               }
             }
           model-credentials: ${{ secrets.REVIEW_MODEL_CREDENTIALS }}
