@@ -378,6 +378,7 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
   const reservedTokens = reserveSpecialistTokens({
     prompts,
     maximumOutputTokens: input.connection.maxOutputTokens,
+    reasoning: input.connection.reasoning,
   });
   if (reservedTokens > input.specialistTokenBudget) {
     throw new Error('Specialist token reservation exceeds specialist-token-budget');
@@ -386,7 +387,7 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
   const run = input.structuredRunner ?? runStructuredBackend;
   const specialistConnection = {
     ...input.connection,
-    maxOutputTokens: specialistOutputTokens(input.connection.maxOutputTokens),
+    maxOutputTokens: specialistOutputTokens(input.connection.maxOutputTokens, input.connection.reasoning),
   };
   const snapshot = snapshotDigest(input.pullRequest, input.diff);
   const candidates: SpecialistCandidate[] = [];
@@ -487,7 +488,10 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
   const decision = await run({
     backend: input.backend,
     containerEngine: input.containerEngine,
-    connection: { ...input.connection, maxOutputTokens: arbiterOutputTokens(input.connection.maxOutputTokens) },
+    connection: {
+      ...input.connection,
+      maxOutputTokens: arbiterOutputTokens(input.connection.maxOutputTokens, input.connection.reasoning),
+    },
     opencodeVersion: input.opencodeVersion,
     piVersion: input.piVersion,
     timeoutMs,

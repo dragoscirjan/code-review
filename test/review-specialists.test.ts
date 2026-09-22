@@ -146,6 +146,30 @@ test('runs fixed roles sequentially, validates candidates, and applies a reject-
   assert.equal(result.review.findings.length, 1);
 });
 
+test('reserves enough completion space for reasoning specialists and arbiter output', async () => {
+  const calls: StructuredBackendRequest<unknown>[] = [];
+  const result = await executeReviewStrategy(
+    request({
+      connection: {
+        ...connection,
+        reasoning: true,
+        contextWindow: 1_048_576,
+        maxOutputTokens: 943_718,
+      },
+      structuredRunner: runnerFrom(
+        [JSON.stringify(finding('correctness')), clean, clean, clean, '{"version":1,"rejectedCandidateIds":[]}'],
+        calls,
+      ),
+    }),
+  );
+  assert.deepEqual(
+    calls.slice(0, 4).map((call) => call.connection.maxOutputTokens),
+    [65_536, 65_536, 65_536, 65_536],
+  );
+  assert.equal(calls[4]?.connection.maxOutputTokens, 32_768);
+  assert.ok(result.summary.reservedTokens < 2_000_000);
+});
+
 test('skips arbitration only when no candidate survives validation', async () => {
   const calls: StructuredBackendRequest<unknown>[] = [];
   const result = await executeReviewStrategy(

@@ -23,6 +23,8 @@ export const MAX_ARBITER_PROMPT_BYTES = 100_000;
 export const SPECIALIST_REQUEST_OVERHEAD_TOKENS = 1_024;
 export const SPECIALIST_MAX_OUTPUT_TOKENS = 4_096;
 export const ARBITER_MAX_OUTPUT_TOKENS = 2_048;
+export const REASONING_SPECIALIST_MAX_OUTPUT_TOKENS = 65_536;
+export const REASONING_ARBITER_MAX_OUTPUT_TOKENS = 32_768;
 
 export const SPECIALIST_ROLES = ['correctness', 'security', 'testing', 'compatibility'] as const;
 export type SpecialistRole = (typeof SPECIALIST_ROLES)[number];
@@ -253,17 +255,23 @@ export function priorFindingsForRole(
   return findings.filter((finding) => finding.category === ROLE_CATEGORY[role]).slice(0, MAX_FINDINGS_PER_SPECIALIST);
 }
 
-export function specialistOutputTokens(maximumOutputTokens: number): number {
-  return Math.min(maximumOutputTokens, SPECIALIST_MAX_OUTPUT_TOKENS);
+export function specialistOutputTokens(maximumOutputTokens: number, reasoning = false): number {
+  const limit = reasoning ? REASONING_SPECIALIST_MAX_OUTPUT_TOKENS : SPECIALIST_MAX_OUTPUT_TOKENS;
+  return Math.min(maximumOutputTokens, limit);
 }
 
-export function arbiterOutputTokens(maximumOutputTokens: number): number {
-  return Math.min(maximumOutputTokens, ARBITER_MAX_OUTPUT_TOKENS);
+export function arbiterOutputTokens(maximumOutputTokens: number, reasoning = false): number {
+  const limit = reasoning ? REASONING_ARBITER_MAX_OUTPUT_TOKENS : ARBITER_MAX_OUTPUT_TOKENS;
+  return Math.min(maximumOutputTokens, limit);
 }
 
-export function reserveSpecialistTokens(input: { prompts: readonly string[]; maximumOutputTokens: number }): number {
+export function reserveSpecialistTokens(input: {
+  prompts: readonly string[];
+  maximumOutputTokens: number;
+  reasoning?: boolean;
+}): number {
   if (input.prompts.length !== SPECIALIST_ROLES.length) throw new Error('Every fixed specialist prompt is required');
-  const specialistOutput = specialistOutputTokens(input.maximumOutputTokens);
+  const specialistOutput = specialistOutputTokens(input.maximumOutputTokens, input.reasoning);
   return (
     input.prompts.reduce(
       (total, prompt) =>
@@ -272,7 +280,7 @@ export function reserveSpecialistTokens(input: { prompts: readonly string[]; max
     ) +
     MAX_ARBITER_PROMPT_BYTES +
     SPECIALIST_REQUEST_OVERHEAD_TOKENS +
-    arbiterOutputTokens(input.maximumOutputTokens)
+    arbiterOutputTokens(input.maximumOutputTokens, input.reasoning)
   );
 }
 
