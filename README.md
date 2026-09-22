@@ -68,16 +68,16 @@ Do not add checkout or execute PR code in this `pull_request_target` job. Never 
 
 One invocation selects one provider/model. Use workflow matrices or separate invocations for more. Non-secret configuration can be inline workflow JSON or `${{ vars.REVIEW_MODEL_CONFIG }}`. Secrets belong only in `model-credentials`. Set the action-level `reasoning` input to `true` when the selected model supports or requires reasoning; it is translated into both native harness configurations. The action does not choose a model or reasoning cost for consumers.
 
-| Field                   | Meaning                                                                                                                                                       |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `version`               | Required; `1`.                                                                                                                                                |
-| `provider.api`          | Required; one of the protocols below.                                                                                                                         |
-| `provider.baseUrl`      | Required API base URL; no URL credentials, query, fragment, or interpolation.                                                                                 |
-| `provider.network`      | Required; `remote` explicitly permits sending source to a public HTTPS provider; `private` explicitly permits a private-network endpoint (HTTP allowed).      |
-| `provider.credential`   | Optional reference into `model-credentials`; never an environment variable or token.                                                                          |
-| `model.id`              | Required exact provider model ID, not a Pi/OpenCode selector.                                                                                                 |
-| `model.contextWindow`   | Required positive integer, maximum `2000000`. Set to the model's actual capability.                                                                           |
-| `model.maxOutputTokens` | Required positive integer, maximum `2000000` and strictly below `contextWindow`. Set to the model's actual capability; consumers own their model/cost choice. |
+| Field                   | Meaning                                                                                                                                                                          |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `version`               | Required; `1`.                                                                                                                                                                   |
+| `provider.api`          | Required; one of the protocols below.                                                                                                                                            |
+| `provider.baseUrl`      | Required API base URL; no URL credentials, query, fragment, or interpolation.                                                                                                    |
+| `provider.network`      | Required; `remote` explicitly permits sending source to a public HTTPS provider; `private` explicitly permits a private-network endpoint (HTTP allowed).                         |
+| `provider.credential`   | Optional reference into `model-credentials`; never an environment variable or token.                                                                                             |
+| `model.id`              | Required exact provider model ID, not a Pi/OpenCode selector.                                                                                                                    |
+| `model.contextWindow`   | Optional positive integer, default `128000`, maximum `2000000`. Set it to the model's actual capability.                                                                         |
+| `model.maxOutputTokens` | Optional positive integer, default `8192`, maximum `2000000` and strictly below `contextWindow`. Set it to the model's actual capability; consumers own their model/cost choice. |
 
 Unknown fields are rejected. Each JSON input is capped at 32,000 UTF-8 bytes; at most 16 credentials, with tokens limited to 8,192 printable non-whitespace ASCII characters. References/model IDs use letters, digits, `.`, `_`, `:`, `/`, `-` (maximum 200 characters, starting with a letter/digit).
 

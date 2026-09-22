@@ -52,7 +52,8 @@ function identifier(value: unknown): string {
   return value;
 }
 
-function tokenLimit(value: unknown, name: string): number {
+function tokenLimit(value: unknown, name: string, fallback: number): number {
+  if (value === undefined) return fallback;
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1 || value > 2_000_000) {
     throw new Error(`${name} must be an integer between 1 and 2000000`);
   }
@@ -134,8 +135,8 @@ export function loadModelConfiguration(
   if (api === 'anthropic-messages' && credential?.value.includes('sk-ant-oat')) {
     throw new Error('Anthropic OAuth tokens are unsupported; supply an Anthropic API key');
   }
-  const contextWindow = tokenLimit(model.contextWindow, 'contextWindow');
-  const maxOutputTokens = tokenLimit(model.maxOutputTokens, 'maxOutputTokens');
+  const contextWindow = tokenLimit(model.contextWindow, 'contextWindow', 128_000);
+  const maxOutputTokens = tokenLimit(model.maxOutputTokens, 'maxOutputTokens', 8_192);
   if (maxOutputTokens >= contextWindow) throw new Error('maxOutputTokens must be less than contextWindow');
   return {
     connection: {

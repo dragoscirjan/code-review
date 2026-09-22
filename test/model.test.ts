@@ -41,6 +41,10 @@ test('selects only the referenced provider credential without a model allowlist'
   assert.equal(loaded.connection.reasoning, true);
   assert.equal(loaded.connection.credential?.value, 'router-secret');
   assert.ok(!JSON.stringify(loaded.connection).includes('unused-secret'));
+
+  const defaulted = loadModelConnection(JSON.stringify({ ...config, model: { id: 'legacy-v1-model' } }), credentials);
+  assert.equal(defaulted.contextWindow, 128_000);
+  assert.equal(defaulted.maxOutputTokens, 8_192);
 });
 
 test('supports keyless local endpoints and explicit authentication schemes', () => {
@@ -88,8 +92,6 @@ test('rejects unknown/native harness fields, missing credentials and malformed i
     { ...config, model: { id: 'ok', contextWindow: 100, maxOutputTokens: 200 } },
   ])
     assert.throws(() => load(invalid));
-  assert.throws(() => load({ ...config, model: { ...config.model, contextWindow: undefined } }), /contextWindow/);
-  assert.throws(() => load({ ...config, model: { ...config.model, maxOutputTokens: undefined } }), /maxOutputTokens/);
   assert.throws(() => loadModelConnection('{"secret":"invalid'), /must be valid JSON/);
   assert.throws(() => loadModelConnection('x'.repeat(32001)), /exceeds/);
   assert.throws(
