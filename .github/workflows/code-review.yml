@@ -27,6 +27,7 @@ jobs:
           container-engine: podman
           backend: pi
           reasoning: true
+          specialist-token-budget: 2000000
           model-config: |
             {
               "version": 1,

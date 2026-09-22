@@ -13,6 +13,7 @@ describe('dogfood code review workflow', () => {
     expect(workflow).toMatch(/^\s*backend: pi\s*$/m);
     expect(workflow).not.toMatch(/^\s*backend: opencode\s*$/m);
     expect(workflow).toMatch(/^\s*reasoning: true\s*$/m);
+    expect(workflow).toMatch(/^\s*specialist-token-budget: 2000000\s*$/m);
     expect(workflow).toContain('"api": "openai-completions"');
     expect(workflow).toContain('"baseUrl": "https://openrouter.ai/api/v1"');
     expect(workflow).toContain('"id": "z-ai/glm-5.3-flash"');
