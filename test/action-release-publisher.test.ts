@@ -113,7 +113,11 @@ describe('action release publisher', () => {
     repository.failPushAfterApplying = true;
     const releases = new FakeReleases();
     releases.failCreateAfterApplying = true;
-    const result = await publishActionRelease({ version: 'v1.0.0', expectedMainSha: MAIN_SHA }, repository, releases);
+    const result = await publishActionRelease(
+      { version: 'v1.0.0', bump: 'patch', expectedMainSha: MAIN_SHA },
+      repository,
+      releases,
+    );
     expect(result.plan.noop).toBe(true);
     expect(repository.refs).toEqual({ v1: ref(MAIN_SHA), 'v1.0.0': ref(MAIN_SHA) });
     expect(releases.records).toEqual([release('v1.0.0')]);
@@ -122,10 +126,29 @@ describe('action release publisher', () => {
   test('retries partial tag publication and creates only the missing GitHub Release', async () => {
     const repository = new FakeRepository(MAIN_SHA, { v1: ref(MAIN_SHA), 'v1.0.0': ref(MAIN_SHA) });
     const releases = new FakeReleases();
-    const result = await publishActionRelease({ version: 'v1.0.0', expectedMainSha: MAIN_SHA }, repository, releases);
+    const result = await publishActionRelease(
+      { version: 'v1.0.0', bump: 'patch', expectedMainSha: MAIN_SHA },
+      repository,
+      releases,
+    );
     expect(result.plan.noop).toBe(true);
     expect(repository.pushes).toBe(0);
     expect(releases.creates).toBe(1);
+  });
+
+  test('rejects a pinned version when remote releases changed the requested semantic bump', async () => {
+    const repository = new FakeRepository(MAIN_SHA, {
+      'v1.0.0': ref(OLD_SHA),
+      v1: ref(OLD_SHA),
+      'v2.0.0': ref(OLD_SHA),
+      v2: ref(OLD_SHA),
+    });
+    const releases = new FakeReleases([release('v1.0.0'), release('v2.0.0')]);
+    await expect(
+      publishActionRelease({ version: 'v1.1.0', bump: 'minor', expectedMainSha: MAIN_SHA }, repository, releases),
+    ).rejects.toThrow('selected version no longer matches the requested semantic bump');
+    expect(repository.pushes).toBe(0);
+    expect(releases.creates).toBe(0);
   });
 
   test('rejects a partial retry after main advances beyond its validated target', async () => {
@@ -136,8 +159,8 @@ describe('action release publisher', () => {
     );
     const releases = new FakeReleases([release('v1.1.0')]);
     await expect(
-      publishActionRelease({ version: 'v1.0.0', expectedMainSha: MAIN_SHA }, repository, releases),
-    ).rejects.toThrow('immutable tag v1.0.0 already points to another commit');
+      publishActionRelease({ version: 'v1.0.0', bump: 'patch', expectedMainSha: MAIN_SHA }, repository, releases),
+    ).rejects.toThrow('immutable tag v1.0.0 has no corresponding published GitHub Release');
     expect(repository.pushes).toBe(0);
     expect(releases.creates).toBe(0);
   });
@@ -145,7 +168,11 @@ describe('action release publisher', () => {
   test('fails closed when current main differs from the validated workflow revision', async () => {
     const repository = new FakeRepository(MAIN_SHA);
     await expect(
-      publishActionRelease({ version: 'v1.0.0', expectedMainSha: OLD_SHA }, repository, new FakeReleases()),
+      publishActionRelease(
+        { version: 'v1.0.0', bump: 'patch', expectedMainSha: OLD_SHA },
+        repository,
+        new FakeReleases(),
+      ),
     ).rejects.toThrow('current main does not match');
     expect(repository.pushes).toBe(0);
   });
@@ -154,7 +181,7 @@ describe('action release publisher', () => {
     const repository = new FakeRepository(MAIN_SHA, { 'v1.0.0': ref(MAIN_SHA) });
     const releases = new FakeReleases([{ tagName: 'v1.0.0', draft: true, prerelease: false }]);
     await expect(
-      publishActionRelease({ version: 'v1.0.0', expectedMainSha: MAIN_SHA }, repository, releases),
+      publishActionRelease({ version: 'v1.0.0', bump: 'patch', expectedMainSha: MAIN_SHA }, repository, releases),
     ).rejects.toThrow('must be published and stable');
     expect(repository.pushes).toBe(0);
   });
@@ -166,7 +193,7 @@ describe('action release publisher', () => {
       repository.refs.v1 = ref(OLD_SHA);
     });
     await expect(
-      publishActionRelease({ version: 'v1.0.0', expectedMainSha: MAIN_SHA }, repository, releases),
+      publishActionRelease({ version: 'v1.0.0', bump: 'patch', expectedMainSha: MAIN_SHA }, repository, releases),
     ).rejects.toThrow('immutable release target changed during publication');
   });
 });

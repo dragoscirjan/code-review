@@ -24,6 +24,7 @@ export type ActionReleasePublisherInput =
 
 export interface PublishActionReleaseInput {
   version: string;
+  bump: ActionReleaseBump;
   expectedMainSha: string;
 }
 
@@ -33,7 +34,7 @@ export interface ActionReleaseResult {
 }
 
 async function planFromRemote(
-  input: ActionReleasePublisherInput,
+  input: ActionReleasePublisherInput | PublishActionReleaseInput,
   repository: ReleaseRepository,
   releases: GitHubReleaseStore,
   requiredTargetSha?: string,
@@ -44,14 +45,20 @@ async function planFromRemote(
     throw new Error('Action release aborted: current main does not match the validated workflow revision');
   }
   const releaseRecords = await releases.list();
-  const selectedVersion =
-    exactVersion ??
-    resolveActionReleaseVersion({
-      bump: input.bump as ActionReleaseBump,
-      targetSha: input.expectedMainSha ?? snapshot.mainSha,
-      refs: snapshot.refs,
-      releases: releaseRecords,
-    });
+  const resolvedVersion =
+    input.bump === undefined
+      ? undefined
+      : resolveActionReleaseVersion({
+          bump: input.bump,
+          targetSha: input.expectedMainSha ?? snapshot.mainSha,
+          refs: snapshot.refs,
+          releases: releaseRecords,
+        });
+  if (exactVersion && resolvedVersion && exactVersion.tag !== resolvedVersion.tag) {
+    throw new Error('Action release aborted: selected version no longer matches the requested semantic bump');
+  }
+  const selectedVersion = exactVersion ?? resolvedVersion;
+  if (!selectedVersion) throw new Error('Action release failed: no release version was selected');
   const targetSha =
     requiredTargetSha === undefined
       ? (input.expectedMainSha ?? snapshot.refs[selectedVersion.tag]?.targetSha ?? snapshot.mainSha)
@@ -102,6 +109,10 @@ export async function publishActionRelease(
     const requiredTargetSha = initialPlan.targetSha;
     // A second authoritative read immediately before mutation prevents executing a stale dry-run plan.
     let plan = await planFromRemote(input, repository, releases, requiredTargetSha);
+    const exactInput: ActionReleasePublisherInput = {
+      version: input.version,
+      expectedMainSha: input.expectedMainSha,
+    };
     let published = false;
 
     if (plan.createVersionTag || plan.updateMajorTag) {
@@ -109,14 +120,14 @@ export async function publishActionRelease(
         await repository.pushTags(plan);
         published = true;
       } catch {
-        const afterConflict = await planFromRemote(input, repository, releases, requiredTargetSha);
+        const afterConflict = await planFromRemote(exactInput, repository, releases, requiredTargetSha);
         if (!tagsMatchPlan(plan, afterConflict)) {
           throw new Error('Action release failed: tag publication conflicted with changed remote state');
         }
         published = true;
         plan = afterConflict;
       }
-      const afterTags = await planFromRemote(input, repository, releases, requiredTargetSha);
+      const afterTags = await planFromRemote(exactInput, repository, releases, requiredTargetSha);
       if (!tagsMatchPlan(plan, afterTags)) {
         throw new Error('Action release failed: published tags did not verify against remote state');
       }
@@ -128,7 +139,7 @@ export async function publishActionRelease(
         await releases.create(plan.version.tag, plan.targetSha);
         published = true;
       } catch {
-        const afterConflict = await planFromRemote(input, repository, releases, requiredTargetSha);
+        const afterConflict = await planFromRemote(exactInput, repository, releases, requiredTargetSha);
         if (afterConflict.createGitHubRelease) {
           throw new Error('Action release failed: GitHub Release creation did not reach the requested stable state');
         }
@@ -136,7 +147,7 @@ export async function publishActionRelease(
       }
     }
 
-    const verified = await planFromRemote(input, repository, releases, requiredTargetSha);
+    const verified = await planFromRemote(exactInput, repository, releases, requiredTargetSha);
     if (!verified.noop) {
       throw new Error('Action release failed: final remote state is incomplete');
     }

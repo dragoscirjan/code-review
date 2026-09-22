@@ -29,9 +29,10 @@ describe('release workflow', () => {
     expect(publish).not.toContain('npm ');
     expect(publish).not.toContain('mise ');
     expect(publish).not.toContain('src/');
-    expect(publish).not.toContain('inputs.bump');
+    expect(publish).toContain('RELEASE_BUMP: ${{ inputs.bump }}');
     expect(publish).toContain('RELEASE_VERSION: ${{ needs.preflight.outputs.version }}');
     expect(publish).toContain('--version "$RELEASE_VERSION"');
+    expect(publish).toContain('--bump "$RELEASE_BUMP"');
     expect(publish).toContain('sparse-checkout: dist/action-release.js');
   });
 });

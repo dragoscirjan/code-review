@@ -94,9 +94,11 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           RELEASE_REPOSITORY: ${{ github.repository }}
           RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+          RELEASE_BUMP: ${{ inputs.bump }}
           RELEASE_MAIN_SHA: ${{ github.sha }}
         run: >-
           node dist/action-release.js publish
           --version "$RELEASE_VERSION"
+          --bump "$RELEASE_BUMP"
           --repository "$RELEASE_REPOSITORY"
           --expected-main-sha "$RELEASE_MAIN_SHA"

@@ -19,7 +19,7 @@ function parseArguments(args: readonly string[]): CliOptions {
   const mode = args[0];
   if (mode !== 'plan' && mode !== 'publish') {
     throw new Error(
-      'usage: action-release plan <--version vMAJOR.MINOR.PATCH|--bump major|minor|patch> --repository <owner/name> [--expected-main-sha <sha>]; publish requires --version',
+      'usage: action-release plan <--version vMAJOR.MINOR.PATCH|--bump major|minor|patch> --repository <owner/name> [--expected-main-sha <sha>]; publish requires --version and --bump',
     );
   }
   const values = new Map<string, string>();
@@ -39,13 +39,16 @@ function parseArguments(args: readonly string[]): CliOptions {
   const version = values.get('--version');
   const rawBump = values.get('--bump');
   const repository = values.get('--repository');
-  if (!repository || Number(Boolean(version)) + Number(Boolean(rawBump)) !== 1) {
-    throw new Error('repository and exactly one release selector are required');
+  if (!repository) throw new Error('repository is required');
+  if (mode === 'plan' && Number(Boolean(version)) + Number(Boolean(rawBump)) !== 1) {
+    throw new Error('planning requires exactly one release selector');
   }
   if (rawBump && rawBump !== 'major' && rawBump !== 'minor' && rawBump !== 'patch') {
     throw new Error('invalid action release bump');
   }
-  if (mode === 'publish' && !version) throw new Error('publication requires an exact version');
+  if (mode === 'publish' && (!version || !rawBump)) {
+    throw new Error('publication requires an exact version and semantic bump');
+  }
   return {
     mode,
     version,
@@ -78,7 +81,11 @@ export async function main(
       console.log(JSON.stringify(plan, null, 2));
     } else {
       const result = await publishActionRelease(
-        { version: options.version as string, expectedMainSha: options.expectedMainSha as string },
+        {
+          version: options.version as string,
+          bump: options.bump as ActionReleaseBump,
+          expectedMainSha: options.expectedMainSha as string,
+        },
         repository,
         releases,
       );
