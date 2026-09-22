@@ -372,6 +372,7 @@ test('policy and scope bind state without credential material', () => {
     modelApi: 'openai-completions',
     modelBaseUrl: 'https://example.test/v1',
     modelNetwork: 'remote',
+    modelReasoning: false,
     contextWindow: 128_000,
     maximumOutputTokens: 8_192,
     containerEngine: 'podman',
@@ -411,6 +412,7 @@ test('policy and scope bind state without credential material', () => {
     policy,
     reviewPolicyDigest({ ...policyInput, deterministicAnalyzerManifestDigest: `sha256:${'N'.repeat(43)}` }),
   );
+  assert.notEqual(policy, reviewPolicyDigest({ ...policyInput, modelReasoning: true }));
   assert.notEqual(policy, reviewPolicyDigest({ ...policyInput, repositoryMemoryMode: 'none' }));
   assert.notEqual(policy, reviewPolicyDigest({ ...policyInput, repositoryMemoryContractVersion: 2 }));
   assert.notEqual(policy, reviewPolicyDigest({ ...policyInput, requestedReviewStrategy: 'single-pass' }));

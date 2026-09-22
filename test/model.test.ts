@@ -16,7 +16,7 @@ const config = {
     network: 'remote',
     credential: 'router',
   },
-  model: { id: 'z-ai/glm-5.3-flash' },
+  model: { id: 'z-ai/glm-5.3-flash', contextWindow: 1_048_576, maxOutputTokens: 943_718 },
 };
 const credentials = JSON.stringify({
   router: { type: 'bearer', value: 'router-secret' },
@@ -30,13 +30,15 @@ test('selects only the referenced provider credential without a model allowlist'
     model: { id: 'vendor/paid-model:latest', contextWindow: 64000, maxOutputTokens: 4096 },
   });
   assert.equal(connection.modelId, 'vendor/paid-model:latest');
+  assert.equal(connection.reasoning, false);
   assert.equal(connection.credential?.value, 'router-secret');
   assert.ok(!JSON.stringify(connection).includes('unused-secret'));
   assert.equal(connection.contextWindow, 64000);
   assert.equal(connection.maxOutputTokens, 4096);
 
-  const loaded = loadModelConfiguration(JSON.stringify(config), credentials);
+  const loaded = loadModelConfiguration(JSON.stringify(config), credentials, true);
   assert.deepEqual(loaded.credentialValues, ['router-secret', 'unused-secret']);
+  assert.equal(loaded.connection.reasoning, true);
   assert.equal(loaded.connection.credential?.value, 'router-secret');
   assert.ok(!JSON.stringify(loaded.connection).includes('unused-secret'));
 });
@@ -86,6 +88,8 @@ test('rejects unknown/native harness fields, missing credentials and malformed i
     { ...config, model: { id: 'ok', contextWindow: 100, maxOutputTokens: 200 } },
   ])
     assert.throws(() => load(invalid));
+  assert.throws(() => load({ ...config, model: { ...config.model, contextWindow: undefined } }), /contextWindow/);
+  assert.throws(() => load({ ...config, model: { ...config.model, maxOutputTokens: undefined } }), /maxOutputTokens/);
   assert.throws(() => loadModelConnection('{"secret":"invalid'), /must be valid JSON/);
   assert.throws(() => loadModelConnection('x'.repeat(32001)), /exceeds/);
   assert.throws(

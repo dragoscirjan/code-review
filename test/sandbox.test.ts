@@ -11,6 +11,7 @@ const connection: ModelConnection = {
   baseUrl: 'https://provider.example/v1',
   network: 'remote',
   modelId: 'vendor/model:latest',
+  reasoning: false,
   contextWindow: 64000,
   maxOutputTokens: 4096,
   credential: { type: 'bearer', value: '!danger$SECRET{file:/tmp/secret}{env:GH_TOKEN}"\\end' },
@@ -93,6 +94,22 @@ for (const backend of ['opencode', 'pi'] as const) {
     });
   }
 }
+
+test('reasoning capability is propagated to both native harness configurations', () => {
+  const reasoningConnection = { ...connection, reasoning: true };
+  const piConfig = buildHarnessConfig(reasoningConnection, 'pi') as {
+    providers: { 'review-provider': { models: Array<{ reasoning: boolean }> } };
+  };
+  const openCodeConfig = buildHarnessConfig(reasoningConnection, 'opencode') as {
+    provider: { 'review-provider': { models: { 'review-model': { reasoning: boolean } } } };
+  };
+  assert.equal(piConfig.providers['review-provider'].models[0]?.reasoning, true);
+  assert.equal(openCodeConfig.provider['review-provider'].models['review-model'].reasoning, true);
+  assert.equal(
+    (buildHarnessConfig(connection, 'pi') as typeof piConfig).providers['review-provider'].models[0]?.reasoning,
+    false,
+  );
+});
 
 test('keyless configuration contains no real credential; network policy cannot enable host networking', () => {
   const local: ModelConnection = {

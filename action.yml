@@ -12,6 +12,10 @@ inputs:
   model-credentials:
     description: Secret JSON mapping credential references to bearer or api-key tokens; only the selected credential enters the sandbox
     required: false
+  reasoning:
+    description: Whether the selected model supports or requires reasoning output
+    required: false
+    default: 'false'
   backend:
     description: Review backend. Accepted values are opencode and pi
     required: false

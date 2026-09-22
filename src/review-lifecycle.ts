@@ -556,6 +556,7 @@ export function reviewPolicyDigest(value: {
   modelApi: string;
   modelBaseUrl: string;
   modelNetwork: string;
+  modelReasoning: boolean;
   contextWindow: number;
   maximumOutputTokens: number;
   containerEngine: string;
