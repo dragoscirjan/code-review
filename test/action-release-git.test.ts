@@ -116,6 +116,38 @@ describe('GitActionReleaseRepository', () => {
     await repository.close();
   });
 
+  test('immutable-tag lease rejects movement during a partial retry before changing the major alias', async () => {
+    const { remote, work, firstSha } = await fixture();
+    git(work, 'tag', 'v1.0.0', firstSha);
+    git(work, 'tag', 'v1', firstSha);
+    git(work, 'push', '--quiet', 'origin', 'refs/tags/v1.0.0', 'refs/tags/v1');
+    git(work, 'commit', '--allow-empty', '--quiet', '-m', 'second');
+    const secondSha = git(work, 'rev-parse', 'HEAD');
+    git(work, 'tag', 'v1.1.0', secondSha);
+    git(work, 'push', '--quiet', 'origin', 'main', 'refs/tags/v1.1.0');
+
+    const repository = GitActionReleaseRepository.forTest(remote, 'test-token');
+    const snapshot = await repository.snapshot();
+    const stalePlan = planActionRelease({
+      version: 'v1.1.0',
+      targetSha: secondSha,
+      mainSha: snapshot.mainSha,
+      targetIsMainAncestor: true,
+      refs: snapshot.refs,
+      releases: [stableRelease('v1.0.0')],
+    });
+
+    git(work, 'commit', '--allow-empty', '--quiet', '-m', 'side target');
+    const sideSha = git(work, 'rev-parse', 'HEAD');
+    git(work, 'tag', '--force', 'v1.1.0', sideSha);
+    git(work, 'push', '--quiet', '--force', 'origin', 'refs/tags/v1.1.0');
+
+    await expect(repository.pushTags(stalePlan)).rejects.toThrow('git command was rejected');
+    expect(git(work, 'ls-remote', '--tags', remote, 'refs/tags/v1.1.0').split(/\s/)[0]).toBe(sideSha);
+    expect(git(work, 'ls-remote', '--tags', remote, 'refs/tags/v1').split(/\s/)[0]).toBe(firstSha);
+    await repository.close();
+  });
+
   test('reports annotated version tags so policy rejects indirect object identity', async () => {
     const { remote, work, firstSha } = await fixture();
     git(work, 'tag', '-a', 'v1.0.0', firstSha, '-m', 'annotated');

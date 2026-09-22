@@ -19,6 +19,12 @@ describe('action release CLI', () => {
       'unknown flag',
       ['plan', '--version', 'v1.0.0', '--repository', 'owner/repository', '--unknown', 'untrusted-value'],
     ],
+    ['multiple selectors', ['plan', '--version', 'v1.0.0', '--bump', 'patch', '--repository', 'owner/repository']],
+    ['invalid bump', ['plan', '--bump', 'untrusted-value', '--repository', 'owner/repository']],
+    [
+      'bump publication',
+      ['publish', '--bump', 'patch', '--repository', 'owner/repository', '--expected-main-sha', MAIN_SHA],
+    ],
   ])('suppresses untrusted argument errors: %s', async (_name, args) => {
     const errors = captureErrors();
     await expect(main(args, {})).resolves.toBe(1);

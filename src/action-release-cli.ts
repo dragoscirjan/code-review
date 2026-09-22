@@ -1,3 +1,4 @@
+import type { ActionReleaseBump } from './action-release';
 import { GitActionReleaseRepository } from './action-release-git';
 import { GitHubActionReleaseStore } from './action-release-github';
 import { inspectActionRelease, publishActionRelease } from './action-release-publisher';
@@ -8,7 +9,8 @@ export interface ActionReleaseCliEnvironment {
 
 interface CliOptions {
   mode: 'plan' | 'publish';
-  version: string;
+  version?: string;
+  bump?: ActionReleaseBump;
   repository: string;
   expectedMainSha?: string;
 }
@@ -17,24 +19,37 @@ function parseArguments(args: readonly string[]): CliOptions {
   const mode = args[0];
   if (mode !== 'plan' && mode !== 'publish') {
     throw new Error(
-      'usage: action-release <plan|publish> --version <vMAJOR.MINOR.PATCH> --repository <owner/name> [--expected-main-sha <sha>]',
+      'usage: action-release plan <--version vMAJOR.MINOR.PATCH|--bump major|minor|patch> --repository <owner/name> [--expected-main-sha <sha>]; publish requires --version',
     );
   }
   const values = new Map<string, string>();
   for (let index = 1; index < args.length; index += 2) {
     const name = args[index];
     const value = args[index + 1];
-    if (!name || !value || !['--version', '--repository', '--expected-main-sha'].includes(name) || values.has(name)) {
+    if (
+      !name ||
+      !value ||
+      !['--version', '--bump', '--repository', '--expected-main-sha'].includes(name) ||
+      values.has(name)
+    ) {
       throw new Error('invalid action release arguments');
     }
     values.set(name, value);
   }
   const version = values.get('--version');
+  const rawBump = values.get('--bump');
   const repository = values.get('--repository');
-  if (!version || !repository) throw new Error('version and repository are required');
+  if (!repository || Number(Boolean(version)) + Number(Boolean(rawBump)) !== 1) {
+    throw new Error('repository and exactly one release selector are required');
+  }
+  if (rawBump && rawBump !== 'major' && rawBump !== 'minor' && rawBump !== 'patch') {
+    throw new Error('invalid action release bump');
+  }
+  if (mode === 'publish' && !version) throw new Error('publication requires an exact version');
   return {
     mode,
     version,
+    bump: rawBump as ActionReleaseBump | undefined,
     repository,
     expectedMainSha: values.get('--expected-main-sha'),
   };
@@ -53,13 +68,17 @@ export async function main(
     }
     const repository = GitActionReleaseRepository.production(options.repository, token);
     const releases = new GitHubActionReleaseStore(options.repository, token);
-    const input = { version: options.version, expectedMainSha: options.expectedMainSha };
     if (options.mode === 'plan') {
-      const plan = await inspectActionRelease(input, repository, releases);
+      const selection = options.version ? { version: options.version } : { bump: options.bump as ActionReleaseBump };
+      const plan = await inspectActionRelease(
+        { ...selection, expectedMainSha: options.expectedMainSha },
+        repository,
+        releases,
+      );
       console.log(JSON.stringify(plan, null, 2));
     } else {
       const result = await publishActionRelease(
-        { version: options.version, expectedMainSha: options.expectedMainSha as string },
+        { version: options.version as string, expectedMainSha: options.expectedMainSha as string },
         repository,
         releases,
       );

@@ -5,6 +5,12 @@ describe('release workflow', () => {
   test('separates validated preflight from serialized least-privilege publication', async () => {
     const workflow = await readFile('.github/workflows/release.yml', 'utf8');
     expect(workflow).toContain('workflow_dispatch:');
+    expect(workflow).toContain('type: choice');
+    expect(workflow).toContain('default: patch');
+    expect(workflow).toContain('RELEASE_BUMP: ${{ inputs.bump }}');
+    expect(workflow).toContain('--bump "$RELEASE_BUMP"');
+    expect(workflow).toContain('version: ${{ steps.plan.outputs.version }}');
+    expect(workflow).not.toContain('inputs.version');
     expect(workflow).toContain('permissions: {}');
     expect(workflow).toContain(
       "if: github.ref == 'refs/heads/main' && github.event.repository.default_branch == 'main'",
@@ -23,6 +29,9 @@ describe('release workflow', () => {
     expect(publish).not.toContain('npm ');
     expect(publish).not.toContain('mise ');
     expect(publish).not.toContain('src/');
+    expect(publish).not.toContain('inputs.bump');
+    expect(publish).toContain('RELEASE_VERSION: ${{ needs.preflight.outputs.version }}');
+    expect(publish).toContain('--version "$RELEASE_VERSION"');
     expect(publish).toContain('sparse-checkout: dist/action-release.js');
   });
 });

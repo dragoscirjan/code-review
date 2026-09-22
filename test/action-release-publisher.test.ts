@@ -79,10 +79,32 @@ describe('action release publisher', () => {
   test('dry-run planning performs no writes and closes temporary repository state', async () => {
     const repository = new FakeRepository(MAIN_SHA);
     const releases = new FakeReleases();
-    const plan = await inspectActionRelease({ version: 'v1.0.0', expectedMainSha: MAIN_SHA }, repository, releases);
-    expect(plan).toMatchObject({ createVersionTag: true, updateMajorTag: true, createGitHubRelease: true });
+    const plan = await inspectActionRelease({ bump: 'patch', expectedMainSha: MAIN_SHA }, repository, releases);
+    expect(plan).toMatchObject({
+      version: { tag: 'v1.0.0' },
+      createVersionTag: true,
+      updateMajorTag: true,
+      createGitHubRelease: true,
+    });
     expect(repository.pushes).toBe(0);
     expect(releases.creates).toBe(0);
+    expect(repository.closed).toBe(true);
+  });
+
+  test('resolves a semantic bump once against validated remote state', async () => {
+    const repository = new FakeRepository(MAIN_SHA, {
+      'v1.2.2': ref(OLD_SHA),
+      'v1.2.3': ref(MAIN_SHA),
+      v1: ref(MAIN_SHA),
+    });
+    const releases = new FakeReleases([release('v1.2.2')]);
+    const plan = await inspectActionRelease({ bump: 'patch', expectedMainSha: MAIN_SHA }, repository, releases);
+    expect(plan).toMatchObject({
+      version: { tag: 'v1.2.3' },
+      createVersionTag: false,
+      updateMajorTag: false,
+      createGitHubRelease: true,
+    });
     expect(repository.closed).toBe(true);
   });
 

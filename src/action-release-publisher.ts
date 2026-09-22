@@ -1,5 +1,5 @@
-import type { ActionReleasePlan, ActionReleaseRecord, ActionReleaseState } from './action-release';
-import { parseActionReleaseVersion, planActionRelease } from './action-release';
+import type { ActionReleaseBump, ActionReleasePlan, ActionReleaseRecord, ActionReleaseState } from './action-release';
+import { parseActionReleaseVersion, planActionRelease, resolveActionReleaseVersion } from './action-release';
 
 export interface ReleaseRepositorySnapshot {
   mainSha: string;
@@ -18,12 +18,12 @@ export interface GitHubReleaseStore {
   create(tagName: string, targetSha: string): Promise<void>;
 }
 
-export interface ActionReleasePublisherInput {
-  version: string;
-  expectedMainSha?: string;
-}
+export type ActionReleasePublisherInput =
+  | { version: string; bump?: never; expectedMainSha?: string }
+  | { version?: never; bump: ActionReleaseBump; expectedMainSha?: string };
 
-export interface PublishActionReleaseInput extends ActionReleasePublisherInput {
+export interface PublishActionReleaseInput {
+  version: string;
   expectedMainSha: string;
 }
 
@@ -38,23 +38,32 @@ async function planFromRemote(
   releases: GitHubReleaseStore,
   requiredTargetSha?: string,
 ): Promise<ActionReleasePlan> {
-  const version = parseActionReleaseVersion(input.version);
+  const exactVersion = input.version === undefined ? undefined : parseActionReleaseVersion(input.version);
   const snapshot = await repository.snapshot();
   if (input.expectedMainSha && snapshot.mainSha !== input.expectedMainSha) {
     throw new Error('Action release aborted: current main does not match the validated workflow revision');
   }
+  const releaseRecords = await releases.list();
+  const selectedVersion =
+    exactVersion ??
+    resolveActionReleaseVersion({
+      bump: input.bump as ActionReleaseBump,
+      targetSha: input.expectedMainSha ?? snapshot.mainSha,
+      refs: snapshot.refs,
+      releases: releaseRecords,
+    });
   const targetSha =
     requiredTargetSha === undefined
-      ? (input.expectedMainSha ?? snapshot.refs[version.tag]?.targetSha ?? snapshot.mainSha)
-      : (snapshot.refs[version.tag]?.targetSha ?? snapshot.mainSha);
+      ? (input.expectedMainSha ?? snapshot.refs[selectedVersion.tag]?.targetSha ?? snapshot.mainSha)
+      : (snapshot.refs[selectedVersion.tag]?.targetSha ?? snapshot.mainSha);
   const targetIsMainAncestor = targetSha === snapshot.mainSha || (await snapshot.isAncestor(targetSha));
   const plan = planActionRelease({
-    version: input.version,
+    version: selectedVersion.tag,
     targetSha,
     mainSha: snapshot.mainSha,
     targetIsMainAncestor,
     refs: snapshot.refs,
-    releases: await releases.list(),
+    releases: releaseRecords,
   });
   if (requiredTargetSha && plan.targetSha !== requiredTargetSha) {
     throw new Error('Action release failed: immutable release target changed during publication');

@@ -22,6 +22,13 @@ export interface ActionReleaseState {
   releases: readonly ActionReleaseRecord[];
 }
 
+export type ActionReleaseBump = 'major' | 'minor' | 'patch';
+
+export interface ResolveActionReleaseVersionInput extends ActionReleaseState {
+  bump: ActionReleaseBump;
+  targetSha: string;
+}
+
 export interface ActionReleasePlan {
   version: ActionReleaseVersion;
   targetSha: string;
@@ -130,13 +137,13 @@ function validateRelease(value: ActionReleaseRecord): ActionReleaseRecord {
   return value;
 }
 
-function validateState(
-  state: ActionReleaseState,
-  requestedTag: string,
-): {
+interface ValidatedActionReleaseState {
+  versionRefs: ReadonlyMap<string, { version: ParsedVersion; targetSha: string }>;
   releasedVersions: readonly { version: ParsedVersion; targetSha: string }[];
   releaseTags: ReadonlySet<string>;
-} {
+}
+
+function readValidatedState(state: ActionReleaseState): ValidatedActionReleaseState {
   const versionRefs = new Map<string, { version: ParsedVersion; targetSha: string }>();
   for (const [tag, rawRef] of Object.entries(state.refs)) {
     if (!tag.startsWith('v')) continue;
@@ -168,14 +175,66 @@ function validateState(
     releaseTags.add(tag);
   }
 
-  for (const tag of versionRefs.keys()) {
-    if (!releaseTags.has(tag) && tag !== requestedTag) {
+  const releasedVersions = [...versionRefs.entries()].filter(([tag]) => releaseTags.has(tag)).map(([, entry]) => entry);
+  return { versionRefs, releasedVersions, releaseTags };
+}
+
+function assertNoUnexpectedOrphans(state: ValidatedActionReleaseState, requestedTag: string): void {
+  for (const tag of state.versionRefs.keys()) {
+    if (!state.releaseTags.has(tag) && tag !== requestedTag) {
       throw releaseError(`immutable tag ${tag} has no corresponding published GitHub Release`);
     }
   }
+}
 
-  const releasedVersions = [...versionRefs.entries()].filter(([tag]) => releaseTags.has(tag)).map(([, entry]) => entry);
-  return { releasedVersions, releaseTags };
+function validateState(state: ActionReleaseState, requestedTag: string): ValidatedActionReleaseState {
+  const validated = readValidatedState(state);
+  assertNoUnexpectedOrphans(validated, requestedTag);
+  return validated;
+}
+
+export function resolveActionReleaseVersion(input: ResolveActionReleaseVersionInput): ActionReleaseVersion {
+  assertCommitSha(input.targetSha, 'targetSha');
+  if (input.bump !== 'major' && input.bump !== 'minor' && input.bump !== 'patch') {
+    throw releaseError('bump must be one of major, minor, or patch');
+  }
+
+  const state = readValidatedState(input);
+  const releasedForTarget = state.releasedVersions
+    .filter((entry) => entry.targetSha === input.targetSha)
+    .sort((left, right) => compareVersions(left.version, right.version));
+  let version = releasedForTarget.at(-1)?.version;
+
+  if (!version) {
+    const latest = [...state.releasedVersions]
+      .sort((left, right) => compareVersions(left.version, right.version))
+      .at(-1);
+    if (!latest) {
+      version = parseVersion('v1.0.0');
+    } else {
+      let [major, minor, patch] = latest.version.numbers;
+      if (input.bump === 'major') {
+        major += 1n;
+        minor = 0n;
+        patch = 0n;
+      } else if (input.bump === 'minor') {
+        minor += 1n;
+        patch = 0n;
+      } else {
+        patch += 1n;
+      }
+      version = parseVersion(`v${major}.${minor}.${patch}`);
+    }
+  }
+
+  assertNoUnexpectedOrphans(state, version.tag);
+  return {
+    tag: version.tag,
+    majorTag: version.majorTag,
+    major: version.major,
+    minor: version.minor,
+    patch: version.patch,
+  };
 }
 
 export function planActionRelease(input: PlanActionReleaseInput): ActionReleasePlan {

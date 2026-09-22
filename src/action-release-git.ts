@@ -216,14 +216,18 @@ export class GitActionReleaseRepository implements ReleaseRepository {
   async pushTags(plan: ActionReleasePlan): Promise<void> {
     if (!this.token) throw new Error('Action release failed: publication token is required');
     if (!this.directory || !this.gitEnvironment) throw new Error('Action release failed: remote state was not loaded');
-    const args = ['push', '--atomic', '--quiet', `--force-with-lease=refs/heads/main:${plan.observedMainSha}`];
+    const observedVersionTarget = plan.createVersionTag ? '' : plan.targetSha;
+    const args = [
+      'push',
+      '--atomic',
+      '--quiet',
+      `--force-with-lease=refs/heads/main:${plan.observedMainSha}`,
+      `--force-with-lease=refs/tags/${plan.version.tag}:${observedVersionTarget}`,
+    ];
     if (plan.updateMajorTag) {
       args.push(`--force-with-lease=refs/tags/${plan.version.majorTag}:${plan.observedMajorTargetSha ?? ''}`);
     }
-    args.push('origin', `${plan.observedMainSha}:refs/heads/main`);
-    if (plan.createVersionTag) {
-      args.push(`${plan.targetSha}:refs/tags/${plan.version.tag}`);
-    }
+    args.push('origin', `${plan.observedMainSha}:refs/heads/main`, `${plan.targetSha}:refs/tags/${plan.version.tag}`);
     if (plan.updateMajorTag) {
       args.push(`${plan.majorTargetSha}:refs/tags/${plan.version.majorTag}`);
     }
