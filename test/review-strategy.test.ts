@@ -6,11 +6,13 @@ import {
   MAX_ARBITER_CONTEXT_BYTES,
   MAX_SPECIALIST_CONTEXT_BYTES,
   SPECIALIST_ROLES,
+  arbiterOutputTokens,
   priorFindingsForRole,
   projectArbiterContext,
   projectReviewContextForRole,
   reserveSpecialistTokens,
   selectReviewStrategy,
+  specialistOutputTokens,
 } from '../src/review-strategy';
 import { prepareReviewedDiff } from '../src/unified-diff';
 
@@ -228,7 +230,19 @@ test('prior findings route by fixed category and reservations account for every 
   };
   assert.deepEqual(priorFindingsForRole([base], 'compatibility'), [base]);
   assert.deepEqual(priorFindingsForRole([base], 'correctness'), []);
-  const reserved = reserveSpecialistTokens({ prompts: ['a', 'bb', 'ccc', 'dddd'], maximumOutputTokens: 10_000 });
+  const prompts = ['a', 'bb', 'ccc', 'dddd'];
+  const reserved = reserveSpecialistTokens({ prompts, maximumOutputTokens: 10_000 });
+  const reasoningReserved = reserveSpecialistTokens({
+    prompts,
+    maximumOutputTokens: 943_718,
+    reasoning: true,
+  });
   assert.ok(reserved > 100_000);
+  assert.ok(reasoningReserved > reserved);
+  assert.ok(reasoningReserved < 2_000_000);
+  assert.equal(specialistOutputTokens(943_718), 4_096);
+  assert.equal(arbiterOutputTokens(943_718), 2_048);
+  assert.equal(specialistOutputTokens(943_718, true), 65_536);
+  assert.equal(arbiterOutputTokens(943_718, true), 32_768);
   assert.throws(() => reserveSpecialistTokens({ prompts: ['only one'], maximumOutputTokens: 10 }), /Every fixed/);
 });

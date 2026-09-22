@@ -149,8 +149,8 @@ async function main(): Promise<void> {
       maximumArbiterContextBytes: MAX_ARBITER_CONTEXT_BYTES,
       maximumArbiterPromptBytes: MAX_ARBITER_PROMPT_BYTES,
       specialistRequestOverheadTokens: SPECIALIST_REQUEST_OVERHEAD_TOKENS,
-      specialistOutputTokens: specialistOutputTokens(config.connection.maxOutputTokens),
-      arbiterOutputTokens: arbiterOutputTokens(config.connection.maxOutputTokens),
+      specialistOutputTokens: specialistOutputTokens(config.connection.maxOutputTokens, config.connection.reasoning),
+      arbiterOutputTokens: arbiterOutputTokens(config.connection.maxOutputTokens, config.connection.reasoning),
     },
   });
   if (config.codeIndexer !== 'none') {
