@@ -145,6 +145,6 @@ describe('action release publisher', () => {
     });
     await expect(
       publishActionRelease({ version: 'v1.0.0', expectedMainSha: MAIN_SHA }, repository, releases),
-    ).rejects.toThrow('immutable tag v1.0.0 already points to another commit');
+    ).rejects.toThrow('immutable release target changed during publication');
   });
 });

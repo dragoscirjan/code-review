@@ -43,7 +43,10 @@ async function planFromRemote(
   if (input.expectedMainSha && snapshot.mainSha !== input.expectedMainSha) {
     throw new Error('Action release aborted: current main does not match the validated workflow revision');
   }
-  const targetSha = input.expectedMainSha ?? snapshot.refs[version.tag]?.targetSha ?? snapshot.mainSha;
+  const targetSha =
+    requiredTargetSha === undefined
+      ? (input.expectedMainSha ?? snapshot.refs[version.tag]?.targetSha ?? snapshot.mainSha)
+      : (snapshot.refs[version.tag]?.targetSha ?? snapshot.mainSha);
   const targetIsMainAncestor = targetSha === snapshot.mainSha || (await snapshot.isAncestor(targetSha));
   const plan = planActionRelease({
     version: input.version,

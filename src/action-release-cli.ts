@@ -66,8 +66,13 @@ export async function main(
       console.log(JSON.stringify(result, null, 2));
     }
     return 0;
-  } catch {
-    console.error('Action release failed; details suppressed');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '';
+    const safeMessage =
+      message.startsWith('Action release failed:') || message.startsWith('Action release aborted:')
+        ? message
+        : 'Action release failed; details suppressed';
+    console.error(safeMessage);
     return 1;
   }
 }
