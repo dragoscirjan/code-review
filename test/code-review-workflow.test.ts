@@ -7,7 +7,7 @@ describe('dogfood code review workflow', () => {
   test('uses the contract-tested Pi backend without changing the provider or security boundary', () => {
     expect(workflow).toContain('on:\n  pull_request_target:');
     expect(workflow).toContain('permissions: {}');
-    expect(workflow).toContain('uses: dragoscirjan/code-review@a68f9b719ab3b8980b351df539d0d269512f7281');
+    expect(workflow).toContain('uses: dragoscirjan/code-review@e3eaaef3c50fa96bcafdca898a9ec264979eb825');
     expect(workflow).toContain('          github-token: ${{ secrets.GH_TOKEN }}');
     expect(workflow).toContain('          container-engine: podman');
     expect(workflow).toMatch(/^\s*backend: pi\s*$/m);
