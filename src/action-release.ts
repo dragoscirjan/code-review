@@ -25,6 +25,7 @@ export interface ActionReleaseState {
 export interface ActionReleasePlan {
   version: ActionReleaseVersion;
   targetSha: string;
+  observedMainSha: string;
   majorTargetSha: string;
   observedMajorTargetSha: string | null;
   latestMajorVersion: string | null;
@@ -223,6 +224,7 @@ export function planActionRelease(input: PlanActionReleaseInput): ActionReleaseP
       patch: version.patch,
     },
     targetSha: input.targetSha,
+    observedMainSha: input.mainSha,
     majorTargetSha,
     observedMajorTargetSha: currentMajorTarget ?? null,
     latestMajorVersion: latest?.version.tag ?? null,

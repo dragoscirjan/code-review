@@ -72,10 +72,10 @@ jobs:
             --user 65534:65534 \
             docker.io/library/node:24.14.0-bookworm-slim@sha256:4bd6219054c8bebcd26a66bfd8ca0bd6e1024b4b97474c59bb7ee3bbcbef4fe8 \
             node --version
-      - name: Verify bundled action
+      - name: Verify committed bundles
         run: |
-          git ls-files --error-unmatch dist/index.js
-          git diff --exit-code -- dist/index.js
+          git ls-files --error-unmatch dist/index.js dist/action-release.js
+          test -z "$(git status --porcelain=v1 --untracked-files=all -- dist)"
 
   model-contract:
     runs-on: ubuntu-24.04

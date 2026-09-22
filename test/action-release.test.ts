@@ -72,6 +72,7 @@ describe('planActionRelease', () => {
         patch: '3',
       },
       targetSha: MAIN_SHA,
+      observedMainSha: MAIN_SHA,
       majorTargetSha: MAIN_SHA,
       observedMajorTargetSha: null,
       latestMajorVersion: null,
