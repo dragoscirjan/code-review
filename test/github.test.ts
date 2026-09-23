@@ -756,6 +756,58 @@ test('selects one actor-owned current summary and rejects ambiguous current stat
   );
 });
 
+test('derives the authenticated actor from the token, including a GitHub App bot identity', async () => {
+  const installation = new GitHubClient(
+    'installation-token',
+    'https://api.example.test',
+    async () => new Response(JSON.stringify({ id: 987654, login: 'code-review-bot[bot]' }), { status: 200 }),
+  );
+  assert.deepEqual(await installation.getAuthenticatedActor(), { id: 987654, login: 'code-review-bot[bot]' });
+
+  const pat = new GitHubClient(
+    'pat-token',
+    'https://api.example.test',
+    async () => new Response(JSON.stringify({ id: 7, login: 'owner' }), { status: 200 }),
+  );
+  assert.deepEqual(await pat.getAuthenticatedActor(), { id: 7, login: 'owner' });
+});
+
+test('selectManagedComment binds ownership to the app bot identity, never to the previous PAT owner', () => {
+  const current = '<!-- code-review:opencode:v5 -->';
+  const appSummary: GitHubComment = {
+    id: 21,
+    body: `app summary\n${current}`,
+    html_url: 'url',
+    user: { id: 987654, login: 'code-review-bot[bot]' },
+  };
+  const patSummary: GitHubComment = {
+    id: 22,
+    body: `pat summary\n${current}`,
+    html_url: 'url',
+    user: { id: 7, login: 'owner' },
+  };
+  const selection = selectManagedComment([patSummary, appSummary], 987654, [current]);
+  assert.equal(selection.kind, 'current');
+  assert.equal(selection.kind === 'current' ? selection.comment.id : undefined, 21);
+  assert.equal(selectManagedComment([appSummary], 7, [current]).kind, 'none');
+  assert.equal(selectManagedComment([patSummary], 987654, [current]).kind, 'none');
+});
+
+test('expired and unauthorized GitHub tokens fail closed without echoing the credential', async () => {
+  for (const status of [401, 403]) {
+    const client = new GitHubClient(
+      'installation-token',
+      'https://api.example.test',
+      async () => new Response(null, { status }),
+    );
+    await assert.rejects(client.getAuthenticatedActor(), (error: Error) => {
+      assert.match(error.message, new RegExp(`failed with ${status}$`, 'u'));
+      assert.ok(!error.message.includes('installation-token'));
+      return true;
+    });
+  }
+});
+
 test('acquires a bounded strict-descendant compare with matching JSON and diff identities', async () => {
   const base = 'a'.repeat(40);
   const head = 'b'.repeat(40);
