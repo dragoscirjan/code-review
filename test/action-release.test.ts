@@ -113,6 +113,12 @@ describe('resolveActionReleaseVersion', () => {
     );
     expect(
       resolve(
+        ['fix(#57): update behavior\n\nBREAKING CHANGE: replace the public contract\n\nSigned-off-by: A <a@b>'],
+        state,
+      ).tag,
+    ).toBe('v3.0.0');
+    expect(
+      resolve(
         ['fix(#57): clarify documentation\n\nThe previous output included:\nBREAKING CHANGE: example text'],
         state,
       ).tag,

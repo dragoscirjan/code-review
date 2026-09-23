@@ -84,6 +84,24 @@ describe('GitActionReleaseRepository', () => {
     await repository.close();
   });
 
+  test('excludes non-conventional merge commits while retaining their conventional branch commits', async () => {
+    const { remote, work, firstSha } = await fixture();
+    git(work, 'checkout', '--quiet', '-b', 'topic');
+    git(work, 'commit', '--allow-empty', '--quiet', '-m', 'feat(#57): add release behavior');
+    git(work, 'checkout', '--quiet', 'main');
+    git(work, 'commit', '--allow-empty', '--quiet', '-m', 'fix(#57): prepare release behavior');
+    git(work, 'merge', '--no-ff', '--quiet', 'topic', '-m', 'Merge branch topic');
+    git(work, 'push', '--quiet', 'origin', 'main');
+
+    const repository = GitActionReleaseRepository.forTest(remote);
+    const snapshot = await repository.snapshot();
+    expect((await snapshot.commitMessagesSince(firstSha)).map((message) => message.trim()).sort()).toEqual([
+      'feat(#57): add release behavior',
+      'fix(#57): prepare release behavior',
+    ]);
+    await repository.close();
+  });
+
   test('main lease prevents tagging a revision after authoritative main advances', async () => {
     const { remote, work, firstSha } = await fixture();
     const repository = GitActionReleaseRepository.forTest(remote, 'test-token');

@@ -83,22 +83,22 @@ function containsAsciiControl(value: string): boolean {
 function hasBreakingChangeFooter(message: string): boolean {
   let end = message.length;
   while (end > 0 && message[end - 1] === '\n') end -= 1;
-  const normalized = message.slice(0, end);
-  const separator = normalized.lastIndexOf('\n\n');
-  if (separator < 0) return false;
-  const footerBlock = normalized.slice(separator + 2);
-  if (!FOOTER_BLOCK_START_PATTERN.test(footerBlock)) return false;
+  const paragraphs = message.slice(0, end).split('\n\n');
   let found = false;
-  for (const match of footerBlock.matchAll(BREAKING_CHANGE_PATTERN)) {
-    const breakingDescription = match[1] as string;
-    if (
-      !breakingDescription.startsWith(' ') ||
-      breakingDescription.slice(1).trim().length === 0 ||
-      containsAsciiControl(breakingDescription.slice(1))
-    ) {
-      throw releaseError('commit history contains an invalid breaking-change footer');
+  for (let index = paragraphs.length - 1; index > 0; index -= 1) {
+    const footerBlock = paragraphs[index] as string;
+    if (!FOOTER_BLOCK_START_PATTERN.test(footerBlock)) break;
+    for (const match of footerBlock.matchAll(BREAKING_CHANGE_PATTERN)) {
+      const breakingDescription = match[1] as string;
+      if (
+        !breakingDescription.startsWith(' ') ||
+        breakingDescription.slice(1).trim().length === 0 ||
+        containsAsciiControl(breakingDescription.slice(1))
+      ) {
+        throw releaseError('commit history contains an invalid breaking-change footer');
+      }
+      found = true;
     }
-    found = true;
   }
   return found;
 }

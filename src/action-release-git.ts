@@ -217,7 +217,14 @@ export class GitActionReleaseRepository implements ReleaseRepository {
         const output = (
           await runProcess(
             'git',
-            ['log', '-z', '--format=%H%x00%B', `--max-count=${MAX_RELEASE_COMMITS + 1}`, `${commitSha}..${mainSha}`],
+            [
+              'log',
+              '-z',
+              '--no-merges',
+              '--format=%H%x00%B',
+              `--max-count=${MAX_RELEASE_COMMITS + 1}`,
+              `${commitSha}..${mainSha}`,
+            ],
             directory,
             env,
           )
