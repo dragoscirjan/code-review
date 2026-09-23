@@ -79,7 +79,6 @@ function request(overrides: Partial<Parameters<typeof executeReviewStrategy>[0]>
     connection,
     opencodeVersion: '1.18.31',
     piVersion: '0.85.1',
-    customPrompt: 'Review carefully.',
     pullRequest,
     diff,
     reviewContext: context,
@@ -138,6 +137,7 @@ test('runs fixed roles sequentially, validates candidates, and applies a reject-
   assert.equal(calls[4]?.connection.maxOutputTokens, 2048);
   assert.match(calls[0]?.prompt ?? '', /correctness specialist/u);
   assert.match(calls[1]?.prompt ?? '', /security specialist/u);
+  assert.doesNotMatch(calls[0]?.prompt ?? '', /Trusted workflow review guidance/u);
   assert.doesNotMatch(calls[1]?.prompt ?? '', /correctness problem/u);
   assert.equal(fresh, 10);
   assert.equal(result.summary.rolesCompleted, 4);

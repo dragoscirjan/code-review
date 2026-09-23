@@ -235,7 +235,6 @@ async function executeTerminalFreshnessOverrun(path: 'no-candidate' | 'post-arbi
     connection: specialistConnection,
     opencodeVersion: '1.18.31',
     piVersion: '0.85.1',
-    customPrompt: 'Review carefully.',
     pullRequest,
     diff,
     reviewContext: packReviewContext([], specialistRuntime),

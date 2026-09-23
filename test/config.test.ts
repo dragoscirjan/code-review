@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { test } from 'vitest';
 import { getActionInput, loadActionConfig, managedCommentMarkers } from '../src/config';
 
@@ -20,6 +21,11 @@ const base = {
 test('reads hyphenated action input names', () => {
   assert.equal(getActionInput('github-token', { 'INPUT_GITHUB-TOKEN': ' token ' }), 'token');
   assert.equal(getActionInput('model-config', base), base.INPUT_MODEL_CONFIG);
+});
+
+test('public action contract omits the removed prompt input', async () => {
+  const action = await readFile(new URL('../action.yml', import.meta.url), 'utf8');
+  assert.doesNotMatch(action, /^ {2}prompt:/mu);
 });
 
 test('loads explicit model config and safe action defaults', () => {
@@ -63,6 +69,9 @@ test('requires explicit credentials and configuration; rejects legacy input', ()
   for (const name of ['INPUT_MODEL', 'INPUT_OPENROUTER_API_KEY']) {
     assert.throws(() => loadActionConfig({ ...base, [name]: 'old' }), /have been removed/);
   }
+  for (const value of ['untrusted guidance', '', '   ']) {
+    assert.throws(() => loadActionConfig({ ...base, INPUT_PROMPT: value }), /prompt has been removed/);
+  }
 });
 
 test('validates action limits and executable selection', () => {
@@ -75,7 +84,6 @@ test('validates action limits and executable selection', () => {
     ['INPUT_CODE_INDEXER', 'both', /must be none/],
     ['INPUT_CODE_INDEX_CACHE_KEY', 'bad key', /code-index-cache-key/],
     ['INPUT_CODE_INDEX_CACHE_TTL', 'forever', /must be a duration/],
-    ['INPUT_PROMPT', 'x'.repeat(10001), /must not exceed/],
     ['INPUT_MAX_DIFF_BYTES', '1', /max-diff-bytes/],
     ['INPUT_MINIMUM_CONFIDENCE', '.5', /minimum-confidence/],
     ['INPUT_MINIMUM_CONFIDENCE', '1.1', /minimum-confidence/],

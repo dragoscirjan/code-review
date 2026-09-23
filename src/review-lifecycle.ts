@@ -16,7 +16,7 @@ export interface ReviewSemanticVersions {
   state: number;
 }
 export const REVIEW_SEMANTIC_VERSIONS: Readonly<ReviewSemanticVersions> = Object.freeze({
-  reviewPolicy: 4,
+  reviewPolicy: 5,
   resultContract: 1,
   fingerprint: 2,
   analyzer: 1,
@@ -560,7 +560,6 @@ export function reviewPolicyDigest(value: {
   contextWindow: number;
   maximumOutputTokens: number;
   containerEngine: string;
-  customPrompt: string;
   minimumConfidence: number;
   maximumInlineComments: number;
   maximumDiffBytes: number;

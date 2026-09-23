@@ -51,7 +51,7 @@ Do not start implementation when the requirement changes authentication semantic
 - Track ownership for every server process and loaded model. Cleanup must not affect resources that existed before the action.
 - Validate all model output before using it.
 - Keep backend tools and permissions read-only during reviews.
-- Build a custom action prompt by adding trusted user guidance to fixed security and output rules. Do not let custom text replace those rules.
+- Keep review instructions fixed and versioned. Do not add free-form trusted guidance; repository content and action context must remain explicitly delimited untrusted data.
 - Do not execute code from the pull request under review.
 - Keep forge credentials in the publication and API-client layers. Give a review backend only the model-provider credential it needs. Do not write credentials into the checkout or prompt.
 - Use least-privilege tokens and short-lived GitHub App installation tokens.
@@ -190,7 +190,7 @@ Keep commits reviewable. A commit should build and pass the relevant tests unles
 - [ ] The implementation follows the current requirements and design.
 - [ ] Tests cover normal, failure, and security-sensitive paths.
 - [ ] Model output remains schema-validated.
-- [ ] Custom prompts cannot replace fixed security, permission, or schema rules.
+- [ ] No caller-supplied trusted review guidance is accepted; model instructions remain fixed and versioned.
 - [ ] Runtime cleanup stops or unloads only resources owned by the action.
 - [ ] Runtime processes use trusted executables, fixed argument construction, readiness timeouts, and loopback binding by default.
 - [ ] No credential can enter model context or logs.

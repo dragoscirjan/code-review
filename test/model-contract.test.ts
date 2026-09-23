@@ -146,7 +146,6 @@ for (const backend of ['opencode', 'pi'] as const) {
             },
             opencodeVersion: '1.18.31',
             piVersion: '0.85.1',
-            customPrompt: 'Review the supplied change.',
             timeoutMs: 540_000,
             environment: { PATH: process.env.PATH, HOME: process.env.HOME, GH_TOKEN: 'forge-sentinel-never-send' },
             pullRequest: {
