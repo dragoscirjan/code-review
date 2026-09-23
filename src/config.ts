@@ -32,6 +32,7 @@ export interface ActionConfig {
   deterministicAnalyzers: DeterministicAnalyzerMode;
   reviewMemory: ReviewMemoryMode;
   reviewStrategy: RequestedReviewStrategy;
+  credentialIsolation: 'gateway' | 'direct';
   specialistTokenBudget: number;
   timeoutMs: number;
 }
@@ -202,6 +203,10 @@ export function loadActionConfig(environment: NodeJS.ProcessEnv = process.env): 
   if (reviewStrategy !== 'single-pass' && reviewStrategy !== 'specialists' && reviewStrategy !== 'auto') {
     throw new Error('review-strategy must be single-pass, specialists, or auto');
   }
+  const credentialIsolation = getActionInput('credential-isolation', environment) ?? 'gateway';
+  if (credentialIsolation !== 'gateway' && credentialIsolation !== 'direct') {
+    throw new Error('credential-isolation must be gateway or direct');
+  }
   const specialistTokenBudget = parseInteger(
     getActionInput('specialist-token-budget', environment) ?? '300000',
     'specialist-token-budget',
@@ -232,6 +237,7 @@ export function loadActionConfig(environment: NodeJS.ProcessEnv = process.env): 
     deterministicAnalyzers,
     reviewMemory,
     reviewStrategy,
+    credentialIsolation,
     specialistTokenBudget,
     timeoutMs: timeoutSeconds * 1_000,
   };

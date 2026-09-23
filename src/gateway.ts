@@ -1,0 +1,171 @@
+import { randomBytes } from 'node:crypto';
+import { createServer, request as httpRequest, type IncomingMessage } from 'node:http';
+import { request as httpsRequest } from 'node:https';
+import type { ModelConnection } from './model';
+
+/**
+ * Host-side credential-isolating gateway (issue #67).
+ *
+ * The review container never receives the provider credential. It receives a
+ * per-run placeholder and a base URL pointing at this gateway. The gateway
+ * forwards to exactly one configured upstream origin, requires the placeholder
+ * on the provider's native credential header, and injects the real credential
+ * after that authorization. It never logs, never follows redirects for the
+ * client, and blocks cross-origin redirects so the harness cannot be steered
+ * to another destination while carrying a credential header.
+ */
+
+const HOP_BY_HOP_HEADERS = new Set([
+  'connection',
+  'keep-alive',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+]);
+
+export interface CredentialGateway {
+  /** Origin the review container uses as the provider base URL. */
+  origin: string;
+  /** Single-purpose token the container carries instead of the real credential. */
+  placeholder: string;
+  /** Stops the gateway and destroys open sockets. Resolves when closed. */
+  close: () => Promise<void>;
+}
+
+export interface CredentialGatewayRequest {
+  connection: Pick<ModelConnection, 'api' | 'baseUrl' | 'network'> & {
+    credential: { type: 'bearer' | 'api-key'; value: string };
+  };
+  /** Container-visible hostname alias for the host, chosen by the engine. */
+  containerHostAlias: string;
+}
+
+interface UpstreamHeaderPlan {
+  name: string;
+  prefix: string;
+}
+
+export function upstreamCredentialHeader(api: ModelConnection['api']): UpstreamHeaderPlan {
+  return api === 'anthropic-messages'
+    ? { name: 'x-api-key', prefix: '' }
+    : { name: 'authorization', prefix: 'Bearer ' };
+}
+
+function stripHopByHop(headers: Record<string, string | string[] | undefined>): Record<string, string | string[]> {
+  const forwarded: Record<string, string | string[]> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    if (value === undefined) continue;
+    if (HOP_BY_HOP_HEADERS.has(name.toLowerCase())) continue;
+    forwarded[name] = value;
+  }
+  return forwarded;
+}
+
+function requestTarget(request: IncomingMessage): string | undefined {
+  // Reject proxy-style absolute-form targets and CONNECT-style tunnel attempts:
+  // the gateway forwards paths against one fixed upstream origin only.
+  const target = request.url ?? '';
+  if (!target.startsWith('/') || target.includes('://')) return undefined;
+  return target;
+}
+
+export function startCredentialGateway(input: CredentialGatewayRequest): Promise<CredentialGateway> {
+  const upstream = new URL(input.connection.baseUrl);
+  if (upstream.protocol !== 'http:' && upstream.protocol !== 'https:') {
+    return Promise.reject(new Error('Credential gateway requires an http or https provider endpoint'));
+  }
+  const sendUpstream = upstream.protocol === 'https:' ? httpsRequest : httpRequest;
+  // Loopback aliases only exist inside the container. The gateway connects from
+  // the host, where those names do not resolve.
+  const upstreamHostname =
+    upstream.hostname === 'host.docker.internal' || upstream.hostname === 'host.containers.internal'
+      ? '127.0.0.1'
+      : upstream.hostname;
+  const upstreamOrigin = `${upstream.protocol}//${upstream.host}`;
+  const headerPlan = upstreamCredentialHeader(input.connection.api);
+  const placeholder = `gw-${randomBytes(24).toString('hex')}`;
+  const expectedAuthorization = `${headerPlan.prefix}${placeholder}`;
+
+  const openSockets = new Set<import('node:net').Socket>();
+  const server = createServer((request, response) => {
+    const authorizationHeader = request.headers[headerPlan.name];
+    const presented = Array.isArray(authorizationHeader) ? authorizationHeader[0] : authorizationHeader;
+    if (presented !== expectedAuthorization) {
+      response.statusCode = 403;
+      response.end();
+      return;
+    }
+    const target = requestTarget(request);
+    if (target === undefined || request.method === undefined) {
+      response.statusCode = 403;
+      response.end();
+      return;
+    }
+    const forwarded: Record<string, string | string[]> = {};
+    for (const [name, value] of Object.entries(stripHopByHop(request.headers))) {
+      if (name.toLowerCase() === 'host') continue;
+      forwarded[name] = value;
+    }
+    forwarded[headerPlan.name] = `${headerPlan.prefix}${input.connection.credential.value}`;
+    const outgoing = sendUpstream(
+      {
+        protocol: upstream.protocol,
+        hostname: upstreamHostname,
+        port: upstream.port || (upstream.protocol === 'https:' ? 443 : 80),
+        method: request.method,
+        path: target,
+        headers: forwarded,
+      },
+      (upstreamResponse) => {
+        const status = upstreamResponse.statusCode ?? 0;
+        const location = upstreamResponse.headers.location;
+        if (status >= 300 && status < 400 && location && new URL(location, upstreamOrigin).origin !== upstreamOrigin) {
+          upstreamResponse.destroy();
+          response.statusCode = 502;
+          response.end();
+          return;
+        }
+        response.writeHead(status, stripHopByHop(upstreamResponse.headers as Record<string, string | string[]>));
+        upstreamResponse.pipe(response);
+      },
+    );
+    outgoing.on('error', () => {
+      if (!response.headersSent) {
+        response.statusCode = 502;
+        response.end();
+        return;
+      }
+      response.destroy();
+    });
+    request.pipe(outgoing);
+    request.on('error', () => outgoing.destroy());
+    response.on('close', () => outgoing.destroy());
+  });
+  server.on('connection', (socket) => {
+    openSockets.add(socket);
+    socket.on('close', () => openSockets.delete(socket));
+  });
+
+  return new Promise<CredentialGateway>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '0.0.0.0', () => {
+      const address = server.address();
+      if (address === null || typeof address === 'string') {
+        reject(new Error('Credential gateway did not acquire a port'));
+        return;
+      }
+      resolve({
+        origin: `http://${input.containerHostAlias}:${address.port}`,
+        placeholder,
+        close: () =>
+          new Promise<void>((resolveClose) => {
+            for (const socket of openSockets) socket.destroy();
+            server.close(() => resolveClose());
+          }),
+      });
+    });
+  });
+}

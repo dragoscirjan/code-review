@@ -74,6 +74,16 @@ test('requires explicit credentials and configuration; rejects legacy input', ()
   }
 });
 
+test('credential isolation defaults to gateway and accepts only gateway or direct', () => {
+  assert.equal(loadActionConfig(base).credentialIsolation, 'gateway');
+  assert.equal(loadActionConfig({ ...base, INPUT_CREDENTIAL_ISOLATION: 'direct' }).credentialIsolation, 'direct');
+  assert.equal(loadActionConfig({ ...base, INPUT_CREDENTIAL_ISOLATION: 'gateway' }).credentialIsolation, 'gateway');
+  assert.throws(
+    () => loadActionConfig({ ...base, INPUT_CREDENTIAL_ISOLATION: 'off' }),
+    /credential-isolation must be gateway or direct/u,
+  );
+});
+
 test('validates action limits and executable selection', () => {
   for (const [name, value, message] of [
     ['INPUT_BACKEND', 'bash', /backend must/],

@@ -129,6 +129,17 @@ Operational notes:
 - Comments and reviews appear as `your-app[bot]`. Rotating the App private key requires no action changes: minted tokens are independent of the key that created them.
 - Migrating from a PAT: the first App-authenticated run cannot reuse prior PAT summaries because incremental state is identity-bound; it performs a fresh full review and publishes a new `your-app[bot]` thread. Old PAT comments are never edited or deleted; archive them manually if unwanted.
 
+`credential-isolation` defaults to `gateway`. The action runs a trusted host-side credential gateway for every credentialed provider endpoint, so the review container never receives the provider credential:
+
+- The container's native harness configuration points at the gateway with a single-purpose per-run placeholder token instead of the provider credential. The placeholder is destination-bound (the gateway only forwards to the one configured provider origin), single-run (fresh random value, gateway closed with the backend), and unusable elsewhere.
+- The gateway requires the placeholder on the provider's native credential header, strips it, and injects the real credential only after that authorization. Unused credential-map entries never leave the host.
+- The gateway forwards to the configured provider origin only, rejects proxy-style absolute targets and wrong/missing credentials without contacting upstream, and blocks cross-origin redirects so a compromised harness dependency cannot steer the credential header to another destination.
+- Container→gateway traffic is plain HTTP on the host-controlled container bridge; the gateway performs the upstream TLS connection from the host. The gateway port is reachable from the runner host and bridge, but every request requires the per-run placeholder. DNS pinning and enforced egress (firewall, per-connection destination resolution) remain future work tracked by the model-egress epic.
+- `credential-isolation: direct` restores the legacy behavior and passes the selected provider credential into the sandbox environment. Use it only to work around a harness incompatibility.
+- Keyless local endpoints (`model-credentials` omitted or keyless entry) connect directly as before; there is no credential to protect.
+
+Set `credential-isolation` to `direct` only to work around a specific endpoint incompatibility.
+
 ## Provider and model configuration
 
 `model-config` is **our strict versioned schema**, not native Pi/OpenCode configuration. The action translates it into the selected harness's native configuration inside its disposable container, before launching the harness. Host/user configuration is never modified.
@@ -186,27 +197,28 @@ Omit `model-credentials` for keyless servers. The harness adapters use a non-sec
 
 ## Inputs
 
-| Input                     | Default                | Description                                                                            |
-| ------------------------- | ---------------------- | -------------------------------------------------------------------------------------- |
-| `github-token`            | Required               | GitHub token (PAT or GitHub App installation token) for PR API access and publication. |
-| `model-config`            | Required               | Provider/model JSON above.                                                             |
-| `model-credentials`       | `{}`                   | Secret JSON credential map; only the selected credential enters the backend.           |
-| `reasoning`               | `false`                | Set `true` when the selected model supports or requires reasoning.                     |
-| `backend`                 | `opencode`             | `opencode` or `pi`.                                                                    |
-| `container-engine`        | `podman`               | `podman` or validated `docker` fallback.                                               |
-| `opencode-version`        | `1.18.31`              | Exact npm package version.                                                             |
-| `pi-version`              | `0.85.1`               | Exact npm package version.                                                             |
-| `code-indexer`            | `none`                 | `none`, `cgc` or `gitnexus`; exact base revision only.                                 |
-| `code-index-cache-key`    | `code-review-index-v1` | Cache key prefix.                                                                      |
-| `code-index-cache-ttl`    | `24h`                  | Maximum cache age (`ms`, `s`, `m`, `h`, `d`).                                          |
-| `max-diff-bytes`          | `120000`               | Maximum model-visible diff bytes; only complete diff hunks are included.               |
-| `minimum-confidence`      | `0`                    | Inclusive confidence threshold from `0` through `1`.                                   |
-| `max-inline-comments`     | `0`                    | Inline comment cap from `0` through `10`; `0` keeps summary-only behavior.             |
-| `deterministic-analyzers` | `none`                 | `none` or `base-config`; trusted workflow gate for fixed parse-only checks.            |
-| `review-memory`           | `none`                 | `none` or `base-config`; exact-base reviewer memory gate.                              |
-| `review-strategy`         | `auto`                 | `single-pass`, `specialists`, or deterministic `auto` selection.                       |
-| `specialist-token-budget` | `300000`               | Conservative aggregate specialist prompt/output reservation.                           |
-| `timeout-seconds`         | `600`                  | One call in single-pass mode; aggregate role/arbiter time in specialist mode.          |
+| Input                     | Default                | Description                                                                                       |
+| ------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------- |
+| `github-token`            | Required               | GitHub token (PAT or GitHub App installation token) for PR API access and publication.            |
+| `model-config`            | Required               | Provider/model JSON above.                                                                        |
+| `model-credentials`       | `{}`                   | Secret JSON credential map; only the selected credential enters the backend.                      |
+| `reasoning`               | `false`                | Set `true` when the selected model supports or requires reasoning.                                |
+| `backend`                 | `opencode`             | `opencode` or `pi`.                                                                               |
+| `container-engine`        | `podman`               | `podman` or validated `docker` fallback.                                                          |
+| `opencode-version`        | `1.18.31`              | Exact npm package version.                                                                        |
+| `pi-version`              | `0.85.1`               | Exact npm package version.                                                                        |
+| `code-indexer`            | `none`                 | `none`, `cgc` or `gitnexus`; exact base revision only.                                            |
+| `code-index-cache-key`    | `code-review-index-v1` | Cache key prefix.                                                                                 |
+| `code-index-cache-ttl`    | `24h`                  | Maximum cache age (`ms`, `s`, `m`, `h`, `d`).                                                     |
+| `max-diff-bytes`          | `120000`               | Maximum model-visible diff bytes; only complete diff hunks are included.                          |
+| `minimum-confidence`      | `0`                    | Inclusive confidence threshold from `0` through `1`.                                              |
+| `max-inline-comments`     | `0`                    | Inline comment cap from `0` through `10`; `0` keeps summary-only behavior.                        |
+| `deterministic-analyzers` | `none`                 | `none` or `base-config`; trusted workflow gate for fixed parse-only checks.                       |
+| `review-memory`           | `none`                 | `none` or `base-config`; exact-base reviewer memory gate.                                         |
+| `review-strategy`         | `auto`                 | `single-pass`, `specialists`, or deterministic `auto` selection.                                  |
+| `credential-isolation`    | `gateway`              | `gateway` keeps the provider credential host-side (default); `direct` passes it into the sandbox. |
+| `specialist-token-budget` | `300000`               | Conservative aggregate specialist prompt/output reservation.                                      |
+| `timeout-seconds`         | `600`                  | One call in single-pass mode; aggregate role/arbiter time in specialist mode.                     |
 
 Outputs: `comment-url`, `review-url`, `inline-comment-count`, `inline-history-suppressed-count`, `inline-limit-omitted-count`, `diff-truncated`, `context-truncated`, `context-unavailable-source-count`, `review-mode`, `review-strategy`, `specialist-role-count`, `specialist-candidate-count`, `arbiter-rejected-count`, `review-memory-status`, `memory-suppressed-count`, `memory-active-suppression-count`, `memory-active-preference-count`, `memory-effective-digest`, `new-finding-count`, `unchanged-finding-count`, `resolved-finding-count`, `superseded-finding-count`, `analyzer-coverage`, `analyzer-run-count`, `analyzer-observation-count`, `analyzer-skipped-file-count`, `code-indexer`, `code-index-cache-hit`.
 
@@ -349,7 +361,7 @@ Repository guidance, issue criteria, PR metadata, paths, symbols, index output, 
 - No PR code execution. The diff, exact-base guidance, linked issue criteria, bounded index results, and analyzer messages are untrusted prompt data. The removed `prompt` input is rejected; review instructions are fixed and versioned. Deterministic analyzers parse bounded in-memory text only.
 - The backend container is digest-pinned, mount-free, non-root, read-only, capability-dropped, resource-limited and denies added privileges. OpenCode denies all tools; Pi disables tools and resource discovery.
 - Native harness configuration is generated in container tmpfs with restrictive permissions. Fixed provider naming avoids built-in provider auto-configuration. Native interpolation syntax in credentials is handled without executing commands or loading referenced files.
-- GitHub credentials never enter the model container. Only the selected model credential is passed through environment—not arguments or prompt. Every validated credential value, including unused entries, remains host-side and is masked, scanned against the complete assembled prompt, redacted from findings, and included in the final publication scan. Output is bounded and raw provider errors are suppressed.
+- GitHub credentials never enter the model container. By default the provider credential never enters it either: a host-side credential gateway injects the selected credential only after destination authorization, and the container carries a single-purpose per-run placeholder (see "Model credential isolation"; `credential-isolation: direct` restores the legacy in-sandbox credential). Every validated credential value, including unused entries, remains host-side and is masked, scanned against the complete assembled prompt, redacted from findings, and included in the final publication scan. Output is bounded and raw provider errors are suppressed.
 - `network` permission and DNS/address preflight checks are **not an egress firewall**. DNS can change after checking; harness SDKs control redirects. Trust the endpoint and its redirect behavior. npm/package code also has container network access and the selected credential. A credential-isolating model gateway with enforced egress is future work.
 - Node DNS and filesystem promises cannot be cancelled after dispatch. Aggregate `Promise.race` deadlines bound how long orchestration waits and prevent publication, but the underlying operation can settle later. Workspace creation uses a preselected random path with immediate and late best-effort removal; an unhealthy operating system can still prevent cleanup confirmation, in which case the action fails closed.
 - Private HTTP is not encrypted. Prefer TLS and authenticated private endpoints.

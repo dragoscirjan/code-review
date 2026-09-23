@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { serializeReviewContext, truncateUtf8, type ReviewContextBundle } from './context-planner';
+import { startCredentialGateway, type CredentialGateway } from './gateway';
 import type { PullRequestContext, PullRequestDiff } from './github';
 import { redactSecrets, validateModelEndpoint, type ModelConnection } from './model';
 import { buildOpenCodeCommand, extractOpenCodeAssistantText } from './opencode';
@@ -67,12 +68,18 @@ export interface StructuredBackendRuntime {
     env: NodeJS.ProcessEnv,
     timeoutMs: number,
   ) => Promise<{ ok: boolean; details: string }>;
+  startCredentialGateway?: (input: {
+    connection: ModelConnection;
+    containerHostAlias: string;
+  }) => Promise<CredentialGateway>;
 }
 
 interface BackendRequest {
   backend: ReviewBackend;
   containerEngine: 'podman' | 'docker';
   connection: ModelConnection;
+  /** When unset, the backend runs with the legacy direct provider connection. */
+  credentialIsolation?: 'gateway' | 'direct';
   opencodeVersion: string;
   piVersion: string;
   timeoutMs: number;
@@ -268,6 +275,7 @@ export function buildContainerArguments(input: {
   connection: ModelConnection;
   containerName: string;
   containerEngine: 'podman' | 'docker';
+  addHostGateway?: boolean;
 }): string[] {
   const backendEnvironment =
     input.backend === 'opencode' ? [] : ['--env', 'PI_TELEMETRY', '--env', 'PI_SKIP_VERSION_CHECK'];
@@ -320,8 +328,8 @@ export function buildContainerArguments(input: {
     'REVIEW_HARNESS_COMMAND',
     ...backendEnvironment,
     ...(input.containerEngine === 'docker' &&
-    input.connection.network === 'private' &&
-    new URL(input.connection.baseUrl).hostname === 'host.docker.internal'
+    (input.addHostGateway ||
+      (input.connection.network === 'private' && new URL(input.connection.baseUrl).hostname === 'host.docker.internal'))
       ? ['--add-host', 'host.docker.internal:host-gateway']
       : []),
     SANDBOX_IMAGE,
@@ -616,7 +624,7 @@ export async function runStructuredBackend<T>(request: StructuredBackendRequest<
   const deadline = effectiveDeadline(request);
   const runtime: StructuredBackendRuntime = { ...defaultStructuredBackendRuntime, ...request.runtime };
   const cleanupReserveMs = Math.max(MIN_BACKEND_OPERATION_MS, deadline.cleanupReserveMs ?? 0);
-  const promptSecrets = request.secrets ?? [request.connection.credential?.value ?? ''];
+  const promptSecrets = (request.secrets ?? [request.connection.credential?.value ?? '']).slice();
   assertPromptContainsNoSecrets(request.prompt, promptSecrets);
   const maximumPromptBytes = (request.connection.contextWindow - request.connection.maxOutputTokens) * 3;
   if (Buffer.byteLength(request.prompt, 'utf8') > maximumPromptBytes) {
@@ -626,6 +634,9 @@ export async function runStructuredBackend<T>(request: StructuredBackendRequest<
   await runWithinDeadline(deadline, 'Model endpoint resolution', (timeoutMs) =>
     runtime.validateEndpoint(request.connection, timeoutMs),
   );
+  const startGateway = runtime.startCredentialGateway ?? startCredentialGateway;
+  const credentialIsolation = request.credentialIsolation ?? 'direct';
+  const credential = request.connection.credential;
   const temporaryRoot = request.environment?.RUNNER_TEMP ?? process.env.RUNNER_TEMP ?? tmpdir();
   await runWithinDeadline(deadline, 'Review workspace root setup', () => runtime.createTemporaryRoot(temporaryRoot));
   const workspacePath = join(temporaryRoot, `code-review-${randomUUID()}`);
@@ -654,16 +665,32 @@ export async function runStructuredBackend<T>(request: StructuredBackendRequest<
       redactSecrets(error instanceof Error ? error.message : String(error), promptSecrets),
     );
   }
+  const gateway =
+    credentialIsolation === 'gateway' && credential
+      ? await startGateway({
+          connection: { ...request.connection, credential },
+          containerHostAlias:
+            request.containerEngine === 'podman' ? 'host.containers.internal' : 'host.docker.internal',
+        })
+      : undefined;
+  const sandboxConnection: ModelConnection = gateway
+    ? {
+        ...request.connection,
+        baseUrl: gateway.origin,
+        credential: { type: credential!.type, value: gateway.placeholder },
+      }
+    : request.connection;
   const containerName = `code-review-${request.backend}-${randomUUID()}`;
   const args = buildContainerArguments({
     backend: request.backend,
-    connection: request.connection,
+    connection: sandboxConnection,
     containerName,
     containerEngine: request.containerEngine,
+    addHostGateway: gateway !== undefined,
   });
   const environment = buildContainerEnvironment(
     request.environment ?? process.env,
-    request.connection,
+    sandboxConnection,
     request.backend,
     request,
   );
@@ -672,6 +699,10 @@ export async function runStructuredBackend<T>(request: StructuredBackendRequest<
   let resultAvailable = false;
   let cleanupFailed = false;
   try {
+    if (gateway) {
+      promptSecrets.push(gateway.placeholder);
+      assertPromptContainsNoSecrets(request.prompt, promptSecrets);
+    }
     const availableForProcess = deadlineRemaining(deadline, cleanupReserveMs);
     const requestedGrace = Math.max(0, request.killGraceMs ?? 5_000);
     const killGraceMs = Math.min(requestedGrace, Math.max(0, Math.floor((availableForProcess - 1) / 2)));
@@ -723,6 +754,13 @@ export async function runStructuredBackend<T>(request: StructuredBackendRequest<
   } finally {
     const removed = await runBestEffortCleanup(deadline, () => runtime.removeWorkspace(workspace));
     cleanupFailed = !removed.completed && operationError === undefined;
+    if (gateway) {
+      try {
+        await gateway.close();
+      } catch {
+        cleanupFailed = cleanupFailed || operationError === undefined;
+      }
+    }
   }
   if (cleanupFailed) {
     throw new ReviewExecutionError('backend-failure', 'Review workspace cleanup exceeded the aggregate deadline');
