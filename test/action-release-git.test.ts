@@ -66,6 +66,42 @@ describe('GitActionReleaseRepository', () => {
     await repository.close();
   });
 
+  test('reads bounded conventional commit messages after an ancestor baseline', async () => {
+    const { remote, work, firstSha } = await fixture();
+    git(work, 'commit', '--allow-empty', '--quiet', '-m', 'fix(#57): correct release');
+    git(work, 'commit', '--allow-empty', '--quiet', '-m', 'feat(#57): automate release');
+    git(work, 'push', '--quiet', 'origin', 'main');
+
+    const repository = GitActionReleaseRepository.forTest(remote);
+    const snapshot = await repository.snapshot();
+    expect((await snapshot.commitMessagesSince(firstSha)).map((message) => message.trim())).toEqual([
+      'feat(#57): automate release',
+      'fix(#57): correct release',
+    ]);
+    await expect(snapshot.commitMessagesSince('a'.repeat(40))).rejects.toThrow(
+      'Action release failed: git command was rejected',
+    );
+    await repository.close();
+  });
+
+  test('excludes non-conventional merge commits while retaining their conventional branch commits', async () => {
+    const { remote, work, firstSha } = await fixture();
+    git(work, 'checkout', '--quiet', '-b', 'topic');
+    git(work, 'commit', '--allow-empty', '--quiet', '-m', 'feat(#57): add release behavior');
+    git(work, 'checkout', '--quiet', 'main');
+    git(work, 'commit', '--allow-empty', '--quiet', '-m', 'fix(#57): prepare release behavior');
+    git(work, 'merge', '--no-ff', '--quiet', 'topic', '-m', 'Merge branch topic');
+    git(work, 'push', '--quiet', 'origin', 'main');
+
+    const repository = GitActionReleaseRepository.forTest(remote);
+    const snapshot = await repository.snapshot();
+    expect((await snapshot.commitMessagesSince(firstSha)).map((message) => message.trim()).sort()).toEqual([
+      'feat(#57): add release behavior',
+      'fix(#57): prepare release behavior',
+    ]);
+    await repository.close();
+  });
+
   test('main lease prevents tagging a revision after authoritative main advances', async () => {
     const { remote, work, firstSha } = await fixture();
     const repository = GitActionReleaseRepository.forTest(remote, 'test-token');
@@ -113,6 +149,38 @@ describe('GitActionReleaseRepository', () => {
     await expect(repository.pushTags(stalePlan)).rejects.toThrow('git command was rejected');
     expect(git(work, 'ls-remote', '--tags', remote, 'refs/tags/v1.1.0')).toBe('');
     expect(git(work, 'ls-remote', '--tags', remote, 'refs/tags/v1').split(/\s/)[0]).toBe(sideSha);
+    await repository.close();
+  });
+
+  test('immutable-tag lease rejects movement during a partial retry before changing the major alias', async () => {
+    const { remote, work, firstSha } = await fixture();
+    git(work, 'tag', 'v1.0.0', firstSha);
+    git(work, 'tag', 'v1', firstSha);
+    git(work, 'push', '--quiet', 'origin', 'refs/tags/v1.0.0', 'refs/tags/v1');
+    git(work, 'commit', '--allow-empty', '--quiet', '-m', 'second');
+    const secondSha = git(work, 'rev-parse', 'HEAD');
+    git(work, 'tag', 'v1.1.0', secondSha);
+    git(work, 'push', '--quiet', 'origin', 'main', 'refs/tags/v1.1.0');
+
+    const repository = GitActionReleaseRepository.forTest(remote, 'test-token');
+    const snapshot = await repository.snapshot();
+    const stalePlan = planActionRelease({
+      version: 'v1.1.0',
+      targetSha: secondSha,
+      mainSha: snapshot.mainSha,
+      targetIsMainAncestor: true,
+      refs: snapshot.refs,
+      releases: [stableRelease('v1.0.0')],
+    });
+
+    git(work, 'commit', '--allow-empty', '--quiet', '-m', 'side target');
+    const sideSha = git(work, 'rev-parse', 'HEAD');
+    git(work, 'tag', '--force', 'v1.1.0', sideSha);
+    git(work, 'push', '--quiet', '--force', 'origin', 'refs/tags/v1.1.0');
+
+    await expect(repository.pushTags(stalePlan)).rejects.toThrow('git command was rejected');
+    expect(git(work, 'ls-remote', '--tags', remote, 'refs/tags/v1.1.0').split(/\s/)[0]).toBe(sideSha);
+    expect(git(work, 'ls-remote', '--tags', remote, 'refs/tags/v1').split(/\s/)[0]).toBe(firstSha);
     await repository.close();
   });
 

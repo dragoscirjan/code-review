@@ -8,7 +8,7 @@ export interface ActionReleaseCliEnvironment {
 
 interface CliOptions {
   mode: 'plan' | 'publish';
-  version: string;
+  version?: string;
   repository: string;
   expectedMainSha?: string;
 }
@@ -17,7 +17,7 @@ function parseArguments(args: readonly string[]): CliOptions {
   const mode = args[0];
   if (mode !== 'plan' && mode !== 'publish') {
     throw new Error(
-      'usage: action-release <plan|publish> --version <vMAJOR.MINOR.PATCH> --repository <owner/name> [--expected-main-sha <sha>]',
+      'usage: action-release plan [--version vMAJOR.MINOR.PATCH] --repository <owner/name> [--expected-main-sha <sha>]; publish requires --version',
     );
   }
   const values = new Map<string, string>();
@@ -31,7 +31,8 @@ function parseArguments(args: readonly string[]): CliOptions {
   }
   const version = values.get('--version');
   const repository = values.get('--repository');
-  if (!version || !repository) throw new Error('version and repository are required');
+  if (!repository) throw new Error('repository is required');
+  if (mode === 'publish' && !version) throw new Error('publication requires an exact version');
   return {
     mode,
     version,
@@ -53,13 +54,19 @@ export async function main(
     }
     const repository = GitActionReleaseRepository.production(options.repository, token);
     const releases = new GitHubActionReleaseStore(options.repository, token);
-    const input = { version: options.version, expectedMainSha: options.expectedMainSha };
     if (options.mode === 'plan') {
-      const plan = await inspectActionRelease(input, repository, releases);
+      const plan = await inspectActionRelease(
+        { version: options.version, expectedMainSha: options.expectedMainSha },
+        repository,
+        releases,
+      );
       console.log(JSON.stringify(plan, null, 2));
     } else {
       const result = await publishActionRelease(
-        { version: options.version, expectedMainSha: options.expectedMainSha as string },
+        {
+          version: options.version as string,
+          expectedMainSha: options.expectedMainSha as string,
+        },
         repository,
         releases,
       );

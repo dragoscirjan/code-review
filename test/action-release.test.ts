@@ -1,5 +1,11 @@
 import { describe, expect, test } from 'vitest';
-import { parseActionReleaseVersion, planActionRelease } from '../src/action-release';
+import {
+  deriveActionReleaseBump,
+  inspectActionReleaseBaseline,
+  parseActionReleaseVersion,
+  planActionRelease,
+  resolveActionReleaseVersion,
+} from '../src/action-release';
 
 const MAIN_SHA = '1111111111111111111111111111111111111111';
 const PRIOR_SHA = '2222222222222222222222222222222222222222';
@@ -19,6 +25,19 @@ function plan(overrides: Partial<Parameters<typeof planActionRelease>[0]> = {}):
     targetSha: MAIN_SHA,
     mainSha: MAIN_SHA,
     targetIsMainAncestor: true,
+    refs: {},
+    releases: [],
+    ...overrides,
+  });
+}
+
+function resolve(
+  commitMessages: readonly string[] = ['fix(#57): change release behavior'],
+  overrides: Partial<Parameters<typeof resolveActionReleaseVersion>[0]> = {},
+): ReturnType<typeof resolveActionReleaseVersion> {
+  return resolveActionReleaseVersion({
+    commitMessages,
+    targetSha: MAIN_SHA,
     refs: {},
     releases: [],
     ...overrides,
@@ -57,6 +76,105 @@ describe('parseActionReleaseVersion', () => {
   ])('rejects noncanonical version %j', (version) => {
     expect(() => parseActionReleaseVersion(version)).toThrow(
       'version must use canonical stable vMAJOR.MINOR.PATCH syntax',
+    );
+  });
+});
+
+describe('resolveActionReleaseVersion', () => {
+  const state = {
+    refs: {
+      'v1.99.0': ref(OTHER_SHA),
+      v1: ref(OTHER_SHA),
+      'v2.3.9': ref(PRIOR_SHA),
+      v2: ref(PRIOR_SHA),
+    },
+    releases: [release('v2.3.9'), release('v1.99.0')],
+  };
+
+  test('establishes v1.0.0 for the first stable release without reading historical commits', () => {
+    expect(resolve([])).toEqual({
+      tag: 'v1.0.0',
+      majorTag: 'v1',
+      major: '1',
+      minor: '0',
+      patch: '0',
+    });
+  });
+
+  test('derives patch, minor, and major versions from conventional commits', () => {
+    expect(resolve(['fix(#57): correct release behavior'], state).tag).toBe('v2.3.10');
+    expect(resolve(['docs(#57): update notes', 'feat(#57): automate releases'], state).tag).toBe('v2.4.0');
+    expect(resolve(['feat(#57)!: replace release contract'], state).tag).toBe('v3.0.0');
+    expect(resolve(['fix(#57): update behavior\n\nBREAKING CHANGE: replace the public contract'], state).tag).toBe(
+      'v3.0.0',
+    );
+    expect(resolve(['fix(#57): update behavior\n\nBREAKING-CHANGE: replace the public contract'], state).tag).toBe(
+      'v3.0.0',
+    );
+    expect(
+      resolve(
+        ['fix(#57): update behavior\n\nBREAKING CHANGE: replace the public contract\n\nSigned-off-by: A <a@b>'],
+        state,
+      ).tag,
+    ).toBe('v3.0.0');
+    expect(
+      resolve(
+        ['fix(#57): clarify documentation\n\nThe previous output included:\nBREAKING CHANGE: example text'],
+        state,
+      ).tag,
+    ).toBe('v2.3.10');
+  });
+
+  test('uses the highest release as baseline and returns an existing target version idempotently', () => {
+    expect(inspectActionReleaseBaseline({ ...state, targetSha: MAIN_SHA })).toEqual({
+      currentVersion: null,
+      latestVersion: { tag: 'v2.3.9', majorTag: 'v2', major: '2', minor: '3', patch: '9' },
+      latestTargetSha: PRIOR_SHA,
+    });
+    expect(
+      resolve([], {
+        refs: { 'v1.2.3': ref(MAIN_SHA), v1: ref(MAIN_SHA) },
+        releases: [release('v1.2.3')],
+      }).tag,
+    ).toBe('v1.2.3');
+  });
+
+  test('recovers only the orphan tag selected by current commit history', () => {
+    const partial = {
+      refs: { 'v1.2.2': ref(PRIOR_SHA), 'v1.2.3': ref(MAIN_SHA), v1: ref(MAIN_SHA) },
+      releases: [release('v1.2.2')],
+    };
+    expect(resolve(['fix(#57): complete publication'], partial).tag).toBe('v1.2.3');
+    expect(() => resolve(['feat(#57): complete publication'], partial)).toThrow(
+      'immutable tag v1.2.3 has no corresponding published GitHub Release',
+    );
+  });
+
+  test('rejects malformed, empty, excessive, and oversized conventional commit history', () => {
+    expect(() => deriveActionReleaseBump([])).toThrow('commit history must contain between 1 and 1000 commits');
+    expect(() => deriveActionReleaseBump(['not conventional'])).toThrow('non-conventional commit');
+    expect(() => deriveActionReleaseBump(['fix(#57): bad\tcontrol'])).toThrow('non-conventional commit');
+    expect(() => deriveActionReleaseBump(['fix(#57): change\n\nBREAKING CHANGE: bad\tcontrol'])).toThrow(
+      'invalid breaking-change footer',
+    );
+    expect(() => deriveActionReleaseBump(['fix(#57): change\n\nBREAKING CHANGE:'])).toThrow(
+      'invalid breaking-change footer',
+    );
+    expect(() => deriveActionReleaseBump(['fix(#57): change\n\nBREAKING-CHANGE:   '])).toThrow(
+      'invalid breaking-change footer',
+    );
+    expect(() => deriveActionReleaseBump(Array.from({ length: 1001 }, () => 'fix(#57): change'))).toThrow(
+      'commit history must contain between 1 and 1000 commits',
+    );
+    expect(() => deriveActionReleaseBump([`fix(#57): ${'x'.repeat(1024 * 1024)}`])).toThrow(
+      'commit history exceeded its byte limit',
+    );
+    expect(() => resolve([], state)).toThrow('commit history must contain between 1 and 1000 commits');
+    expect(() => resolve(undefined, { targetSha: 'ABC' })).toThrow(
+      'targetSha must be a lowercase full 40-character commit SHA',
+    );
+    expect(() => resolve([], { refs: { 'v1.0.1': ref(PRIOR_SHA) }, releases: [] })).toThrow(
+      'immutable tag v1.0.1 has no corresponding published GitHub Release',
     );
   });
 });

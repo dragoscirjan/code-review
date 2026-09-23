@@ -19,6 +19,8 @@ describe('action release CLI', () => {
       'unknown flag',
       ['plan', '--version', 'v1.0.0', '--repository', 'owner/repository', '--unknown', 'untrusted-value'],
     ],
+    ['removed bump flag', ['plan', '--bump', 'untrusted-value', '--repository', 'owner/repository']],
+    ['publication without version', ['publish', '--repository', 'owner/repository', '--expected-main-sha', MAIN_SHA]],
   ])('suppresses untrusted argument errors: %s', async (_name, args) => {
     const errors = captureErrors();
     await expect(main(args, {})).resolves.toBe(1);

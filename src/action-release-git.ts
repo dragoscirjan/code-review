@@ -8,6 +8,7 @@ import type { ReleaseRepository, ReleaseRepositorySnapshot } from './action-rele
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})$/;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
+const MAX_RELEASE_COMMITS = 1000;
 const PROCESS_TIMEOUT_MS = 30_000;
 
 interface ProcessResult {
@@ -79,7 +80,11 @@ export async function runActionReleaseProcess(
         reject(new Error('Action release failed: git command was rejected'));
         return;
       }
-      resolve({ code: exitCode, stdout: Buffer.concat(stdout).toString('utf8') });
+      try {
+        resolve({ code: exitCode, stdout: new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(stdout)) });
+      } catch {
+        reject(new Error('Action release failed: git command returned invalid UTF-8'));
+      }
     });
   });
 }
@@ -199,6 +204,47 @@ export class GitActionReleaseRepository implements ReleaseRepository {
     return {
       mainSha,
       refs,
+      commitMessagesSince: async (commitSha: string) => {
+        if (!SHA_PATTERN.test(commitSha)) throw new Error('Action release failed: invalid release baseline');
+        const ancestor = await runProcess(
+          'git',
+          ['merge-base', '--is-ancestor', commitSha, mainSha],
+          directory,
+          env,
+          [0, 1],
+        );
+        if (ancestor.code !== 0) throw new Error('Action release failed: release baseline is not an ancestor of main');
+        const output = (
+          await runProcess(
+            'git',
+            [
+              'log',
+              '-z',
+              '--no-merges',
+              '--format=%H%x00%B',
+              `--max-count=${MAX_RELEASE_COMMITS + 1}`,
+              `${commitSha}..${mainSha}`,
+            ],
+            directory,
+            env,
+          )
+        ).stdout;
+        const fields = output.split('\0');
+        if (fields.at(-1) !== '') throw new Error('Action release failed: malformed commit history');
+        fields.pop();
+        if (fields.length % 2 !== 0) throw new Error('Action release failed: malformed commit history');
+        const messages: string[] = [];
+        for (let index = 0; index < fields.length; index += 2) {
+          if (!SHA_PATTERN.test(fields[index] as string)) {
+            throw new Error('Action release failed: malformed commit history');
+          }
+          messages.push(fields[index + 1] as string);
+        }
+        if (messages.length > MAX_RELEASE_COMMITS) {
+          throw new Error('Action release failed: commit history exceeded its count limit');
+        }
+        return messages;
+      },
       isAncestor: async (commitSha: string) => {
         if (!SHA_PATTERN.test(commitSha)) return false;
         const result = await runProcess(
@@ -216,14 +262,18 @@ export class GitActionReleaseRepository implements ReleaseRepository {
   async pushTags(plan: ActionReleasePlan): Promise<void> {
     if (!this.token) throw new Error('Action release failed: publication token is required');
     if (!this.directory || !this.gitEnvironment) throw new Error('Action release failed: remote state was not loaded');
-    const args = ['push', '--atomic', '--quiet', `--force-with-lease=refs/heads/main:${plan.observedMainSha}`];
+    const observedVersionTarget = plan.createVersionTag ? '' : plan.targetSha;
+    const args = [
+      'push',
+      '--atomic',
+      '--quiet',
+      `--force-with-lease=refs/heads/main:${plan.observedMainSha}`,
+      `--force-with-lease=refs/tags/${plan.version.tag}:${observedVersionTarget}`,
+    ];
     if (plan.updateMajorTag) {
       args.push(`--force-with-lease=refs/tags/${plan.version.majorTag}:${plan.observedMajorTargetSha ?? ''}`);
     }
-    args.push('origin', `${plan.observedMainSha}:refs/heads/main`);
-    if (plan.createVersionTag) {
-      args.push(`${plan.targetSha}:refs/tags/${plan.version.tag}`);
-    }
+    args.push('origin', `${plan.observedMainSha}:refs/heads/main`, `${plan.targetSha}:refs/tags/${plan.version.tag}`);
     if (plan.updateMajorTag) {
       args.push(`${plan.majorTargetSha}:refs/tags/${plan.version.majorTag}`);
     }
