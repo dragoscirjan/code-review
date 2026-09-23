@@ -81,7 +81,7 @@ Do not add checkout or execute PR code in this `pull_request_target` job. Never 
 
 ## GitHub App authentication
 
-`github-token` accepts either a personal access token or a short-lived GitHub App installation token. The action derives its identity from the token itself (`GET /user`) and binds managed-comment ownership, inline reviews, and incremental-reuse scope to that identity, so both credential kinds work without any action-side key handling.
+`github-token` accepts either a personal access token or a short-lived GitHub App installation token. The action derives its identity from the token itself (`GET /user`, documented as supported for GitHub App installation access tokens; installation requests are attributed to the app's `bot-name[bot]` user) and binds managed-comment ownership, inline reviews, and incremental-reuse scope to that identity, so both credential kinds work without any action-side key handling.
 
 Recommended setup uses the official [`actions/create-github-app-token`](https://github.com/actions/create-github-app-token) action to mint an installation token one step ahead of the review; the App private key never leaves GitHub Secrets and never reaches the checkout, model prompt, sandbox, logs, or published output:
 
