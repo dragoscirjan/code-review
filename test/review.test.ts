@@ -22,6 +22,7 @@ import {
   buildContainerEnvironment,
   buildReviewPrompt,
   runReview,
+  runStructuredBackend,
   wrapUntrustedData,
   ReviewExecutionError,
   SANDBOX_IMAGE,
@@ -492,4 +493,147 @@ test('isolates bounded prior findings in their own untrusted boundary', () => {
   assert.equal(prompt.match(new RegExp(`<\\/?${boundary}>`, 'g'))?.length, 2);
   assert.match(prompt, /src\/ignore-policy\.ts/u);
   assert.match(prompt, /Untrusted prior-finding records/u);
+});
+
+function gatewayRuntime(overrides: Partial<Parameters<typeof runStructuredBackend>[0]['runtime']> = {}) {
+  const captured: { args: string[]; env: NodeJS.ProcessEnv; input: string }[] = [];
+  let closed = 0;
+  return {
+    captured,
+    closedCount: () => closed,
+    runtime: {
+      validateEndpoint: async () => undefined,
+      createTemporaryRoot: async () => undefined,
+      createWorkspace: async (path: string) => path,
+      removeWorkspace: async () => undefined,
+      removeContainer: async () => ({ ok: true, details: '' }),
+      runProcess: async (_command: string, args: string[], options: { env: NodeJS.ProcessEnv; input: string }) => {
+        captured.push({ args, env: options.env, input: options.input });
+        return {
+          stdout: JSON.stringify({
+            type: 'message_end',
+            message: {
+              role: 'assistant',
+              stopReason: 'stop',
+              content: [{ type: 'text', text: cleanReview }],
+            },
+          }),
+          stderr: '',
+        };
+      },
+      startCredentialGateway: async (input: { connection: unknown; containerHostAlias: string }) => ({
+        origin: `http://${input.containerHostAlias}:45678`,
+        placeholder: 'gw-fake-placeholder-token',
+        close: async () => {
+          closed += 1;
+        },
+      }),
+      ...overrides,
+    },
+  };
+}
+
+function backendRequest(overrides: Record<string, unknown> = {}) {
+  return {
+    backend: 'pi' as const,
+    containerEngine: 'podman' as const,
+    connection,
+    credentialIsolation: 'gateway' as const,
+    opencodeVersion: '1.18.31',
+    piVersion: '0.85.1',
+    timeoutMs: 5_000,
+    prompt: 'review the diff',
+    parseAssistantText: (raw: string) => raw,
+    ...overrides,
+  };
+}
+
+test('gateway isolation keeps the real credential host-side and the container receives a placeholder', async () => {
+  const setup = gatewayRuntime();
+  const result = await runStructuredBackend<string>(backendRequest({ runtime: setup.runtime as never }));
+  assert.equal(result, cleanReview);
+  assert.equal(setup.captured.length, 1);
+  const env = setup.captured[0]!.env;
+  assert.equal(env.REVIEW_MODEL_TOKEN, 'gw-fake-placeholder-token');
+  assert.ok(env.REVIEW_HARNESS_CONFIG?.includes('http://host.containers.internal:45678'));
+  assert.ok(!env.REVIEW_HARNESS_CONFIG?.includes('provider-secret'));
+  assert.ok(!JSON.stringify(env).includes('provider-secret'));
+  assert.ok(!JSON.stringify(setup.captured[0]!.args).includes('provider-secret'));
+  assert.ok(!setup.captured[0]!.input.includes('provider-secret'));
+  assert.equal(setup.closedCount(), 1);
+});
+
+test('gateway isolation adds the docker host-gateway mapping and uses the docker alias', async () => {
+  const setup = gatewayRuntime();
+  await runStructuredBackend<string>(backendRequest({ containerEngine: 'docker', runtime: setup.runtime as never }));
+  const args = setup.captured[0]!.args;
+  assert.ok(args.includes('--add-host'));
+  assert.equal(args[args.indexOf('--add-host') + 1], 'host.docker.internal:host-gateway');
+  assert.ok(setup.captured[0]!.env.REVIEW_HARNESS_CONFIG?.includes('http://host.docker.internal:45678'));
+});
+
+test('closes the credential gateway when the backend process fails', async () => {
+  const setup = gatewayRuntime();
+  setup.runtime.runProcess = async () => {
+    throw new Error('container exploded');
+  };
+  await assert.rejects(
+    () => runStructuredBackend<string>(backendRequest({ runtime: setup.runtime as never })),
+    /container exploded/u,
+  );
+  assert.equal(setup.closedCount(), 1);
+});
+
+test('rejects model output that echoes the sandbox placeholder credential', async () => {
+  const setup = gatewayRuntime();
+  setup.runtime.runProcess = async (_command, _args, options) => ({
+    stdout: JSON.stringify({
+      type: 'message_end',
+      message: {
+        role: 'assistant',
+        stopReason: 'stop',
+        content: [{ type: 'text', text: `echo ${options.env.REVIEW_MODEL_TOKEN}` }],
+      },
+    }),
+    stderr: '',
+  });
+  await assert.rejects(
+    () =>
+      runStructuredBackend<string>(
+        backendRequest({
+          runtime: setup.runtime as never,
+          prompt: 'review prompt',
+          rejectSecretOutput: true,
+          parseAssistantText: (raw: string) => raw,
+        }),
+      ),
+    /forbidden secret data/u,
+  );
+  assert.equal(setup.closedCount(), 1);
+});
+
+test('rejects a prompt that contains the sandbox placeholder credential', async () => {
+  const setup = gatewayRuntime();
+  await assert.rejects(
+    () =>
+      runStructuredBackend<string>(
+        backendRequest({
+          runtime: setup.runtime as never,
+          prompt: 'review prompt gw-fake-placeholder-token',
+        }),
+      ),
+    /forbidden secret/u,
+  );
+  assert.equal(setup.captured.length, 0);
+  assert.equal(setup.closedCount(), 1);
+});
+
+test('direct credential isolation keeps the legacy container credential', async () => {
+  const setup = gatewayRuntime();
+  await runStructuredBackend<string>(
+    backendRequest({ credentialIsolation: 'direct', runtime: setup.runtime as never }),
+  );
+  const env = setup.captured[0]!.env;
+  assert.equal(env.REVIEW_MODEL_TOKEN, 'provider-secret');
+  assert.equal(setup.closedCount(), 0);
 });

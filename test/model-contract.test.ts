@@ -144,6 +144,7 @@ for (const backend of ['opencode', 'pi'] as const) {
               maxOutputTokens: 8192,
               credential: { type: api === 'anthropic-messages' ? 'api-key' : 'bearer', value: credential },
             },
+            credentialIsolation: 'gateway',
             opencodeVersion: '1.18.31',
             piVersion: '0.85.1',
             timeoutMs: 540_000,

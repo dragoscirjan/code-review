@@ -266,6 +266,7 @@ async function main(): Promise<void> {
             backend: config.backend,
             containerEngine: config.containerEngine,
             connection: config.connection,
+            credentialIsolation: config.credentialIsolation,
             opencodeVersion: config.opencodeVersion,
             piVersion: config.piVersion,
             timeoutMs: config.timeoutMs,

@@ -68,6 +68,10 @@ inputs:
     description: Review execution strategy. Accepted values are single-pass, specialists, and auto
     required: false
     default: auto
+  credential-isolation:
+    description: Provider credential handling. gateway keeps the real credential host-side and the container receives a single-purpose per-run placeholder; direct passes the credential into the sandbox. Accepted values are gateway and direct
+    required: false
+    default: gateway
   specialist-token-budget:
     description: Aggregate conservative prompt, envelope, and maximum-output token reservation for specialist review
     required: false

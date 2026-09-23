@@ -62,6 +62,7 @@ export interface ExecuteReviewStrategyInput {
   backend: ReviewBackend;
   containerEngine: 'podman' | 'docker';
   connection: ModelConnection;
+  credentialIsolation?: 'gateway' | 'direct';
   opencodeVersion: string;
   piVersion: string;
   pullRequest: PullRequestContext;
@@ -331,6 +332,7 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
       backend: input.backend,
       containerEngine: input.containerEngine,
       connection: input.connection,
+      credentialIsolation: input.credentialIsolation,
       opencodeVersion: input.opencodeVersion,
       piVersion: input.piVersion,
       timeoutMs: remainingTime(deadline, now),
@@ -385,6 +387,7 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
       backend: input.backend,
       containerEngine: input.containerEngine,
       connection: specialistConnection,
+      credentialIsolation: input.credentialIsolation,
       opencodeVersion: input.opencodeVersion,
       piVersion: input.piVersion,
       timeoutMs,
@@ -473,6 +476,7 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
       ...input.connection,
       maxOutputTokens: arbiterOutputTokens(input.connection.maxOutputTokens, input.connection.reasoning),
     },
+    credentialIsolation: input.credentialIsolation,
     opencodeVersion: input.opencodeVersion,
     piVersion: input.piVersion,
     timeoutMs,
