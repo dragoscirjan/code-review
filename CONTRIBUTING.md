@@ -133,7 +133,7 @@ Preflight validates and rebuilds the repository, proves the committed bundles ar
 
 ### Verification
 
-After a successful run, verify the immutable tag, moving major alias, and stable GitHub Release all target the dispatched `main` commit:
+After a successful run, verify the immutable tag and stable GitHub Release target the dispatched `main` commit, and inspect the moving major alias:
 
 ```bash
 git ls-remote https://github.com/dragoscirjan/code-review.git \
@@ -142,7 +142,7 @@ gh release view v1.0.0 --repo dragoscirjan/code-review \
   --json tagName,isDraft,isPrerelease,targetCommitish,url
 ```
 
-Substitute the version selected in the preflight log. Both refs must resolve directly to the same commit; the release must be published, stable, and attached to the immutable full-version tag.
+Substitute the version selected in the preflight log. The immutable full-version tag must always resolve directly to the dispatched commit, and the release must be published, stable, and attached to that tag. Immediately after publication, `vMAJOR` must resolve to the same commit; if a later same-major release has since shipped, it must instead resolve to that latest validated stable release.
 
 ### Retry and recovery
 
