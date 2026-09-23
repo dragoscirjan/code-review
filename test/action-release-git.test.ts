@@ -66,6 +66,24 @@ describe('GitActionReleaseRepository', () => {
     await repository.close();
   });
 
+  test('reads bounded conventional commit messages after an ancestor baseline', async () => {
+    const { remote, work, firstSha } = await fixture();
+    git(work, 'commit', '--allow-empty', '--quiet', '-m', 'fix(#57): correct release');
+    git(work, 'commit', '--allow-empty', '--quiet', '-m', 'feat(#57): automate release');
+    git(work, 'push', '--quiet', 'origin', 'main');
+
+    const repository = GitActionReleaseRepository.forTest(remote);
+    const snapshot = await repository.snapshot();
+    expect((await snapshot.commitMessagesSince(firstSha)).map((message) => message.trim())).toEqual([
+      'feat(#57): automate release',
+      'fix(#57): correct release',
+    ]);
+    await expect(snapshot.commitMessagesSince('a'.repeat(40))).rejects.toThrow(
+      'Action release failed: git command was rejected',
+    );
+    await repository.close();
+  });
+
   test('main lease prevents tagging a revision after authoritative main advances', async () => {
     const { remote, work, firstSha } = await fixture();
     const repository = GitActionReleaseRepository.forTest(remote, 'test-token');

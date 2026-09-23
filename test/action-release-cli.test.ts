@@ -19,16 +19,8 @@ describe('action release CLI', () => {
       'unknown flag',
       ['plan', '--version', 'v1.0.0', '--repository', 'owner/repository', '--unknown', 'untrusted-value'],
     ],
-    ['multiple selectors', ['plan', '--version', 'v1.0.0', '--bump', 'patch', '--repository', 'owner/repository']],
-    ['invalid bump', ['plan', '--bump', 'untrusted-value', '--repository', 'owner/repository']],
-    [
-      'publication without version',
-      ['publish', '--bump', 'patch', '--repository', 'owner/repository', '--expected-main-sha', MAIN_SHA],
-    ],
-    [
-      'publication without bump',
-      ['publish', '--version', 'v1.0.0', '--repository', 'owner/repository', '--expected-main-sha', MAIN_SHA],
-    ],
+    ['removed bump flag', ['plan', '--bump', 'untrusted-value', '--repository', 'owner/repository']],
+    ['publication without version', ['publish', '--repository', 'owner/repository', '--expected-main-sha', MAIN_SHA]],
   ])('suppresses untrusted argument errors: %s', async (_name, args) => {
     const errors = captureErrors();
     await expect(main(args, {})).resolves.toBe(1);
@@ -39,23 +31,10 @@ describe('action release CLI', () => {
   test('requires a publication token and validated main revision without echoing either value', async () => {
     const errors = captureErrors();
     await expect(
-      main(
-        [
-          'publish',
-          '--version',
-          'v1.0.0',
-          '--bump',
-          'patch',
-          '--repository',
-          'owner/repository',
-          '--expected-main-sha',
-          MAIN_SHA,
-        ],
-        {},
-      ),
+      main(['publish', '--version', 'v1.0.0', '--repository', 'owner/repository', '--expected-main-sha', MAIN_SHA], {}),
     ).resolves.toBe(1);
     await expect(
-      main(['publish', '--version', 'v1.0.0', '--bump', 'patch', '--repository', 'owner/repository'], {
+      main(['publish', '--version', 'v1.0.0', '--repository', 'owner/repository'], {
         GITHUB_TOKEN: 'untrusted-token',
       }),
     ).resolves.toBe(1);

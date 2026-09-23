@@ -1,9 +1,15 @@
-import type { ActionReleaseBump, ActionReleasePlan, ActionReleaseRecord, ActionReleaseState } from './action-release';
-import { parseActionReleaseVersion, planActionRelease, resolveActionReleaseVersion } from './action-release';
+import type { ActionReleasePlan, ActionReleaseRecord, ActionReleaseState } from './action-release';
+import {
+  inspectActionReleaseBaseline,
+  parseActionReleaseVersion,
+  planActionRelease,
+  resolveActionReleaseVersion,
+} from './action-release';
 
 export interface ReleaseRepositorySnapshot {
   mainSha: string;
   refs: ActionReleaseState['refs'];
+  commitMessagesSince(commitSha: string): Promise<readonly string[]>;
   isAncestor(commitSha: string): Promise<boolean>;
 }
 
@@ -18,13 +24,13 @@ export interface GitHubReleaseStore {
   create(tagName: string, targetSha: string): Promise<void>;
 }
 
-export type ActionReleasePublisherInput =
-  | { version: string; bump?: never; expectedMainSha?: string }
-  | { version?: never; bump: ActionReleaseBump; expectedMainSha?: string };
+export interface ActionReleasePublisherInput {
+  version?: string;
+  expectedMainSha?: string;
+}
 
 export interface PublishActionReleaseInput {
   version: string;
-  bump: ActionReleaseBump;
   expectedMainSha: string;
 }
 
@@ -34,28 +40,39 @@ export interface ActionReleaseResult {
 }
 
 async function planFromRemote(
-  input: ActionReleasePublisherInput | PublishActionReleaseInput,
+  input: ActionReleasePublisherInput,
   repository: ReleaseRepository,
   releases: GitHubReleaseStore,
   requiredTargetSha?: string,
+  validateSelection = true,
 ): Promise<ActionReleasePlan> {
   const exactVersion = input.version === undefined ? undefined : parseActionReleaseVersion(input.version);
   const snapshot = await repository.snapshot();
   if (input.expectedMainSha && snapshot.mainSha !== input.expectedMainSha) {
     throw new Error('Action release aborted: current main does not match the validated workflow revision');
   }
+  const targetRevision = input.expectedMainSha ?? snapshot.mainSha;
   const releaseRecords = await releases.list();
-  const resolvedVersion =
-    input.bump === undefined
-      ? undefined
-      : resolveActionReleaseVersion({
-          bump: input.bump,
-          targetSha: input.expectedMainSha ?? snapshot.mainSha,
-          refs: snapshot.refs,
-          releases: releaseRecords,
-        });
+  let resolvedVersion;
+  if (!exactVersion || validateSelection) {
+    const baseline = inspectActionReleaseBaseline({
+      targetSha: targetRevision,
+      refs: snapshot.refs,
+      releases: releaseRecords,
+    });
+    const commitMessages =
+      baseline.currentVersion || !baseline.latestTargetSha
+        ? []
+        : await snapshot.commitMessagesSince(baseline.latestTargetSha);
+    resolvedVersion = resolveActionReleaseVersion({
+      commitMessages,
+      targetSha: targetRevision,
+      refs: snapshot.refs,
+      releases: releaseRecords,
+    });
+  }
   if (exactVersion && resolvedVersion && exactVersion.tag !== resolvedVersion.tag) {
-    throw new Error('Action release aborted: selected version no longer matches the requested semantic bump');
+    throw new Error('Action release aborted: selected version no longer matches conventional commit history');
   }
   const selectedVersion = exactVersion ?? resolvedVersion;
   if (!selectedVersion) throw new Error('Action release failed: no release version was selected');
@@ -109,10 +126,8 @@ export async function publishActionRelease(
     const requiredTargetSha = initialPlan.targetSha;
     // A second authoritative read immediately before mutation prevents executing a stale dry-run plan.
     let plan = await planFromRemote(input, repository, releases, requiredTargetSha);
-    const exactInput: ActionReleasePublisherInput = {
-      version: input.version,
-      expectedMainSha: input.expectedMainSha,
-    };
+    // Once mutation starts, verify only the captured version and target so an unrelated main advance cannot strand it.
+    const exactInput: ActionReleasePublisherInput = { version: input.version };
     let published = false;
 
     if (plan.createVersionTag || plan.updateMajorTag) {
@@ -120,14 +135,14 @@ export async function publishActionRelease(
         await repository.pushTags(plan);
         published = true;
       } catch {
-        const afterConflict = await planFromRemote(exactInput, repository, releases, requiredTargetSha);
+        const afterConflict = await planFromRemote(exactInput, repository, releases, requiredTargetSha, false);
         if (!tagsMatchPlan(plan, afterConflict)) {
           throw new Error('Action release failed: tag publication conflicted with changed remote state');
         }
         published = true;
         plan = afterConflict;
       }
-      const afterTags = await planFromRemote(exactInput, repository, releases, requiredTargetSha);
+      const afterTags = await planFromRemote(exactInput, repository, releases, requiredTargetSha, false);
       if (!tagsMatchPlan(plan, afterTags)) {
         throw new Error('Action release failed: published tags did not verify against remote state');
       }
@@ -139,7 +154,7 @@ export async function publishActionRelease(
         await releases.create(plan.version.tag, plan.targetSha);
         published = true;
       } catch {
-        const afterConflict = await planFromRemote(exactInput, repository, releases, requiredTargetSha);
+        const afterConflict = await planFromRemote(exactInput, repository, releases, requiredTargetSha, false);
         if (afterConflict.createGitHubRelease) {
           throw new Error('Action release failed: GitHub Release creation did not reach the requested stable state');
         }
@@ -147,7 +162,7 @@ export async function publishActionRelease(
       }
     }
 
-    const verified = await planFromRemote(exactInput, repository, releases, requiredTargetSha);
+    const verified = await planFromRemote(exactInput, repository, releases, requiredTargetSha, false);
     if (!verified.noop) {
       throw new Error('Action release failed: final remote state is incomplete');
     }

@@ -24,8 +24,14 @@ export interface ActionReleaseState {
 
 export type ActionReleaseBump = 'major' | 'minor' | 'patch';
 
+export interface ActionReleaseBaseline {
+  currentVersion: ActionReleaseVersion | null;
+  latestVersion: ActionReleaseVersion | null;
+  latestTargetSha: string | null;
+}
+
 export interface ResolveActionReleaseVersionInput extends ActionReleaseState {
-  bump: ActionReleaseBump;
+  commitMessages: readonly string[];
   targetSha: string;
 }
 
@@ -56,9 +62,45 @@ interface ParsedVersion extends ActionReleaseVersion {
 const VERSION_PATTERN = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const MAJOR_TAG_PATTERN = /^v(0|[1-9]\d*)$/;
 const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
+const CONVENTIONAL_COMMIT_PATTERN = /^([a-z][a-z0-9-]*)(?:\(([^)\r\n]+)\))?(!)?: (.+)$/;
+const FOOTER_BLOCK_START_PATTERN = /^(?:(?:BREAKING CHANGE|BREAKING-CHANGE|[A-Za-z0-9-]+):|[A-Za-z0-9-]+ #)/;
+const BREAKING_CHANGE_PATTERN = /^(?:BREAKING CHANGE|BREAKING-CHANGE):(.*)$/gm;
+const MAX_RELEASE_COMMITS = 1000;
+const MAX_COMMIT_HISTORY_BYTES = 1024 * 1024;
 
 function releaseError(message: string): Error {
   return new Error(`Invalid action release: ${message}`);
+}
+
+function containsAsciiControl(value: string): boolean {
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
+}
+
+function hasBreakingChangeFooter(message: string): boolean {
+  let end = message.length;
+  while (end > 0 && message[end - 1] === '\n') end -= 1;
+  const normalized = message.slice(0, end);
+  const separator = normalized.lastIndexOf('\n\n');
+  if (separator < 0) return false;
+  const footerBlock = normalized.slice(separator + 2);
+  if (!FOOTER_BLOCK_START_PATTERN.test(footerBlock)) return false;
+  let found = false;
+  for (const match of footerBlock.matchAll(BREAKING_CHANGE_PATTERN)) {
+    const breakingDescription = match[1] as string;
+    if (
+      !breakingDescription.startsWith(' ') ||
+      breakingDescription.slice(1).trim().length === 0 ||
+      containsAsciiControl(breakingDescription.slice(1))
+    ) {
+      throw releaseError('commit history contains an invalid breaking-change footer');
+    }
+    found = true;
+  }
+  return found;
 }
 
 function parseVersion(value: string): ParsedVersion {
@@ -193,12 +235,63 @@ function validateState(state: ActionReleaseState, requestedTag: string): Validat
   return validated;
 }
 
+function publicVersion(version: ParsedVersion): ActionReleaseVersion {
+  return {
+    tag: version.tag,
+    majorTag: version.majorTag,
+    major: version.major,
+    minor: version.minor,
+    patch: version.patch,
+  };
+}
+
+export function inspectActionReleaseBaseline(input: ActionReleaseState & { targetSha: string }): ActionReleaseBaseline {
+  assertCommitSha(input.targetSha, 'targetSha');
+  const state = readValidatedState(input);
+  const releasedForTarget = state.releasedVersions
+    .filter((entry) => entry.targetSha === input.targetSha)
+    .sort((left, right) => compareVersions(left.version, right.version));
+  const current = releasedForTarget.at(-1);
+  const latest = [...state.releasedVersions].sort((left, right) => compareVersions(left.version, right.version)).at(-1);
+  return {
+    currentVersion: current ? publicVersion(current.version) : null,
+    latestVersion: latest ? publicVersion(latest.version) : null,
+    latestTargetSha: latest?.targetSha ?? null,
+  };
+}
+
+export function deriveActionReleaseBump(commitMessages: readonly string[]): ActionReleaseBump {
+  if (!Array.isArray(commitMessages) || commitMessages.length === 0 || commitMessages.length > MAX_RELEASE_COMMITS) {
+    throw releaseError(`commit history must contain between 1 and ${MAX_RELEASE_COMMITS} commits`);
+  }
+  let totalBytes = 0;
+  let bump: ActionReleaseBump = 'patch';
+  for (const message of commitMessages) {
+    if (typeof message !== 'string' || message.length === 0 || message.includes('\0')) {
+      throw releaseError('commit history contains an invalid message');
+    }
+    totalBytes += Buffer.byteLength(message, 'utf8');
+    if (totalBytes > MAX_COMMIT_HISTORY_BYTES) throw releaseError('commit history exceeded its byte limit');
+    const header = message.split('\n', 1)[0] as string;
+    const match = CONVENTIONAL_COMMIT_PATTERN.exec(header);
+    if (
+      !match ||
+      (match[2] !== undefined && containsAsciiControl(match[2])) ||
+      containsAsciiControl(match[4] as string)
+    ) {
+      throw releaseError('commit history contains a non-conventional commit');
+    }
+    if (match[3] || hasBreakingChangeFooter(message)) {
+      bump = 'major';
+    } else if (match[1] === 'feat' && bump === 'patch') {
+      bump = 'minor';
+    }
+  }
+  return bump;
+}
+
 export function resolveActionReleaseVersion(input: ResolveActionReleaseVersionInput): ActionReleaseVersion {
   assertCommitSha(input.targetSha, 'targetSha');
-  if (input.bump !== 'major' && input.bump !== 'minor' && input.bump !== 'patch') {
-    throw releaseError('bump must be one of major, minor, or patch');
-  }
-
   const state = readValidatedState(input);
   const releasedForTarget = state.releasedVersions
     .filter((entry) => entry.targetSha === input.targetSha)
@@ -212,12 +305,13 @@ export function resolveActionReleaseVersion(input: ResolveActionReleaseVersionIn
     if (!latest) {
       version = parseVersion('v1.0.0');
     } else {
+      const bump = deriveActionReleaseBump(input.commitMessages);
       let [major, minor, patch] = latest.version.numbers;
-      if (input.bump === 'major') {
+      if (bump === 'major') {
         major += 1n;
         minor = 0n;
         patch = 0n;
-      } else if (input.bump === 'minor') {
+      } else if (bump === 'minor') {
         minor += 1n;
         patch = 0n;
       } else {
@@ -228,13 +322,7 @@ export function resolveActionReleaseVersion(input: ResolveActionReleaseVersionIn
   }
 
   assertNoUnexpectedOrphans(state, version.tag);
-  return {
-    tag: version.tag,
-    majorTag: version.majorTag,
-    major: version.major,
-    minor: version.minor,
-    patch: version.patch,
-  };
+  return publicVersion(version);
 }
 
 export function planActionRelease(input: PlanActionReleaseInput): ActionReleasePlan {

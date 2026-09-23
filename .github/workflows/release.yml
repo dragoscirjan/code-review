@@ -1,17 +1,7 @@
 name: Release versioned action
 
 'on':
-  workflow_dispatch:
-    inputs:
-      bump:
-        description: Semantic version increment
-        required: true
-        type: choice
-        default: patch
-        options:
-          - patch
-          - minor
-          - major
+  workflow_dispatch: {}
 
 permissions: {}
 
@@ -53,12 +43,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RELEASE_REPOSITORY: ${{ github.repository }}
-          RELEASE_BUMP: ${{ inputs.bump }}
           RELEASE_MAIN_SHA: ${{ github.sha }}
         run: |
           plan_path="$RUNNER_TEMP/action-release-plan.json"
           node dist/action-release.js plan \
-            --bump "$RELEASE_BUMP" \
             --repository "$RELEASE_REPOSITORY" \
             --expected-main-sha "$RELEASE_MAIN_SHA" > "$plan_path"
           node -e '
@@ -94,11 +82,9 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           RELEASE_REPOSITORY: ${{ github.repository }}
           RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
-          RELEASE_BUMP: ${{ inputs.bump }}
           RELEASE_MAIN_SHA: ${{ github.sha }}
         run: >-
           node dist/action-release.js publish
           --version "$RELEASE_VERSION"
-          --bump "$RELEASE_BUMP"
           --repository "$RELEASE_REPOSITORY"
           --expected-main-sha "$RELEASE_MAIN_SHA"
