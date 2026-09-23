@@ -118,6 +118,8 @@ Install the GitHub App on the repository and grant only these repository permiss
 
 Publication modes do not change this set: summary-only and inline publication both write through the pull-request review and issue-comment endpoints of the pull request.
 
+A PAT needs the same effective access. Prefer a fine-grained PAT scoped to one repository with exactly the permissions above (Contents read, Issues read, Pull requests write; Metadata read is automatic). Classic PATs only offer the coarse `repo` scope, which grants write access to all repositories the token owner can reach — use it only if a fine-grained PAT is not possible, and prefer a dedicated bot account so the managed comments have a distinct review identity.
+
 Operational notes:
 
 - Installation tokens expire (about one hour by default). If a review outlives the token, the next GitHub API call fails with 401 and the action fails closed without partial publication; rerun the workflow.
