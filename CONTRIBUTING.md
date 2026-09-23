@@ -95,6 +95,71 @@ A change requires explicit security review when it:
 
 Never include real tokens, GitHub App private keys, webhook secrets, or model credentials in fixtures, logs, snapshots, prompts, or issue comments.
 
+## Releasing the action
+
+The supported consumer references are immutable `vMAJOR.MINOR.PATCH` tags and the moving compatibility tag for that major, such as `v1.0.0` and `v1`. Branch names, pull request refs, and arbitrary commit references are not supported release channels. Never create, move, or delete release tags by hand.
+
+### One-time repository setup
+
+Before the first dispatch:
+
+1. Create a protected GitHub environment named `release`. Configure required reviewers and restrict deployments to `main`. Create it explicitly—otherwise GitHub can auto-create an unprotected environment when the workflow first references it.
+2. Configure repository tag rules for the `v*` namespace. Immutable full-version tags must not be updated or deleted. The trusted release workflow must be allowed to create full-version tags and atomically advance the matching `vMAJOR` alias; ordinary users and workflows must not.
+3. Keep the workflow's top-level permissions empty. Preflight receives only `contents: read`; only the environment-gated publisher receives `contents: write`.
+4. Confirm required branch checks and the release/tag rules with a repository administrator before dispatching.
+
+Tag rules must distinguish the intentionally moving major alias from immutable full-version tags, or grant the trusted publisher an appropriately narrow bypass. Do not weaken immutable-tag protection merely to let `vMAJOR` move.
+
+### Version selection
+
+The operator does not choose a version or bump. Preflight inspects validated published releases and non-merge Conventional Commits from the highest published stable release to the exact current `main` revision:
+
+- `type!:` or `type(scope)!:`, or a trailing `BREAKING CHANGE:` / `BREAKING-CHANGE:` footer, selects a major release;
+- any `feat` commit selects a minor release when no breaking change exists;
+- every other valid Conventional Commit history selects a patch release;
+- the first stable release is always `v1.0.0`.
+
+Malformed, empty, excessive, oversized, non-ancestor, orphaned, or ambiguous history fails closed. Merge commits are excluded, while their conventional branch commits remain in the range.
+
+### Dispatch and approval
+
+Use **Actions → Release versioned action → Run workflow**, select `main`, and run it without inputs. The equivalent CLI command is:
+
+```bash
+gh workflow run release.yml --repo dragoscirjan/code-review --ref main
+```
+
+Preflight validates and rebuilds the repository, proves the committed bundles are clean, derives the exact version, and performs no writes. After the `release` environment is approved, the privileged job checks out and executes only the reviewed `dist/action-release.js` bundle. Immediately before its first mutation, the publisher revalidates that the captured target is still current `main`. Once mutation starts, that invocation remains bound to the captured version and target and may finish if `main` advances concurrently. A later dispatch or failed-job rerun cannot publish that older target.
+
+### Verification
+
+After a successful run, verify the immutable tag, moving major alias, and stable GitHub Release all target the dispatched `main` commit:
+
+```bash
+git ls-remote https://github.com/dragoscirjan/code-review.git \
+  refs/tags/v1 refs/tags/v1.0.0
+gh release view v1.0.0 --repo dragoscirjan/code-review \
+  --json tagName,isDraft,isPrerelease,targetCommitish,url
+```
+
+Substitute the version selected in the preflight log. Both refs must resolve directly to the same commit; the release must be published, stable, and attached to the immutable full-version tag.
+
+### Retry and recovery
+
+A dispatch against an already released current `main` is a no-op. If a run fails after a write, inspect tags and the GitHub Release before doing anything manually. GitHub API visibility can lag behind a successful tag or Release write; rerunning the failed jobs against the same unchanged `main` safely revalidates the uniquely expected state:
+
+```bash
+gh run rerun RUN_ID --repo dragoscirjan/code-review --failed
+```
+
+Do not retry an old release after `main` advances. The publisher intentionally rejects stale ancestor publication, conflicting tags, unexpected orphan tags, and ambiguous remote state. Never force-push a release tag or create the GitHub Release manually to bypass a failed check.
+
+### Rollback limitations
+
+Published `vMAJOR.MINOR.PATCH` tags are immutable and releases are not rolled back by moving or deleting them. Correct a bad release with a reviewed fix-forward commit and a new release. The guarded workflow is the only supported mechanism for advancing `vMAJOR`; consumers requiring a permanently fixed revision should pin the immutable full-version tag.
+
+The detailed trust boundaries and operator checklist are in the Wiki's [Release operations](https://github.com/dragoscirjan/code-review/wiki/Release-operations) runbook.
+
 ## Documentation
 
 Update documentation in the same pull request when behavior or configuration changes.
