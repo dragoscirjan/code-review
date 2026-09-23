@@ -93,7 +93,9 @@ jobs:
     steps:
       - name: Generate GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v3
+        # The minting step receives the App private key, so pin it to a full commit SHA
+        # (v3.2.0 here) and update the pin deliberately after reviewing changes.
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.REVIEW_APP_ID }}
           private-key: ${{ secrets.REVIEW_APP_PRIVATE_KEY }}
@@ -122,7 +124,7 @@ A PAT needs the same effective access. Prefer a fine-grained PAT scoped to one r
 
 Operational notes:
 
-- Installation tokens expire (about one hour by default). If a review outlives the token, the next GitHub API call fails with 401 and the action fails closed without partial publication; rerun the workflow.
+- Installation tokens expire after one hour. If a review outlives the token, the next GitHub API call fails with 401 and the action fails closed. If the token expired between the inline review and the managed summary, the inline review is already published and the next run reuses it instead of reposting. Rerun the workflow.
 - A 403 means the App installation lacks a required permission or was blocked. Grant the permissions above and rerun. API failures never echo the token.
 - Comments and reviews appear as `your-app[bot]`. Rotating the App private key requires no action changes: minted tokens are independent of the key that created them.
 - Migrating from a PAT: the first App-authenticated run cannot reuse prior PAT summaries because incremental state is identity-bound; it performs a fresh full review and publishes a new `your-app[bot]` thread. Old PAT comments are never edited or deleted; archive them manually if unwanted.
