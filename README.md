@@ -79,6 +79,52 @@ jobs:
 
 Do not add checkout or execute PR code in this `pull_request_target` job. Never reference the PR branch, `main`, or another mutable branch as the action revision, and never obtain configuration from PR-controlled content.
 
+## GitHub App authentication
+
+`github-token` accepts either a personal access token or a short-lived GitHub App installation token. The action derives its identity from the token itself (`GET /user`) and binds managed-comment ownership, inline reviews, and incremental-reuse scope to that identity, so both credential kinds work without any action-side key handling.
+
+Recommended setup uses the official [`actions/create-github-app-token`](https://github.com/actions/create-github-app-token) action to mint an installation token one step ahead of the review; the App private key never leaves GitHub Secrets and never reaches the checkout, model prompt, sandbox, logs, or published output:
+
+```yaml
+permissions: {}
+jobs:
+  review:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.REVIEW_APP_ID }}
+          private-key: ${{ secrets.REVIEW_APP_PRIVATE_KEY }}
+      - name: Review pull request
+        uses: dragoscirjan/code-review@v1
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          backend: pi
+          model-config: |
+            { ... }
+          model-credentials: ${{ secrets.REVIEW_MODEL_CREDENTIALS }}
+```
+
+Install the GitHub App on the repository and grant only these repository permissions:
+
+| Permission    | Access | Why                                                                  |
+| ------------- | ------ | -------------------------------------------------------------------- |
+| Contents      | Read   | Base-revision guidance, configuration, and exact-base archive reads. |
+| Issues        | Read   | Linked-issue acceptance criteria.                                    |
+| Pull requests | Write  | Inline review submission and managed summary comments.               |
+| Metadata      | Read   | Automatic.                                                           |
+
+Publication modes do not change this set: summary-only and inline publication both write through the pull-request review and issue-comment endpoints of the pull request.
+
+Operational notes:
+
+- Installation tokens expire (about one hour by default). If a review outlives the token, the next GitHub API call fails with 401 and the action fails closed without partial publication; rerun the workflow.
+- A 403 means the App installation lacks a required permission or was blocked. Grant the permissions above and rerun. API failures never echo the token.
+- Comments and reviews appear as `your-app[bot]`. Rotating the App private key requires no action changes: minted tokens are independent of the key that created them.
+- Migrating from a PAT: the first App-authenticated run cannot reuse prior PAT summaries because incremental state is identity-bound; it performs a fresh full review and publishes a new `your-app[bot]` thread. Old PAT comments are never edited or deleted; archive them manually if unwanted.
+
 ## Provider and model configuration
 
 `model-config` is **our strict versioned schema**, not native Pi/OpenCode configuration. The action translates it into the selected harness's native configuration inside its disposable container, before launching the harness. Host/user configuration is never modified.
@@ -136,27 +182,27 @@ Omit `model-credentials` for keyless servers. The harness adapters use a non-sec
 
 ## Inputs
 
-| Input                     | Default                | Description                                                                   |
-| ------------------------- | ---------------------- | ----------------------------------------------------------------------------- |
-| `github-token`            | Required               | PAT for PR API access and publication.                                        |
-| `model-config`            | Required               | Provider/model JSON above.                                                    |
-| `model-credentials`       | `{}`                   | Secret JSON credential map; only the selected credential enters the backend.  |
-| `reasoning`               | `false`                | Set `true` when the selected model supports or requires reasoning.            |
-| `backend`                 | `opencode`             | `opencode` or `pi`.                                                           |
-| `container-engine`        | `podman`               | `podman` or validated `docker` fallback.                                      |
-| `opencode-version`        | `1.18.31`              | Exact npm package version.                                                    |
-| `pi-version`              | `0.85.1`               | Exact npm package version.                                                    |
-| `code-indexer`            | `none`                 | `none`, `cgc` or `gitnexus`; exact base revision only.                        |
-| `code-index-cache-key`    | `code-review-index-v1` | Cache key prefix.                                                             |
-| `code-index-cache-ttl`    | `24h`                  | Maximum cache age (`ms`, `s`, `m`, `h`, `d`).                                 |
-| `max-diff-bytes`          | `120000`               | Maximum model-visible diff bytes; only complete diff hunks are included.      |
-| `minimum-confidence`      | `0`                    | Inclusive confidence threshold from `0` through `1`.                          |
-| `max-inline-comments`     | `0`                    | Inline comment cap from `0` through `10`; `0` keeps summary-only behavior.    |
-| `deterministic-analyzers` | `none`                 | `none` or `base-config`; trusted workflow gate for fixed parse-only checks.   |
-| `review-memory`           | `none`                 | `none` or `base-config`; exact-base reviewer memory gate.                     |
-| `review-strategy`         | `auto`                 | `single-pass`, `specialists`, or deterministic `auto` selection.              |
-| `specialist-token-budget` | `300000`               | Conservative aggregate specialist prompt/output reservation.                  |
-| `timeout-seconds`         | `600`                  | One call in single-pass mode; aggregate role/arbiter time in specialist mode. |
+| Input                     | Default                | Description                                                                            |
+| ------------------------- | ---------------------- | -------------------------------------------------------------------------------------- |
+| `github-token`            | Required               | GitHub token (PAT or GitHub App installation token) for PR API access and publication. |
+| `model-config`            | Required               | Provider/model JSON above.                                                             |
+| `model-credentials`       | `{}`                   | Secret JSON credential map; only the selected credential enters the backend.           |
+| `reasoning`               | `false`                | Set `true` when the selected model supports or requires reasoning.                     |
+| `backend`                 | `opencode`             | `opencode` or `pi`.                                                                    |
+| `container-engine`        | `podman`               | `podman` or validated `docker` fallback.                                               |
+| `opencode-version`        | `1.18.31`              | Exact npm package version.                                                             |
+| `pi-version`              | `0.85.1`               | Exact npm package version.                                                             |
+| `code-indexer`            | `none`                 | `none`, `cgc` or `gitnexus`; exact base revision only.                                 |
+| `code-index-cache-key`    | `code-review-index-v1` | Cache key prefix.                                                                      |
+| `code-index-cache-ttl`    | `24h`                  | Maximum cache age (`ms`, `s`, `m`, `h`, `d`).                                          |
+| `max-diff-bytes`          | `120000`               | Maximum model-visible diff bytes; only complete diff hunks are included.               |
+| `minimum-confidence`      | `0`                    | Inclusive confidence threshold from `0` through `1`.                                   |
+| `max-inline-comments`     | `0`                    | Inline comment cap from `0` through `10`; `0` keeps summary-only behavior.             |
+| `deterministic-analyzers` | `none`                 | `none` or `base-config`; trusted workflow gate for fixed parse-only checks.            |
+| `review-memory`           | `none`                 | `none` or `base-config`; exact-base reviewer memory gate.                              |
+| `review-strategy`         | `auto`                 | `single-pass`, `specialists`, or deterministic `auto` selection.                       |
+| `specialist-token-budget` | `300000`               | Conservative aggregate specialist prompt/output reservation.                           |
+| `timeout-seconds`         | `600`                  | One call in single-pass mode; aggregate role/arbiter time in specialist mode.          |
 
 Outputs: `comment-url`, `review-url`, `inline-comment-count`, `inline-history-suppressed-count`, `inline-limit-omitted-count`, `diff-truncated`, `context-truncated`, `context-unavailable-source-count`, `review-mode`, `review-strategy`, `specialist-role-count`, `specialist-candidate-count`, `arbiter-rejected-count`, `review-memory-status`, `memory-suppressed-count`, `memory-active-suppression-count`, `memory-active-preference-count`, `memory-effective-digest`, `new-finding-count`, `unchanged-finding-count`, `resolved-finding-count`, `superseded-finding-count`, `analyzer-coverage`, `analyzer-run-count`, `analyzer-observation-count`, `analyzer-skipped-file-count`, `code-indexer`, `code-index-cache-hit`.
 
@@ -305,7 +351,7 @@ Repository guidance, issue criteria, PR metadata, paths, symbols, index output, 
 - Private HTTP is not encrypted. Prefer TLS and authenticated private endpoints.
 - Backends must return the strict version 1 JSON review contract; malformed, unknown-version, or oversized output is rejected without repair. The action strictly parses the model-visible unified diff, accepts only findings on exact added/deleted lines with exact changed-line evidence, removes anchor duplicates deterministically, and applies the configured confidence and inline limits. Rejected finding prose is never published.
 - The action snapshots the PR base/head, changed-file count, title, body, and author around diff acquisition, checks them again before backend execution and publication, and refreshes fetched issue fingerprints. It also checks freshness between inline and summary publication. Inline findings are submitted in one pull-request review bound to the reviewed head SHA, then the managed summary is updated. GitHub offers neither a transaction spanning those two endpoints nor an atomic create-if-marker-absent operation: if the summary update fails after inline success, the action fails and a deterministic owned marker lets a retry reuse the inline review, but two truly concurrent first-time runs can still race. Keep workflow concurrency cancellation enabled. A force-push after the final pre-write check can make the SHA-bound review outdated but cannot move it to the replacement head.
-- Managed comments require both a backend-specific hidden marker and the authenticated PAT actor. Incremental metadata is public and treated as untrusted: malformed, unknown, oversized, ambiguous, stale, or scope-mismatched state is ignored for optimization and triggers a full baseline review. Legacy OpenRouter markers migrate without creating a new comment. PAT comments appear as the token's owner.
+- Managed comments require both a backend-specific hidden marker and the authenticated actor (PAT owner or GitHub App bot). Incremental metadata is public and treated as untrusted: malformed, unknown, oversized, ambiguous, stale, or scope-mismatched state is ignored for optimization and triggers a full baseline review. Legacy OpenRouter markers migrate without creating a new comment. PAT comments appear as the token's owner; App installation comments appear as the app's `bot-name[bot]` identity, and switching identity starts a fresh managed thread instead of reusing prior state.
 
 Optional indexing downloads only the exact base SHA archive with a bounded request deadline. Every archive member is path/type/size preflighted before extraction; total members and directories are capped, and parsing aborts on the first violation. Symlinks, hardlinks, special files, duplicate destinations, file/directory conflicts, traversal, oversized entries, decompression amplification, and invalid restored cache trees are rejected. Repository-controlled indexer configuration and `.env*` files are removed before adapter startup. CGC/GitNexus still run on the host with a credential-stripped environment, which is **not OS isolation**, and their pinned transitive dependencies remain part of the POC trust boundary. Cache identity includes repository, base SHA, pinned indexer, platform and age; successful reads do not renew TTL. An unusable restore gets one clean rebuild. Cache service failures warn; installation/index construction failures for an explicitly selected indexer stop the review, while individual bounded query failures are reported and do not hide other available context.
 

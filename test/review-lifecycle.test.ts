@@ -10,6 +10,7 @@ import {
   reconcileFindingStates,
   reviewPolicyDigest,
   serializeReviewState,
+  stateIdentityMatches,
   stateScopeMatches,
   type ReviewStateFinding,
   type ReviewStateV1,
@@ -319,6 +320,20 @@ test('classifies unchanged, new, resolved, and superseded findings deterministic
   const changedButSuppressed = reconcileFindingStates([], [priorExact], nextSha, [], [changed]);
   assert.deepEqual(changedButSuppressed.counts, { new: 0, unchanged: 0, resolved: 0, superseded: 0 });
   assert.deepEqual(changedButSuppressed.tombstones, []);
+});
+
+test('same-head reuse rejects an authentication identity change', () => {
+  const value = state({});
+  const identity = {
+    apiUrl: value.apiUrl,
+    repository: value.repository,
+    pullRequest: value.pullRequest,
+    backend: value.backend,
+    actorId: value.actorId,
+    baseSha: value.baseSha,
+  };
+  assert.equal(stateIdentityMatches(value, identity), true);
+  assert.equal(stateIdentityMatches(value, { ...identity, actorId: value.actorId + 1 }), false);
 });
 
 test('same-head reuse rejects title, body, linked-issue, context, and fixed-policy changes', () => {
