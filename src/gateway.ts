@@ -85,6 +85,9 @@ export function startCredentialGateway(input: CredentialGatewayRequest): Promise
       ? '127.0.0.1'
       : upstream.hostname;
   const upstreamOrigin = `${upstream.protocol}//${upstream.host}`;
+  // Preserve the upstream path prefix (for example /v1) so harness requests
+  // forwarded verbatim still land on the provider's real API base path.
+  const upstreamPath = upstream.pathname.replace(/\/$/, '');
   const headerPlan = upstreamCredentialHeader(input.connection.api);
   const placeholder = `gw-${randomBytes(24).toString('hex')}`;
   const expectedAuthorization = `${headerPlan.prefix}${placeholder}`;
@@ -158,7 +161,7 @@ export function startCredentialGateway(input: CredentialGatewayRequest): Promise
         return;
       }
       resolve({
-        origin: `http://${input.containerHostAlias}:${address.port}`,
+        origin: `http://${input.containerHostAlias}:${address.port}${upstreamPath}`,
         placeholder,
         close: () =>
           new Promise<void>((resolveClose) => {

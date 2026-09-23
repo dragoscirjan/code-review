@@ -106,7 +106,7 @@ test('rejects missing, wrong, and replayed credentials without contacting upstre
     { authorization: `Bearer ${realCredential}` },
     { authorization: 'Bearer gw-not-the-placeholder' },
   ]) {
-    const response = await fetch(`${gateway.origin}/v1/chat/completions`, { headers });
+    const response = await fetch(`${gateway.origin}/chat/completions`, { headers });
     assert.equal(response.status, 403);
     assert.equal(await response.text(), '');
   }
@@ -147,7 +147,7 @@ test('blocks cross-origin redirects instead of letting the harness follow them',
     },
     containerHostAlias: '127.0.0.1',
   });
-  const response = await fetch(`${gateway.origin}/v1/chat/completions`, {
+  const response = await fetch(`${gateway.origin}/chat/completions`, {
     headers: { authorization: `Bearer ${gateway.placeholder}` },
   });
   assert.equal(response.status, 502);
@@ -206,7 +206,7 @@ test('returns a fixed 502 when the upstream is unreachable and closes cleanly', 
     },
     containerHostAlias: '127.0.0.1',
   });
-  const response = await fetch(`${gateway.origin}/v1/chat/completions`, {
+  const response = await fetch(`${gateway.origin}/chat/completions`, {
     headers: { authorization: `Bearer ${gateway.placeholder}` },
   });
   assert.equal(response.status, 502);
@@ -214,4 +214,31 @@ test('returns a fixed 502 when the upstream is unreachable and closes cleanly', 
   await gateway.close();
   await assert.rejects(fetch(`${gateway.origin}/v1`));
   gateway = undefined as unknown as CredentialGateway;
+});
+
+test('preserves the upstream base path prefix in the container-visible origin', async () => {
+  const port = await listenUpstream((request: IncomingMessage, response: ServerResponse) => {
+    requests.push({ url: request.url, authorization: request.headers.authorization as string | undefined });
+    response.setHeader('content-type', 'application/json');
+    response.end('{"ok":true}');
+  });
+  gateway = await startCredentialGateway({
+    connection: {
+      api: 'openai-completions',
+      baseUrl: `http://127.0.0.1:${port}/v1`,
+      network: 'remote',
+      credential: { type: 'bearer', value: realCredential },
+    },
+    containerHostAlias: '127.0.0.1',
+  });
+  assert.ok(gateway.origin.endsWith('/v1'));
+  const response = await fetch(`${gateway.origin}/chat/completions`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${gateway.placeholder}` },
+    body: '{"model":"m"}',
+  });
+  assert.equal(response.status, 200);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0]?.url, '/v1/chat/completions');
+  assert.equal(requests[0]?.authorization, `Bearer ${realCredential}`);
 });
