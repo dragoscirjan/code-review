@@ -376,7 +376,6 @@ test('policy and scope bind state without credential material', () => {
     contextWindow: 128_000,
     maximumOutputTokens: 8_192,
     containerEngine: 'podman',
-    customPrompt: 'prompt',
     minimumConfidence: 0.5,
     maximumInlineComments: 3,
     maximumDiffBytes: 120_000,

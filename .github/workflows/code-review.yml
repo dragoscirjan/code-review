@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Review pull request
-        uses: dragoscirjan/code-review@e3eaaef3c50fa96bcafdca898a9ec264979eb825
+        uses: dragoscirjan/code-review@v1
         with:
           github-token: ${{ secrets.GH_TOKEN }}
           container-engine: podman

@@ -35,7 +35,7 @@ The initial product must:
 3. Reuse or start the selected local model server when the model is not remote.
 4. Load the requested model and wait until the runtime reports it ready.
 5. Configure Pi or OpenCode with the runtime endpoint and model identifier.
-6. Apply an optional custom review prompt supplied through action inputs without replacing fixed safety or output rules.
+6. Apply only the fixed, versioned review policy; do not accept free-form review instructions through action inputs.
 7. Run the selected backend.
 8. Validate every finding before publication.
 9. Publish one managed summary and, when enabled, a small number of inline comments.
@@ -55,7 +55,7 @@ A personal access token acts as its owner. It does not create a separate review 
 - Never stop a server that was running before the action. Never unload a model that the action did not load.
 - Give each backend read-only repository permissions. Do not expose edit, write, or unrestricted shell tools to a review session.
 - Keep forge credentials outside the review backend. Give model-provider credentials only to the selected backend. Never include tokens, private keys, environment dumps, or credential files in model context.
-- Treat the custom action prompt as an addition to the built-in review prompt. It must not replace security rules, tool restrictions, or the result schema.
+- Keep review instructions fixed and versioned. Treat repository guidance, issue criteria, pull request metadata, index output, analyzer messages, and diffs as explicitly delimited untrusted data.
 - Parse model output into a versioned schema. Reject malformed output rather than guessing its meaning.
 - Publish an inline finding only when its path and line map to the reviewed diff.
 - Deduplicate findings and cap the number of published comments.
@@ -94,7 +94,7 @@ A personal access token acts as its owner. It does not create a separate review 
 - Integration-test Pi and OpenCode with controlled model responses.
 - Contract-test start, readiness, load, connection configuration, unload, and stop behavior for every model-runtime adapter.
 - Test that cleanup affects only servers and models owned by the action.
-- Test action input parsing, including custom prompts, model selection, runtime selection, endpoint overrides, and lifecycle policy.
+- Test action input parsing, including rejection of removed or unknown instruction inputs, model selection, runtime selection, endpoint overrides, and lifecycle policy.
 - Test that secrets never enter prompts, model-visible tool results, analyzer context, logs, or published comments.
 - Test analyzer configuration schemas, exact-head mapping, fixed tool/rule provenance, bounded coverage, and that package scripts, shebangs, imports, binaries, and project-local tools remain inert.
 - Use temporary repositories and directories. Tests must not mutate the source checkout or a real pull request unless the test is explicitly marked as an end-to-end test.

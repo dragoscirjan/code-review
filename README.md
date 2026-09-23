@@ -22,6 +22,8 @@ Use the immutable full-version tag when reproducibility is more important than a
 
 The provider-specific `openrouter-api-key` and `model` inputs have been removed. There is no default provider, free-model fallback, or fixed-model allowlist.
 
+The free-form `prompt` input has also been removed. Review behavior now comes only from the action's fixed, versioned policy. Workflows upgrading to this revision must delete `prompt`; supplying it fails closed instead of being ignored. Repository guidance, linked issue criteria, pull-request metadata, index results, analyzer messages, and diffs remain explicitly delimited untrusted data rather than trusted instructions.
+
 1. Keep your existing **`GH_TOKEN`** GitHub Actions secret (the PAT used to publish comments).
 2. Create a GitHub Actions repository secret named **`REVIEW_MODEL_CREDENTIALS`**. Its value is this JSON, replacing the placeholder with your existing OpenRouter API key:
 
@@ -73,7 +75,6 @@ jobs:
               }
             }
           model-credentials: ${{ secrets.REVIEW_MODEL_CREDENTIALS }}
-          prompt: Focus on correctness, security, regressions, and missing tests.
 ```
 
 Do not add checkout or execute PR code in this `pull_request_target` job. Never reference the PR branch, `main`, or another mutable branch as the action revision, and never obtain configuration from PR-controlled content.
@@ -135,28 +136,27 @@ Omit `model-credentials` for keyless servers. The harness adapters use a non-sec
 
 ## Inputs
 
-| Input                     | Default                         | Description                                                                   |
-| ------------------------- | ------------------------------- | ----------------------------------------------------------------------------- |
-| `github-token`            | Required                        | PAT for PR API access and publication.                                        |
-| `model-config`            | Required                        | Provider/model JSON above.                                                    |
-| `model-credentials`       | `{}`                            | Secret JSON credential map; only the selected credential enters the backend.  |
-| `reasoning`               | `false`                         | Set `true` when the selected model supports or requires reasoning.            |
-| `backend`                 | `opencode`                      | `opencode` or `pi`.                                                           |
-| `container-engine`        | `podman`                        | `podman` or validated `docker` fallback.                                      |
-| `prompt`                  | Correctness and security review | Additional trusted review guidance.                                           |
-| `opencode-version`        | `1.18.31`                       | Exact npm package version.                                                    |
-| `pi-version`              | `0.85.1`                        | Exact npm package version.                                                    |
-| `code-indexer`            | `none`                          | `none`, `cgc` or `gitnexus`; exact base revision only.                        |
-| `code-index-cache-key`    | `code-review-index-v1`          | Cache key prefix.                                                             |
-| `code-index-cache-ttl`    | `24h`                           | Maximum cache age (`ms`, `s`, `m`, `h`, `d`).                                 |
-| `max-diff-bytes`          | `120000`                        | Maximum model-visible diff bytes; only complete diff hunks are included.      |
-| `minimum-confidence`      | `0`                             | Inclusive confidence threshold from `0` through `1`.                          |
-| `max-inline-comments`     | `0`                             | Inline comment cap from `0` through `10`; `0` keeps summary-only behavior.    |
-| `deterministic-analyzers` | `none`                          | `none` or `base-config`; trusted workflow gate for fixed parse-only checks.   |
-| `review-memory`           | `none`                          | `none` or `base-config`; exact-base reviewer memory gate.                     |
-| `review-strategy`         | `auto`                          | `single-pass`, `specialists`, or deterministic `auto` selection.              |
-| `specialist-token-budget` | `300000`                        | Conservative aggregate specialist prompt/output reservation.                  |
-| `timeout-seconds`         | `600`                           | One call in single-pass mode; aggregate role/arbiter time in specialist mode. |
+| Input                     | Default                | Description                                                                   |
+| ------------------------- | ---------------------- | ----------------------------------------------------------------------------- |
+| `github-token`            | Required               | PAT for PR API access and publication.                                        |
+| `model-config`            | Required               | Provider/model JSON above.                                                    |
+| `model-credentials`       | `{}`                   | Secret JSON credential map; only the selected credential enters the backend.  |
+| `reasoning`               | `false`                | Set `true` when the selected model supports or requires reasoning.            |
+| `backend`                 | `opencode`             | `opencode` or `pi`.                                                           |
+| `container-engine`        | `podman`               | `podman` or validated `docker` fallback.                                      |
+| `opencode-version`        | `1.18.31`              | Exact npm package version.                                                    |
+| `pi-version`              | `0.85.1`               | Exact npm package version.                                                    |
+| `code-indexer`            | `none`                 | `none`, `cgc` or `gitnexus`; exact base revision only.                        |
+| `code-index-cache-key`    | `code-review-index-v1` | Cache key prefix.                                                             |
+| `code-index-cache-ttl`    | `24h`                  | Maximum cache age (`ms`, `s`, `m`, `h`, `d`).                                 |
+| `max-diff-bytes`          | `120000`               | Maximum model-visible diff bytes; only complete diff hunks are included.      |
+| `minimum-confidence`      | `0`                    | Inclusive confidence threshold from `0` through `1`.                          |
+| `max-inline-comments`     | `0`                    | Inline comment cap from `0` through `10`; `0` keeps summary-only behavior.    |
+| `deterministic-analyzers` | `none`                 | `none` or `base-config`; trusted workflow gate for fixed parse-only checks.   |
+| `review-memory`           | `none`                 | `none` or `base-config`; exact-base reviewer memory gate.                     |
+| `review-strategy`         | `auto`                 | `single-pass`, `specialists`, or deterministic `auto` selection.              |
+| `specialist-token-budget` | `300000`               | Conservative aggregate specialist prompt/output reservation.                  |
+| `timeout-seconds`         | `600`                  | One call in single-pass mode; aggregate role/arbiter time in specialist mode. |
 
 Outputs: `comment-url`, `review-url`, `inline-comment-count`, `inline-history-suppressed-count`, `inline-limit-omitted-count`, `diff-truncated`, `context-truncated`, `context-unavailable-source-count`, `review-mode`, `review-strategy`, `specialist-role-count`, `specialist-candidate-count`, `arbiter-rejected-count`, `review-memory-status`, `memory-suppressed-count`, `memory-active-suppression-count`, `memory-active-preference-count`, `memory-effective-digest`, `new-finding-count`, `unchanged-finding-count`, `resolved-finding-count`, `superseded-finding-count`, `analyzer-coverage`, `analyzer-run-count`, `analyzer-observation-count`, `analyzer-skipped-file-count`, `code-indexer`, `code-index-cache-hit`.
 
@@ -291,12 +291,12 @@ The action derives at most six language-aware lexical anchors from the exact com
 
 Root `AGENTS.md` and `CONTRIBUTING.md` are read only from the captured base SHA. Independently of indexer selection, the action includes at most four allowlisted configuration files and 8 KB selected by changed-path proximity and lexical path, such as `package.json`, TypeScript/JavaScript project configs, `Cargo.toml`, `go.mod`, Python project configs, and supported build files. Acceptance criteria are fetched for at most three explicit same-repository references: canonical issue URLs or closing-keyword forms such as `Fixes #23`. Bare mentions, pull-request URLs, code-fenced references, and cross-repository references are not fetched. Optional context requests have bounded deadlines. Missing, timed-out, truncated, and unavailable sources are reported in the managed summary and action outputs.
 
-Repository guidance, issue criteria, PR metadata, paths, symbols, index output, deterministic analyzer labels/messages, and the diff all remain untrusted data inside collision-checked prompt boundaries. They cannot replace the immutable safety rules, tool denial, output contract, finding validation, or publication policy.
+Repository guidance, issue criteria, PR metadata, paths, symbols, index output, deterministic analyzer labels/messages, and the diff all remain untrusted data inside collision-checked prompt boundaries. The action accepts no caller-supplied trusted guidance. Untrusted data cannot replace the fixed versioned safety rules, tool denial, output contract, finding validation, or publication policy.
 
 ## Security and limitations
 
 - GitHub-hosted runners and GitHub PAT publication. Pi still uses its CLI for this milestone.
-- No PR code execution. The diff, exact-base guidance, linked issue criteria, bounded index results, and analyzer messages are untrusted prompt data. Deterministic analyzers parse bounded in-memory text only.
+- No PR code execution. The diff, exact-base guidance, linked issue criteria, bounded index results, and analyzer messages are untrusted prompt data. The removed `prompt` input is rejected; review instructions are fixed and versioned. Deterministic analyzers parse bounded in-memory text only.
 - The backend container is digest-pinned, mount-free, non-root, read-only, capability-dropped, resource-limited and denies added privileges. OpenCode denies all tools; Pi disables tools and resource discovery.
 - Native harness configuration is generated in container tmpfs with restrictive permissions. Fixed provider naming avoids built-in provider auto-configuration. Native interpolation syntax in credentials is handled without executing commands or loading referenced files.
 - GitHub credentials never enter the model container. Only the selected model credential is passed through environment—not arguments or prompt. Every validated credential value, including unused entries, remains host-side and is masked, scanned against the complete assembled prompt, redacted from findings, and included in the final publication scan. Output is bounded and raw provider errors are suppressed.

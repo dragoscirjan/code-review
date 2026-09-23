@@ -146,7 +146,6 @@ export async function main(
           connection: loaded.connection,
           opencodeVersion: DEFAULT_OPENCODE_VERSION,
           piVersion: DEFAULT_PI_VERSION,
-          customPrompt: 'Evaluate the supplied seeded change under the fixed review policy.',
           timeoutMs,
           specialistTokenBudget,
           pullRequest: evaluationPullRequest(fixture),

@@ -15,15 +15,12 @@ export const DEFAULT_CODE_INDEX_CACHE_TTL = '24h';
 
 export type CodeIndexer = 'none' | 'cgc' | 'gitnexus';
 
-const DEFAULT_PROMPT = 'Focus on correctness, security, regressions, and missing tests.';
-
 export interface ActionConfig {
   githubToken: string;
   connection: ModelConnection;
   modelCredentialValues: readonly string[];
   backend: ReviewBackend;
   containerEngine: 'podman' | 'docker';
-  prompt: string;
   opencodeVersion: string;
   piVersion: string;
   codeIndexer: CodeIndexer;
@@ -74,6 +71,10 @@ export function getActionInput(name: string, environment: NodeJS.ProcessEnv): st
     }
   }
   return undefined;
+}
+
+function hasActionInput(name: string, environment: NodeJS.ProcessEnv): boolean {
+  return inputCandidates(name).some((candidate) => environment[candidate] !== undefined);
 }
 
 function parseInteger(value: string, name: string, minimum: number, maximum: number): number {
@@ -135,6 +136,9 @@ export function loadActionConfig(environment: NodeJS.ProcessEnv = process.env): 
       'openrouter-api-key and model have been removed; migrate to model-config and model-credentials (see README)',
     );
   }
+  if (hasActionInput('prompt', environment)) {
+    throw new Error('prompt has been removed; review behavior is defined by the fixed review policy');
+  }
   const modelConfig = getActionInput('model-config', environment);
   if (!modelConfig) throw new Error('model-config is required; see README for OpenRouter and local examples');
   const reasoning = parseBoolean(getActionInput('reasoning', environment) ?? 'false', 'reasoning');
@@ -152,11 +156,6 @@ export function loadActionConfig(environment: NodeJS.ProcessEnv = process.env): 
   const containerEngine = getActionInput('container-engine', environment) ?? 'podman';
   if (containerEngine !== 'podman' && containerEngine !== 'docker') {
     throw new Error('container-engine must be podman or docker');
-  }
-
-  const prompt = getActionInput('prompt', environment) ?? DEFAULT_PROMPT;
-  if (Buffer.byteLength(prompt, 'utf8') > 10_000) {
-    throw new Error('prompt must not exceed 10000 UTF-8 bytes');
   }
 
   const opencodeVersion = exactVersion(
@@ -222,7 +221,6 @@ export function loadActionConfig(environment: NodeJS.ProcessEnv = process.env): 
     modelCredentialValues,
     backend,
     containerEngine,
-    prompt,
     opencodeVersion,
     piVersion,
     codeIndexer,

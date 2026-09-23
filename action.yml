@@ -24,10 +24,6 @@ inputs:
     description: Allowlisted container engine used for the review sandbox
     required: false
     default: podman
-  prompt:
-    description: Trusted review guidance appended to the fixed security prompt
-    required: false
-    default: Focus on correctness, security, regressions, and missing tests.
   opencode-version:
     description: Exact opencode-ai npm package version
     required: false

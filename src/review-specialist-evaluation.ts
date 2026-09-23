@@ -319,7 +319,6 @@ export async function evaluateSpecialistRecordings(input: {
           connection: evaluationConnection,
           opencodeVersion: '1.18.31',
           piVersion: '0.85.1',
-          customPrompt: 'Evaluate the supplied seeded change under the fixed review policy.',
           pullRequest: {
             owner: 'code-review-evaluation',
             repository: fixture.id,
