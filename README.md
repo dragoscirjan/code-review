@@ -2,6 +2,22 @@
 
 A GitHub Action that reviews pull requests with **OpenCode or Pi**, using a configured local/private or remote model endpoint, and publishes one managed summary plus an optional bounded batch of validated inline findings per backend.
 
+## Use the released action
+
+Use the moving major tag for the supported stable v1 channel:
+
+```yaml
+- uses: dragoscirjan/code-review@v1
+```
+
+Use the immutable full-version tag when reproducibility is more important than automatically receiving compatible v1 updates:
+
+```yaml
+- uses: dragoscirjan/code-review@v1.0.0
+```
+
+`vMAJOR.MINOR.PATCH` tags are immutable. A moving `vMAJOR` tag advances only through the guarded release workflow to a validated stable release in the same major line. Branch names such as `main`, pull request refs, and arbitrary commit references are not supported release channels.
+
 ## OpenRouter setup / migration
 
 The provider-specific `openrouter-api-key` and `model` inputs have been removed. There is no default provider, free-model fallback, or fixed-model allowlist.
@@ -15,7 +31,7 @@ The provider-specific `openrouter-api-key` and `model` inputs have been removed.
 
    You can reuse the key currently stored in `OPENROUTER_API_KEY`; you do not need a new OpenRouter account or key. Never commit this JSON with a real token.
 
-3. Use the workflow below, replacing `REPLACE_WITH_COMMIT_SHA` with an immutable trusted commit **containing this change**. Do not pass the new inputs to an older action revision.
+3. Use the workflow below. It follows the supported stable v1 channel; replace `@v1` with `@v1.0.0` if you require an immutable full-version pin.
 
 ```yaml
 name: Code review
@@ -36,7 +52,7 @@ jobs:
       group: code-review-${{ matrix.backend }}-${{ github.event.pull_request.number }}
       cancel-in-progress: true
     steps:
-      - uses: dragoscirjan/code-review@REPLACE_WITH_COMMIT_SHA
+      - uses: dragoscirjan/code-review@v1
         with:
           github-token: ${{ secrets.GH_TOKEN }}
           backend: ${{ matrix.backend }}
@@ -60,7 +76,7 @@ jobs:
           prompt: Focus on correctness, security, regressions, and missing tests.
 ```
 
-Do not add checkout or execute PR code in this `pull_request_target` job. Never reference the PR branch as the action revision or obtain configuration from PR-controlled content. The repository's own `.github/workflows/code-review.yml` remains pinned to its older trusted commit; update that pin and its inputs together after publishing a reviewed implementation commit. This change does not automatically deploy itself.
+Do not add checkout or execute PR code in this `pull_request_target` job. Never reference the PR branch, `main`, or another mutable branch as the action revision, and never obtain configuration from PR-controlled content.
 
 ## Provider and model configuration
 
