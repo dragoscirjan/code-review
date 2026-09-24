@@ -77,7 +77,7 @@ inputs:
     required: false
     default: '300000'
   timeout-seconds:
-    description: Maximum single-pass execution time or aggregate specialist and arbiter execution time
+    description: Maximum single-pass execution time or aggregate shard and merge-pass execution time
     required: false
     default: '600'
 
@@ -93,13 +93,13 @@ outputs:
   review-mode:
     description: Lifecycle mode used for this run (full, incremental, migration, or no-change)
   review-strategy:
-    description: Selected execution strategy (single-pass or specialists)
+    description: Selected execution strategy (single-pass or sharded)
   specialist-role-count:
-    description: Number of fixed specialist roles completed
+    description: Number of fixed review passes completed (diff shards in sharded mode)
   specialist-candidate-count:
-    description: Number of validated model candidates presented to the arbiter
+    description: Number of validated model candidates presented to the merge pass
   arbiter-rejected-count:
-    description: Number of validated candidate IDs rejected by the arbiter
+    description: Number of validated candidate IDs rejected by the merge pass
   review-memory-status:
     description: Repository review-memory status (disabled, missing, or enabled)
   memory-suppressed-count:

@@ -12,7 +12,7 @@ import { buildOpenCodeCommand, extractOpenCodeAssistantText } from './opencode';
 import { extractPiAssistantText, buildPiCommand } from './pi';
 import { parseReviewResult, ReviewContractError, type ReviewResultV1 } from './review-contract';
 import type { ReviewStateFinding } from './review-lifecycle';
-import { MAX_FINDINGS_PER_SPECIALIST, type SpecialistRole } from './review-strategy';
+import { MAX_FINDINGS_PER_SHARD, type SpecialistRole } from './review-strategy';
 import { buildHarnessConfig, SANDBOX_BOOTSTRAP } from './sandbox';
 
 const MAX_PROCESS_OUTPUT_BYTES = 5_000_000;
@@ -175,7 +175,7 @@ const SPECIALIST_POLICY: Readonly<Record<SpecialistRole, string>> = Object.freez
 
 function fixedReviewPolicy(specialistRole?: SpecialistRole): string {
   if (!specialistRole) return REVIEW_POLICY;
-  return `${REVIEW_POLICY}\n\nMandatory fixed specialist scope:\n${SPECIALIST_POLICY[specialistRole]}\nReturn at most ${MAX_FINDINGS_PER_SPECIALIST} findings. Do not delegate, request another pass, change tools, or change the output contract.`;
+  return `${REVIEW_POLICY}\n\nMandatory fixed specialist scope:\n${SPECIALIST_POLICY[specialistRole]}\nReturn at most ${MAX_FINDINGS_PER_SHARD} findings. Do not delegate, request another pass, change tools, or change the output contract.`;
 }
 
 export function buildReviewPrompt(

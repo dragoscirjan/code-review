@@ -10,29 +10,32 @@ import type { PullRequestDiff } from './github';
 import type { FindingCategory } from './review-contract';
 import type { ReviewStateFinding } from './review-lifecycle';
 
-export const REVIEW_STRATEGY_VERSION = 1 as const;
-export const REVIEW_SELECTOR_VERSION = 1 as const;
+export const REVIEW_STRATEGY_VERSION = 2 as const;
+export const REVIEW_SELECTOR_VERSION = 2 as const;
 export const ROLE_CONTEXT_PROJECTION_VERSION = 1 as const;
+/** Historical role-set version; kept for state-compat digests. Roles no longer run as passes. */
 export const SPECIALIST_ROLE_SET_VERSION = 1 as const;
-export const MAX_FINDINGS_PER_SPECIALIST = 3;
-export const MAX_RAW_SPECIALIST_FINDINGS = 12;
+export const SHARD_STRATEGY_VERSION = 1 as const;
+export const MAX_FINDINGS_PER_SHARD = 3;
+export const MAX_RAW_SHARD_FINDINGS = 24;
 export const MAX_ARBITER_CANDIDATES = 10;
-export const MAX_SPECIALIST_CONTEXT_BYTES = 20_000;
+export const MAX_SHARD_CONTEXT_BYTES = 20_000;
 export const MAX_ARBITER_CONTEXT_BYTES = 12_000;
 export const MAX_ARBITER_PROMPT_BYTES = 100_000;
-export const SPECIALIST_REQUEST_OVERHEAD_TOKENS = 1_024;
+export const SHARD_REQUEST_OVERHEAD_TOKENS = 1_024;
 export const SPECIALIST_MAX_OUTPUT_TOKENS = 4_096;
 export const ARBITER_MAX_OUTPUT_TOKENS = 2_048;
 export const REASONING_SPECIALIST_MAX_OUTPUT_TOKENS = 65_536;
 export const REASONING_ARBITER_MAX_OUTPUT_TOKENS = 32_768;
 
-export const SPECIALIST_ROLES = ['correctness', 'security', 'testing', 'compatibility'] as const;
-export type SpecialistRole = (typeof SPECIALIST_ROLES)[number];
+/** Fixed review dimensions a sharded prompt covers in one pass. */
+export const SHARD_REVIEW_DIMENSIONS = ['correctness', 'security', 'testing', 'compatibility'] as const;
+export type SpecialistRole = (typeof SHARD_REVIEW_DIMENSIONS)[number];
 export type RequestedReviewStrategy = 'single-pass' | 'specialists' | 'auto';
-export type SelectedReviewStrategy = 'single-pass' | 'specialists';
+export type SelectedReviewStrategy = 'single-pass' | 'sharded';
 export type ReviewStrategyReason =
   | 'forced-single-pass'
-  | 'forced-specialists'
+  | 'forced-sharded'
   | 'diff-truncated'
   | 'many-files'
   | 'many-changed-lines'
@@ -164,10 +167,20 @@ export function selectReviewStrategy(input: {
   analyzerCoverage: 'complete' | 'partial';
 }): ReviewStrategyPlan {
   if (input.requested === 'single-pass') {
-    return { version: 1, requested: input.requested, selected: 'single-pass', reasons: ['forced-single-pass'] };
+    return {
+      version: REVIEW_STRATEGY_VERSION,
+      requested: input.requested,
+      selected: 'single-pass',
+      reasons: ['forced-single-pass'],
+    };
   }
   if (input.requested === 'specialists') {
-    return { version: 1, requested: input.requested, selected: 'specialists', reasons: ['forced-specialists'] };
+    return {
+      version: REVIEW_STRATEGY_VERSION,
+      requested: input.requested,
+      selected: 'sharded',
+      reasons: ['forced-sharded'],
+    };
   }
   const parsed = input.diff.completeParsed ?? input.diff.parsed;
   if (!parsed) throw new Error('Review strategy selection requires an authoritative parsed diff');
@@ -197,8 +210,8 @@ export function selectReviewStrategy(input: {
   }
   const ordered = reasonOrder.filter((reason) => reasons.has(reason));
   return ordered.length === 0
-    ? { version: 1, requested: input.requested, selected: 'single-pass', reasons: ['low-risk'] }
-    : { version: 1, requested: input.requested, selected: 'specialists', reasons: ordered };
+    ? { version: REVIEW_STRATEGY_VERSION, requested: input.requested, selected: 'single-pass', reasons: ['low-risk'] }
+    : { version: REVIEW_STRATEGY_VERSION, requested: input.requested, selected: 'sharded', reasons: ordered };
 }
 
 function runtimeFromBundle(bundle: ReviewContextBundle): ContextRuntimeSummary {
@@ -218,26 +231,20 @@ function runtimeFromBundle(bundle: ReviewContextBundle): ContextRuntimeSummary {
   };
 }
 
-const roleQueries: Readonly<Record<SpecialistRole, ReadonlySet<string>>> = Object.freeze({
-  correctness: new Set(['definition-and-types', 'callers-and-tests', 'callees', 'configuration']),
-  security: new Set(['definition-and-types', 'callers-and-tests', 'callees', 'configuration']),
-  testing: new Set(['callers-and-tests']),
-  compatibility: new Set(['definition-and-types', 'configuration']),
-});
-
 function sharedContextItem(item: ReviewContextItem): boolean {
-  return ['base-guidance', 'base-configuration', 'github-issue'].includes(item.source.source);
+  return ['base-guidance', 'base-configuration', 'github-issue', 'deterministic-analysis'].includes(item.source.source);
 }
 
-export function projectReviewContextForRole(bundle: ReviewContextBundle, role: SpecialistRole): ReviewContextBundle {
+/**
+ * Projects the shard review context: shared trust-boundary context plus every code-index query
+ * kind, capped at the shard context ceiling. One shard prompt covers all review dimensions, so it
+ * keeps the union of the former per-role query sets instead of a per-role subset.
+ */
+export function projectReviewContextForShard(bundle: ReviewContextBundle): ReviewContextBundle {
   const items = bundle.items.filter(
-    (item) =>
-      sharedContextItem(item) ||
-      (item.source.source === 'code-index' &&
-        item.source.queryKind !== undefined &&
-        roleQueries[role].has(item.source.queryKind)),
+    (item) => sharedContextItem(item) || (item.source.source === 'code-index' && item.source.queryKind !== undefined),
   );
-  return packReviewContext(items, runtimeFromBundle(bundle), MAX_SPECIALIST_CONTEXT_BYTES);
+  return packReviewContext(items, runtimeFromBundle(bundle), MAX_SHARD_CONTEXT_BYTES);
 }
 
 export function projectArbiterContext(bundle: ReviewContextBundle): ReviewContextBundle {
@@ -248,14 +255,11 @@ export function projectArbiterContext(bundle: ReviewContextBundle): ReviewContex
   );
 }
 
-export function priorFindingsForRole(
-  findings: readonly ReviewStateFinding[],
-  role: SpecialistRole,
-): ReviewStateFinding[] {
-  return findings.filter((finding) => finding.category === ROLE_CATEGORY[role]).slice(0, MAX_FINDINGS_PER_SPECIALIST);
+export function priorFindingsForShard(findings: readonly ReviewStateFinding[]): ReviewStateFinding[] {
+  return findings.slice(0, MAX_FINDINGS_PER_SHARD);
 }
 
-export function specialistOutputTokens(maximumOutputTokens: number, reasoning = false): number {
+export function shardOutputTokens(maximumOutputTokens: number, reasoning = false): number {
   const limit = reasoning ? REASONING_SPECIALIST_MAX_OUTPUT_TOKENS : SPECIALIST_MAX_OUTPUT_TOKENS;
   return Math.min(maximumOutputTokens, limit);
 }
@@ -265,21 +269,19 @@ export function arbiterOutputTokens(maximumOutputTokens: number, reasoning = fal
   return Math.min(maximumOutputTokens, limit);
 }
 
-export function reserveSpecialistTokens(input: {
+export function reserveShardTokens(input: {
   prompts: readonly string[];
   maximumOutputTokens: number;
   reasoning?: boolean;
 }): number {
-  if (input.prompts.length !== SPECIALIST_ROLES.length) throw new Error('Every fixed specialist prompt is required');
-  const specialistOutput = specialistOutputTokens(input.maximumOutputTokens, input.reasoning);
+  const shardOutput = shardOutputTokens(input.maximumOutputTokens, input.reasoning);
   return (
     input.prompts.reduce(
-      (total, prompt) =>
-        total + Buffer.byteLength(prompt, 'utf8') + SPECIALIST_REQUEST_OVERHEAD_TOKENS + specialistOutput,
+      (total, prompt) => total + Buffer.byteLength(prompt, 'utf8') + SHARD_REQUEST_OVERHEAD_TOKENS + shardOutput,
       0,
     ) +
     MAX_ARBITER_PROMPT_BYTES +
-    SPECIALIST_REQUEST_OVERHEAD_TOKENS +
+    SHARD_REQUEST_OVERHEAD_TOKENS +
     arbiterOutputTokens(input.maximumOutputTokens, input.reasoning)
   );
 }

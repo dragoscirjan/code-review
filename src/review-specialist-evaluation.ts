@@ -31,6 +31,17 @@ export interface SpecialistEvaluationCase {
   arbiter: RecordedStep | null;
 }
 
+/**
+ * Decodes the recorded expected auto route. 'specialists' is the retired fixture-era name of the
+ * sharded route and stays accepted so the recorded corpus remains replayable without a fixture
+ * regeneration that would break corpus-digest stability guarantees.
+ */
+function expectedRoute(value: unknown): SelectedReviewStrategy | null {
+  if (value === 'single-pass' || value === 'sharded') return value;
+  if (value === 'specialists') return 'sharded';
+  return null;
+}
+
 export interface SpecialistEvaluationRecordings {
   version: 1;
   corpusDigest: string;
@@ -105,10 +116,8 @@ export function parseSpecialistEvaluationRecordings(
   const cases = root.cases.map((rawCase, index): SpecialistEvaluationCase => {
     const item = object(rawCase, `specialist case ${index}`);
     exactKeys(item, ['caseId', 'expectedAuto', 'roles', 'arbiter'], `specialist case ${index}`);
-    if (
-      typeof item.caseId !== 'string' ||
-      (item.expectedAuto !== 'single-pass' && item.expectedAuto !== 'specialists')
-    ) {
+    const route = typeof item.caseId === 'string' ? expectedRoute(item.expectedAuto) : null;
+    if (typeof item.caseId !== 'string' || route === null) {
       throw new Error('Specialist case identity or expected route is invalid');
     }
     const roleObject = object(item.roles, `specialist case ${item.caseId} roles`);
@@ -118,7 +127,7 @@ export function parseSpecialistEvaluationRecordings(
     ) as Record<SpecialistRole, RecordedStep>;
     return {
       caseId: item.caseId,
-      expectedAuto: item.expectedAuto,
+      expectedAuto: route,
       roles: parsedRoles,
       arbiter: item.arbiter === null ? null : step(item.arbiter, `specialist case ${item.caseId} arbiter`),
     };
@@ -303,12 +312,23 @@ export async function evaluateSpecialistRecordings(input: {
       if (mode === 'auto' && plan.selected !== recorded.expectedAuto) {
         return { status: 'execution-failure' as const, latencyMs: 0 };
       }
-      const roleOutputs = roles.map((role) => recorded.roles[role].assistantOutput);
+      let shardOutput: string | null = null;
       let call = 0;
       const structuredRunner: StructuredBackendRunner = async <T>(request: StructuredBackendRequest<T>) => {
-        const output = call < roles.length ? roleOutputs[call] : recorded.arbiter?.assistantOutput;
         call += 1;
-        if (output === undefined) throw new Error('Recorded specialist phase is missing');
+        if (shardOutput === null) {
+          // The recorded per-role outputs are synthesized into one all-dimension shard output:
+          // recorded role passes were category-exclusive, so the finding union preserves every
+          // candidate and, because each recorded role equals its category, candidate digests and
+          // therefore recorded arbiter rejection IDs stay byte-identical.
+          const findings = roles.flatMap((role) => {
+            const parsed = parseReviewResult(recorded.roles[role].assistantOutput);
+            return parsed.findings;
+          });
+          shardOutput = JSON.stringify({ version: 1, outcome: findings.length === 0 ? 'clean' : 'findings', findings });
+        }
+        const output = call === 1 ? shardOutput : recorded.arbiter?.assistantOutput;
+        if (output === undefined) throw new Error('Recorded review phase is missing');
         return request.parseAssistantText(output);
       };
       try {
@@ -417,7 +437,7 @@ export function renderSpecialistEvaluationMarkdown(report: SpecialistEvaluationR
     `- Auto recall: ${ratioValue(report.auto.metrics.recall).toFixed(4)}`,
     `- Auto p95 latency: ${report.auto.metrics.latencyMs.p95} ms`,
     '',
-    '| Mode | Case | Selected | Reasons | Roles | Candidates | Arbiter rejected | Reserved tokens |',
+    '| Mode | Case | Selected | Reasons | Shards | Candidates | Merge rejected | Reserved tokens |',
     '| --- | --- | --- | --- | ---: | ---: | ---: | ---: |',
     ...[
       ...report.specialistCases.map((item) => ({ mode: 'specialists', item })),

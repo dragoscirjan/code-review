@@ -118,7 +118,7 @@ export function renderComment(input: {
 - Requested review strategy: ${input.executionSummary.plan.requested}
 - Selected review strategy: ${input.executionSummary.plan.selected}
 - Strategy reasons: ${input.executionSummary.plan.reasons.join(', ')}
-- Specialist roles completed: ${input.executionSummary.rolesCompleted}
+- Review passes completed: ${input.executionSummary.rolesCompleted}
 - Raw specialist candidates: ${input.executionSummary.rawCandidateCount}
 - Candidates validated for arbitration: ${input.executionSummary.validatedCandidateCount}
 - Candidates omitted before arbitration: ${input.executionSummary.preArbiterOmittedCount}

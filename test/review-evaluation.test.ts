@@ -427,7 +427,7 @@ test('recorded specialist and auto execution are production-replayed, determinis
   assert.equal(first.specialists.metrics.recall.value, baseline.metrics.recall.value);
   assert.equal(first.auto.metrics.precision.value, baseline.metrics.precision.value);
   assert.deepEqual(
-    first.autoCases.filter((item) => item.selected === 'specialists').map((item) => item.caseId),
+    first.autoCases.filter((item) => item.selected === 'sharded').map((item) => item.caseId),
     ['analyzer-duplicate-json-key', 'left-side-removed-validation', 'security-inverted-auth-guard'],
   );
   assert.equal(first.specialistCases.find((item) => item.caseId === 'prompt-injection-real-bug')?.arbiterRejected, 1);
