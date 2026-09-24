@@ -139,9 +139,9 @@ test('renders only host-generated specialist execution metadata', () => {
     diffTruncated: false,
     originalDiffBytes: 1,
     executionSummary: {
-      plan: { version: 1, requested: 'auto', selected: 'specialists', reasons: ['sensitive-surface'] },
-      rolesAttempted: 4,
-      rolesCompleted: 4,
+      plan: { version: 2, requested: 'auto', selected: 'sharded', reasons: ['sensitive-surface'] },
+      rolesAttempted: 2,
+      rolesCompleted: 2,
       arbiterRan: true,
       rawCandidateCount: 2,
       validatedCandidateCount: 1,
@@ -152,9 +152,9 @@ test('renders only host-generated specialist execution metadata', () => {
     marker: '<!-- managed -->',
   });
   assert.match(comment, /Requested review strategy: auto/u);
-  assert.match(comment, /Selected review strategy: specialists/u);
+  assert.match(comment, /Selected review strategy: sharded/u);
   assert.match(comment, /Strategy reasons: sensitive-surface/u);
-  assert.match(comment, /Specialist roles completed: 4/u);
+  assert.match(comment, /Review passes completed: 2/u);
   assert.match(comment, /Candidates rejected by arbiter: 1/u);
   assert.match(comment, /Reserved specialist token units: 123456/u);
 });

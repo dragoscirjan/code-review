@@ -4,15 +4,15 @@ import { packReviewContext, serializeReviewContext, type ContextRuntimeSummary }
 import type { ReviewStateFinding } from '../src/review-lifecycle';
 import {
   MAX_ARBITER_CONTEXT_BYTES,
-  MAX_SPECIALIST_CONTEXT_BYTES,
-  SPECIALIST_ROLES,
+  MAX_SHARD_CONTEXT_BYTES,
+  REVIEW_STRATEGY_VERSION,
   arbiterOutputTokens,
-  priorFindingsForRole,
+  priorFindingsForShard,
   projectArbiterContext,
-  projectReviewContextForRole,
-  reserveSpecialistTokens,
+  projectReviewContextForShard,
+  reserveShardTokens,
   selectReviewStrategy,
-  specialistOutputTokens,
+  shardOutputTokens,
 } from '../src/review-strategy';
 import { prepareReviewedDiff } from '../src/unified-diff';
 
@@ -42,17 +42,24 @@ function oneFile(path = 'src/value.ts', additions = 1) {
 test('forced and auto strategies use fixed deterministic threshold reasons', () => {
   const low = oneFile();
   assert.deepEqual(selectReviewStrategy({ requested: 'auto', diff: low, analyzerCoverage: 'complete' }), {
-    version: 1,
+    version: REVIEW_STRATEGY_VERSION,
     requested: 'auto',
     selected: 'single-pass',
     reasons: ['low-risk'],
   });
+  assert.equal(REVIEW_STRATEGY_VERSION, 2);
   assert.deepEqual(selectReviewStrategy({ requested: 'single-pass', diff: low, analyzerCoverage: 'partial' }).reasons, [
     'forced-single-pass',
   ]);
-  assert.deepEqual(
-    selectReviewStrategy({ requested: 'specialists', diff: low, analyzerCoverage: 'complete' }).reasons,
-    ['forced-specialists'],
+  assert.deepEqual(selectReviewStrategy({ requested: 'specialists', diff: low, analyzerCoverage: 'complete' }), {
+    version: REVIEW_STRATEGY_VERSION,
+    requested: 'specialists',
+    selected: 'sharded',
+    reasons: ['forced-sharded'],
+  });
+  assert.equal(
+    selectReviewStrategy({ requested: 'specialists', diff: low, analyzerCoverage: 'complete' }).selected,
+    'sharded',
   );
   assert.equal(
     selectReviewStrategy({ requested: 'auto', diff: oneFile('src/value.ts', 80), analyzerCoverage: 'complete' })
@@ -164,7 +171,7 @@ test('auto routes bounded sensitive path and filename classes without substring 
   }
 });
 
-test('role projections include only the fixed minimum context and remain byte bounded', () => {
+test('shard projection keeps every review-dimension query and remains byte bounded', () => {
   const source = (
     sourceId: string,
     sourceType: 'base-guidance' | 'base-configuration' | 'github-issue' | 'code-index' | 'deterministic-analysis',
@@ -193,18 +200,13 @@ test('role projections include only the fixed minimum context and remain byte bo
     ],
     runtime,
   );
-  const testing = serializeReviewContext(projectReviewContextForRole(bundle, 'testing'));
-  assert.match(testing, /guidance/u);
-  assert.match(testing, /tests/u);
-  assert.doesNotMatch(testing, /types:/u);
-  assert.doesNotMatch(testing, /callees:/u);
-  assert.doesNotMatch(testing, /analyzer:/u);
-  for (const role of SPECIALIST_ROLES) {
-    assert.ok(
-      Buffer.byteLength(serializeReviewContext(projectReviewContextForRole(bundle, role)), 'utf8') <=
-        MAX_SPECIALIST_CONTEXT_BYTES,
-    );
-  }
+  const shard = serializeReviewContext(projectReviewContextForShard(bundle));
+  assert.match(shard, /guidance/u);
+  assert.match(shard, /tests/u);
+  assert.match(shard, /types:/u);
+  assert.match(shard, /callees:/u);
+  assert.match(shard, /analyzer:/u);
+  assert.ok(Buffer.byteLength(shard, 'utf8') <= MAX_SHARD_CONTEXT_BYTES);
   const arbiter = serializeReviewContext(projectArbiterContext(bundle));
   assert.match(arbiter, /guidance/u);
   assert.match(arbiter, /issue/u);
@@ -228,11 +230,10 @@ test('prior findings route by fixed category and reservations account for every 
     lastSeenHeadSha: 'b'.repeat(40),
     supersededBy: null,
   };
-  assert.deepEqual(priorFindingsForRole([base], 'compatibility'), [base]);
-  assert.deepEqual(priorFindingsForRole([base], 'correctness'), []);
+  assert.deepEqual(priorFindingsForShard([base]), [base]);
   const prompts = ['a', 'bb', 'ccc', 'dddd'];
-  const reserved = reserveSpecialistTokens({ prompts, maximumOutputTokens: 10_000 });
-  const reasoningReserved = reserveSpecialistTokens({
+  const reserved = reserveShardTokens({ prompts, maximumOutputTokens: 10_000 });
+  const reasoningReserved = reserveShardTokens({
     prompts,
     maximumOutputTokens: 943_718,
     reasoning: true,
@@ -240,9 +241,9 @@ test('prior findings route by fixed category and reservations account for every 
   assert.ok(reserved > 100_000);
   assert.ok(reasoningReserved > reserved);
   assert.ok(reasoningReserved < 2_000_000);
-  assert.equal(specialistOutputTokens(943_718), 4_096);
+  assert.equal(shardOutputTokens(943_718), 4_096);
   assert.equal(arbiterOutputTokens(943_718), 2_048);
-  assert.equal(specialistOutputTokens(943_718, true), 65_536);
+  assert.equal(shardOutputTokens(943_718, true), 65_536);
   assert.equal(arbiterOutputTokens(943_718, true), 32_768);
-  assert.throws(() => reserveSpecialistTokens({ prompts: ['only one'], maximumOutputTokens: 10 }), /Every fixed/);
+  assert.equal(reserveShardTokens({ prompts: ['only one'], maximumOutputTokens: 10_000 }) > 0, true);
 });

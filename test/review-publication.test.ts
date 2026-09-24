@@ -215,10 +215,7 @@ async function executeTerminalFreshnessOverrun(path: 'no-candidate' | 'post-arbi
     outcome: 'findings',
     findings: [finding({ category: 'correctness' })],
   });
-  const outputs =
-    path === 'no-candidate'
-      ? [clean, clean, clean, clean]
-      : [correctness, clean, clean, clean, '{"version":1,"rejectedCandidateIds":[]}'];
+  const outputs = path === 'no-candidate' ? [clean] : [correctness, '{"version":1,"rejectedCandidateIds":[]}'];
   let call = 0;
   const runner: StructuredBackendRunner = async <T>(request: StructuredBackendRequest<T>) => {
     const output = outputs[call++];
@@ -227,7 +224,7 @@ async function executeTerminalFreshnessOverrun(path: 'no-candidate' | 'post-arbi
   };
   let time = 0;
   let freshnessChecks = 0;
-  const expireAtCheck = path === 'no-candidate' ? 8 : 10;
+  const expireAtCheck = path === 'no-candidate' ? 2 : 4;
   const executed = await executeReviewStrategy({
     plan: selectReviewStrategy({ requested: 'specialists', diff, analyzerCoverage: 'complete' }),
     backend: 'opencode',
@@ -381,9 +378,9 @@ test('applies exact-base memory only after validation and publishes safe audit m
       async () => ({
         review,
         summary: {
-          plan: { version: 1, requested: 'specialists', selected: 'specialists', reasons: ['forced-specialists'] },
-          rolesAttempted: 4,
-          rolesCompleted: 4,
+          plan: { version: 2, requested: 'specialists', selected: 'sharded', reasons: ['forced-sharded'] },
+          rolesAttempted: 2,
+          rolesCompleted: 2,
           arbiterRan: true,
           rawCandidateCount: 1,
           validatedCandidateCount: 1,
