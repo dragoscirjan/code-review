@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
-import { createServer, request as httpRequest, type IncomingMessage } from 'node:http';
-import { request as httpsRequest } from 'node:https';
+import { Agent as HttpAgent, createServer, request as httpRequest, type IncomingMessage } from 'node:http';
+import { Agent as HttpsAgent, request as httpsRequest } from 'node:https';
 import { isIP, type LookupFunction } from 'node:net';
 import type { ModelConnection } from './model';
 import { addressAllowed } from './model';
@@ -136,6 +136,11 @@ export function startCredentialGateway(input: CredentialGatewayRequest): Promise
       if (options.all) callback(null, [{ address: pinned.address, family: pinned.family }]);
       else callback(null, pinned.address, pinned.family);
     };
+    // A dedicated agent bypasses any environment-proxy configuration that a
+    // future Node runtime could apply to the global agents (NODE_USE_ENV_PROXY),
+    // keeping upstream connections pinned and direct.
+    const agent =
+      upstream.protocol === 'https:' ? new HttpsAgent({ keepAlive: true }) : new HttpAgent({ keepAlive: true });
     const upstreamIdleTimeoutMs = input.upstreamIdleTimeoutMs ?? 300_000;
     const openSockets = new Set<import('node:net').Socket>();
     const server = createServer((request, response) => {
@@ -172,6 +177,7 @@ export function startCredentialGateway(input: CredentialGatewayRequest): Promise
           // hostname for SNI and certificate identity checks.
           lookup: pinnedLookup,
           timeout: upstreamIdleTimeoutMs,
+          agent,
         },
         (upstreamResponse) => {
           const status = upstreamResponse.statusCode ?? 0;
@@ -187,7 +193,15 @@ export function startCredentialGateway(input: CredentialGatewayRequest): Promise
             response.end();
             return;
           }
-          response.writeHead(status, stripHopByHop(upstreamResponse.headers as Record<string, string | string[]>));
+          const forwardedResponseHeaders = stripHopByHop(upstreamResponse.headers as Record<string, string | string[]>);
+          if (status >= 300 && status < 400 && location) {
+            // Rewrite absolute same-origin locations to gateway-relative paths
+            // so the harness re-enters the gateway instead of connecting to the
+            // provider directly; relative locations already resolve here.
+            const resolved = new URL(location, upstreamOrigin);
+            forwardedResponseHeaders.location = resolved.pathname + resolved.search;
+          }
+          response.writeHead(status, forwardedResponseHeaders);
           upstreamResponse.pipe(response);
         },
       );
@@ -223,6 +237,7 @@ export function startCredentialGateway(input: CredentialGatewayRequest): Promise
           close: () =>
             new Promise<void>((resolveClose) => {
               for (const socket of openSockets) socket.destroy();
+              agent.destroy();
               server.close(() => resolveClose());
             }),
         });

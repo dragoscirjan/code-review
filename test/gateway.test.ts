@@ -405,3 +405,38 @@ test('bounds hung upstream connections with an idle timeout and fails closed', a
     await new Promise<void>((resolve) => hungServer.close(() => resolve()));
   }
 });
+
+test('rewrites absolute same-origin redirect locations to gateway-relative paths', async () => {
+  const port = await listenUpstream((request: IncomingMessage, response: ServerResponse) => {
+    requests.push({ url: request.url });
+    if (request.url === '/absolute-redirect') {
+      // The provider advertises its own public origin; the gateway must keep
+      // the harness from connecting there directly.
+      response.writeHead(302, { location: `http://pinned-provider.test:${port}/final` });
+      response.end();
+      return;
+    }
+    response.end('{}');
+  });
+  gateway = await startCredentialGateway({
+    connection: {
+      api: 'openai-completions',
+      baseUrl: `http://pinned-provider.test:${port}`,
+      network: 'private',
+      credential: { type: 'bearer', value: realCredential },
+    },
+    containerHostAlias: '127.0.0.1',
+    resolver: async () => [{ address: '127.0.0.1', family: 4 }],
+  });
+  const response = await fetch(`${gateway.origin}/absolute-redirect`, {
+    headers: { authorization: `Bearer ${gateway.placeholder}` },
+    redirect: 'manual',
+  });
+  assert.equal(response.status, 302);
+  assert.equal(response.headers.get('location'), '/final');
+  const followed = await fetch(`${gateway.origin}${response.headers.get('location')}`, {
+    headers: { authorization: `Bearer ${gateway.placeholder}` },
+  });
+  assert.equal(followed.status, 200);
+  assert.equal(requests.length, 2);
+});
