@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { AnalyzerSummary } from './analyzer';
 import type { AnalyzerFindingCandidate } from './analyzer-contract';
-import { renderComment, renderInlineComment } from './comment';
+import { renderComment, renderInlineComment, renderProgressComment } from './comment';
 import type { ReviewContextMetadata } from './context-planner';
 import {
   assessReview,
@@ -17,6 +17,7 @@ import type {
   PullRequestContext,
   PullRequestDiff,
 } from './github';
+import { commentDigest } from './github';
 import { findingAnchorIsCovered, remapPriorFinding } from './incremental-review';
 import { redactSecrets } from './model';
 import type { ReviewBackend } from './review';
@@ -32,10 +33,16 @@ import {
   type ReviewStateV1,
 } from './review-lifecycle';
 import { assertReviewMemoryCurrent, type ReviewMemory } from './review-memory';
-import type { ExecutedReview, ReviewExecutionSummary } from './review-specialists';
+import type { ExecutedReview, ReviewExecutionSummary, ShardProgress } from './review-specialists';
 
 export interface ExecuteAndPublishReviewInput {
   executeReview: () => Promise<ReviewResultV1 | ExecutedReview>;
+  /**
+   * Registers the per-shard progress handler on the review executor. Called before
+   * {@link ExecuteAndPublishReviewInput.executeReview} when progressive publication is enabled;
+   * the handler must be idempotent-safe because the executor may skip later shards on deadline.
+   */
+  registerShardHandler?: (handler: (progress: ShardProgress) => Promise<void> | void) => void;
   assertFresh: () => Promise<void>;
   assertStateFresh?: () => Promise<void>;
   client: Pick<GitHubClient, 'createOrReuseInlineReview' | 'upsertManagedComment'> &
@@ -54,6 +61,8 @@ export interface ExecuteAndPublishReviewInput {
   contextMetadata?: ReviewContextMetadata;
   analyzer?: { findings: readonly AnalyzerFindingCandidate[]; summary: AnalyzerSummary };
   memory?: ReviewMemory;
+  /** Progressive publication: managed summary is created immediately and edited in place. */
+  progressive?: ProgressivePublicationOptions;
   lifecycle?: {
     apiUrl: string;
     policyDigest: string;
@@ -66,6 +75,11 @@ export interface ExecuteAndPublishReviewInput {
     affected: readonly ReviewStateFinding[];
     lease: ManagedCommentLease | null;
   };
+}
+
+export interface ProgressivePublicationOptions {
+  /** Invoked once before review execution to publish the phase-0 managed summary. */
+  enabled: boolean;
 }
 
 function redactFinding(finding: ValidatedFinding, secrets: readonly string[]): ValidatedFinding {
@@ -229,9 +243,90 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
   await input.assertStateFresh?.();
   if (!input.diff.parsed) throw new Error('Reviewed diff is missing its validated line map');
   assertLifecycleCoverage(input);
-  const executed = await input.executeReview();
+
+  // Progressive publication state: the managed comment is created before review execution and
+  // edited in place per completed shard. Every write re-verifies ownership through the lease, and
+  // each edit's lease digest comes from the body previously written, forming an integrity chain.
+  let progressiveLease: ManagedCommentLease | null = null;
+  const provisionalFindings: ValidatedFinding[] = [];
+  let totalShards = 0;
+  let completedShards = 0;
+  const progressive = input.progressive?.enabled === true;
+  // Phase-0 deterministic view: only analyzer/indexer findings, used for the immediate summary and
+  // every progress edit so provisional shard findings never mix into the deterministic counts.
+  const phaseZeroAssessment = () =>
+    redactAssessment(
+      assessReview(
+        { version: 1, outcome: 'clean', findings: [] },
+        input.diff.parsed!,
+        { minimumConfidence: input.minimumConfidence, maximumInlineComments: 0 },
+        input.secrets,
+        input.analyzer?.findings ?? [],
+        input.memory,
+      ),
+      input.secrets,
+    );
+  const executeReview = async (): Promise<ReviewResultV1 | ExecutedReview> => {
+    if (!progressive) return input.executeReview();
+    const publishProgress = async (progress: ShardProgress): Promise<void> => {
+      completedShards = progress.completedShards;
+      totalShards = progress.totalShards;
+      provisionalFindings.push(...progress.findings);
+      if (!progressiveLease) return;
+      const body = renderProgressComment({
+        assessment: phaseZeroAssessment(),
+        backend: input.backend,
+        model: input.model,
+        headSha: input.pullRequest.headSha,
+        actor: input.actor.login,
+        completedShards,
+        totalShards,
+        provisionalFindings,
+        marker,
+      });
+      assertPayloadsContainNoSecrets([body], input.secrets);
+      const updated = await input.client.upsertManagedComment(
+        input.pullRequest,
+        input.actor,
+        input.markers,
+        body,
+        progressiveLease,
+      );
+      progressiveLease = { id: updated.id, bodyDigest: commentDigest(body), marker };
+    };
+    input.registerShardHandler?.(publishProgress);
+    const phaseZero = phaseZeroAssessment();
+    const initialBody = renderProgressComment({
+      assessment: phaseZero,
+      backend: input.backend,
+      model: input.model,
+      headSha: input.pullRequest.headSha,
+      actor: input.actor.login,
+      completedShards: 0,
+      totalShards: 0,
+      provisionalFindings: [],
+      marker,
+    });
+    assertPayloadsContainNoSecrets([initialBody], input.secrets);
+    const created = await input.client.upsertManagedComment(
+      input.pullRequest,
+      input.actor,
+      input.markers,
+      initialBody,
+      lifecycle?.lease ?? undefined,
+    );
+    progressiveLease = {
+      id: created.id,
+      bodyDigest: commentDigest(initialBody),
+      marker,
+    };
+    return input.executeReview();
+  };
+  const executed = await executeReview();
   const review = 'review' in executed ? executed.review : executed;
   const executionSummary: ReviewExecutionSummary | undefined = 'review' in executed ? executed.summary : undefined;
+  void totalShards;
+  void completedShards;
   let assessment = redactAssessment(
     assessReview(
       review,
@@ -363,6 +458,16 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
     contextMetadata: input.contextMetadata,
     analyzerSummary: input.analyzer?.summary,
     executionSummary,
+    ...(executionSummary?.degraded
+      ? {
+          coverage: {
+            degraded: executionSummary.degraded,
+            notCoveredShards: executionSummary.notCoveredShards ?? 0,
+            totalShards: (executionSummary.rolesCompleted ?? 0) + (executionSummary.notCoveredShards ?? 0),
+            provisionalFindings: executionSummary.validatedCandidateCount,
+          },
+        }
+      : {}),
     ...(input.memory
       ? {
           memory: {
@@ -424,7 +529,7 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
     input.actor,
     input.markers,
     summaryBody,
-    lifecycle?.lease,
+    progressiveLease ?? lifecycle?.lease,
   );
   await input.assertFresh();
   return { comment, inlineReview, assessment, lifecycle: reconciled, state, executionSummary };

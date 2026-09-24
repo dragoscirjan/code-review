@@ -11,6 +11,7 @@ import {
   runReview,
   runStructuredBackend,
   wrapUntrustedData,
+  ReviewExecutionError,
   type BackendDeadline,
   type ReviewBackend,
   type ReviewRequest,
@@ -48,6 +49,10 @@ export interface ReviewExecutionSummary {
   preArbiterOmittedCount: number;
   arbiterRejectedCount: number;
   reservedTokens: number;
+  /** True when the aggregate deadline expired before every shard and the merge pass completed. */
+  degraded?: boolean;
+  /** Number of queued shards that were never executed because the deadline expired. */
+  notCoveredShards?: number;
 }
 
 export interface ExecutedReview {
@@ -80,6 +85,27 @@ export interface ExecuteReviewStrategyInput {
   now?: () => number;
   structuredRunner?: StructuredBackendRunner;
   singleRunner?: (request: ReviewRequest) => Promise<ReviewResultV1>;
+  /**
+   * Invoked after each shard's candidates pass validation. Progressive publication uses it to
+   * edit the managed summary in place; a throwing callback aborts the review.
+   */
+  onShardCompleted?: (progress: {
+    completedShards: number;
+    totalShards: number;
+    shardIndex: number;
+    shardPaths: readonly string[];
+    findings: readonly ValidatedFinding[];
+    degraded: boolean;
+  }) => Promise<void> | void;
+}
+
+export interface ShardProgress {
+  completedShards: number;
+  totalShards: number;
+  shardIndex: number;
+  shardPaths: readonly string[];
+  findings: readonly ValidatedFinding[];
+  degraded: boolean;
 }
 
 interface SpecialistCandidate {
@@ -301,9 +327,29 @@ function reviewContainsSecret(review: ReviewResultV1, secrets: readonly string[]
   });
 }
 
+export class DeadlineExpiredError extends Error {
+  constructor() {
+    super('Sharded review aggregate execution deadline expired');
+    this.name = 'DeadlineExpiredError';
+  }
+}
+
+/**
+ * Aggregate-deadline expiry reaches the executor either as its own typed error or as the backend
+ * runner's backend-failure wrap of the shared monotonic deadline; both degrade the sharded run.
+ */
+function isAggregateDeadlineError(error: unknown): boolean {
+  if (error instanceof DeadlineExpiredError) return true;
+  return (
+    error instanceof ReviewExecutionError &&
+    error.kind === 'backend-failure' &&
+    /aggregate deadline expired/u.test(error.message)
+  );
+}
+
 function remainingTime(deadline: number, now: () => number, reserveMs = 0): number {
   const remaining = Math.floor(deadline - now());
-  if (remaining <= reserveMs) throw new Error('Sharded review aggregate execution deadline expired');
+  if (remaining <= reserveMs) throw new DeadlineExpiredError();
   return remaining;
 }
 
@@ -421,38 +467,59 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
   let shardsAttempted = 0;
   let shardsCompleted = 0;
   let rawCandidateCount = 0;
+  let degraded = false;
+  let notCoveredShards = 0;
 
   for (let index = 0; index < shards.length; index += 1) {
     const shard = shards[index] as DiffShard;
-    await assertFreshWithinDeadline(input.assertFresh, deadline, now, BACKEND_CLEANUP_RESERVE_MS);
-    const timeoutMs = remainingTime(deadline, now);
+    // Deadline-aware degradation: an expired aggregate deadline stops the loop instead of failing
+    // the run; completed shards stay publishable as explicitly provisional partial coverage.
+    // Freshness (staleness) failures are not deadline expiry and still abort the review.
+    let timeoutMs: number;
+    try {
+      await assertFreshWithinDeadline(input.assertFresh, deadline, now, BACKEND_CLEANUP_RESERVE_MS);
+      timeoutMs = remainingTime(deadline, now);
+    } catch (error) {
+      if (!isAggregateDeadlineError(error)) throw error;
+      degraded = true;
+      notCoveredShards = shards.length - shardsCompleted;
+      break;
+    }
     shardsAttempted += 1;
-    const review = await run({
-      backend: input.backend,
-      containerEngine: input.containerEngine,
-      connection: shardConnection,
-      credentialIsolation: input.credentialIsolation,
-      opencodeVersion: input.opencodeVersion,
-      piVersion: input.piVersion,
-      timeoutMs,
-      deadline: backendDeadline(deadline, now),
-      secrets: input.secrets,
-      environment: input.environment,
-      prompt: prompts[index] as string,
-      rejectSecretOutput: true,
-      parseAssistantText: (raw) => {
-        const parsed = parseReviewResult(raw);
-        if (parsed.findings.length > MAX_FINDINGS_PER_SHARD) {
-          throw new Error(`Shard ${shard.index} exceeded its finding limit`);
-        }
-        const shardPaths = new Set(shard.paths);
-        const foreign = parsed.findings.filter((finding) => !shardPaths.has(finding.location.path));
-        if (foreign.length > 0) {
-          throw new Error(`Shard ${shard.index} reported a finding outside its authoritative paths`);
-        }
-        return parsed;
-      },
-    });
+    let review: ReviewResultV1;
+    try {
+      review = await run({
+        backend: input.backend,
+        containerEngine: input.containerEngine,
+        connection: shardConnection,
+        credentialIsolation: input.credentialIsolation,
+        opencodeVersion: input.opencodeVersion,
+        piVersion: input.piVersion,
+        timeoutMs,
+        deadline: backendDeadline(deadline, now),
+        secrets: input.secrets,
+        environment: input.environment,
+        prompt: prompts[index] as string,
+        rejectSecretOutput: true,
+        parseAssistantText: (raw) => {
+          const parsed = parseReviewResult(raw);
+          if (parsed.findings.length > MAX_FINDINGS_PER_SHARD) {
+            throw new Error(`Shard ${shard.index} exceeded its finding limit`);
+          }
+          const shardPaths = new Set(shard.paths);
+          const foreign = parsed.findings.filter((finding) => !shardPaths.has(finding.location.path));
+          if (foreign.length > 0) {
+            throw new Error(`Shard ${shard.index} reported a finding outside its authoritative paths`);
+          }
+          return parsed;
+        },
+      });
+    } catch (error) {
+      if (!isAggregateDeadlineError(error)) throw error;
+      degraded = true;
+      notCoveredShards = shards.length - shardsCompleted;
+      break;
+    }
     if (reviewContainsSecret(review, input.secrets)) throw new Error('Shard output contains forbidden secret data');
     rawCandidateCount += review.findings.length;
     if (rawCandidateCount > MAX_RAW_SHARD_FINDINGS) throw new Error('Shard raw finding budget exceeded');
@@ -471,8 +538,44 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
       candidates.push({ id: candidateId(snapshot, anchorDimension, finding), role: anchorDimension, finding });
     }
     shardsCompleted += 1;
-    remainingTime(deadline, now);
-    await assertFreshWithinDeadline(input.assertFresh, deadline, now);
+    if (input.onShardCompleted) {
+      await input.onShardCompleted({
+        completedShards: shardsCompleted,
+        totalShards: shards.length,
+        shardIndex: shard.index,
+        shardPaths: shard.paths,
+        findings: validated.findings,
+        degraded: false,
+      });
+    }
+  }
+
+  const degradedFlags = degraded ? { degraded: true as const, notCoveredShards } : {};
+  if (degraded) {
+    // Provisional findings keep their validated shape; the summary marks the run partial so
+    // publication renders the explicit coverage statement instead of a silent clean result.
+    // Degradation only skips unattempted shards, so completed candidates may be empty (outcome
+    // clean) or carry the validated findings tuple produced by the completed shards.
+    const degradedFindings = candidates.map(({ finding }) => finding);
+    const review: ReviewResultV1 =
+      degradedFindings.length === 0
+        ? { version: 1, outcome: 'clean', findings: [] }
+        : { version: 1, outcome: 'findings', findings: [degradedFindings[0]!, ...degradedFindings.slice(1)] };
+    return {
+      review,
+      summary: {
+        plan: input.plan,
+        rolesAttempted: shardsAttempted,
+        rolesCompleted: shardsCompleted,
+        arbiterRan: false,
+        rawCandidateCount,
+        validatedCandidateCount: candidates.length,
+        preArbiterOmittedCount: 0,
+        arbiterRejectedCount: 0,
+        reservedTokens,
+        ...degradedFlags,
+      },
+    };
   }
 
   const unique = [
@@ -503,8 +606,11 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
     preArbiterOmittedCount: mergeSelection.omitted,
     arbiterRejectedCount: 0,
     reservedTokens,
+    ...degradedFlags,
   };
   if (mergeSelection.selected.length === 0) {
+    // All shards ran and none produced a publishable candidate, so there is no remaining work a
+    // moved clock could truncate; the run is complete even if the deadline expired meanwhile.
     return { review: { version: 1, outcome: 'clean', findings: [] }, summary: baseSummary };
   }
 
@@ -516,29 +622,70 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
   if (Buffer.byteLength(prompt, 'utf8') > MAX_ARBITER_PROMPT_BYTES) {
     throw new Error('Assembled merge prompt exceeds its reserved byte ceiling');
   }
-  await assertFreshWithinDeadline(input.assertFresh, deadline, now, BACKEND_CLEANUP_RESERVE_MS);
+  try {
+    await assertFreshWithinDeadline(input.assertFresh, deadline, now, BACKEND_CLEANUP_RESERVE_MS);
+    remainingTime(deadline, now);
+  } catch (error) {
+    if (!isAggregateDeadlineError(error)) throw error;
+    // Every shard completed but the merge pass never ran: publish the validated candidates as
+    // explicitly unadjudicated partial coverage instead of failing the run.
+    const unadjudicated = candidates.map(({ finding }) => finding);
+    const degradedReview: ReviewResultV1 =
+      unadjudicated.length === 0
+        ? { version: 1, outcome: 'clean', findings: [] }
+        : { version: 1, outcome: 'findings', findings: [unadjudicated[0]!, ...unadjudicated.slice(1)] };
+    return {
+      review: degradedReview,
+      summary: {
+        ...baseSummary,
+        arbiterRan: false,
+        degraded: true,
+        notCoveredShards: 0,
+      },
+    };
+  }
   const timeoutMs = remainingTime(deadline, now);
   const ids = mergeSelection.selected.map((candidate) => candidate.id);
-  const decision = await run({
-    backend: input.backend,
-    containerEngine: input.containerEngine,
-    connection: {
-      ...input.connection,
-      maxOutputTokens: arbiterOutputTokens(input.connection.maxOutputTokens, input.connection.reasoning),
-    },
-    credentialIsolation: input.credentialIsolation,
-    opencodeVersion: input.opencodeVersion,
-    piVersion: input.piVersion,
-    timeoutMs,
-    deadline: backendDeadline(deadline, now),
-    secrets: input.secrets,
-    environment: input.environment,
-    prompt,
-    rejectSecretOutput: true,
-    parseAssistantText: (raw) => parseArbiterDecision(raw, ids),
-  });
-  remainingTime(deadline, now);
-  await assertFreshWithinDeadline(input.assertFresh, deadline, now);
+  let decision;
+  try {
+    decision = await run({
+      backend: input.backend,
+      containerEngine: input.containerEngine,
+      connection: {
+        ...input.connection,
+        maxOutputTokens: arbiterOutputTokens(input.connection.maxOutputTokens, input.connection.reasoning),
+      },
+      credentialIsolation: input.credentialIsolation,
+      opencodeVersion: input.opencodeVersion,
+      piVersion: input.piVersion,
+      timeoutMs,
+      deadline: backendDeadline(deadline, now),
+      secrets: input.secrets,
+      environment: input.environment,
+      prompt,
+      rejectSecretOutput: true,
+      parseAssistantText: (raw) => parseArbiterDecision(raw, ids),
+    });
+  } catch (error) {
+    if (!isAggregateDeadlineError(error)) throw error;
+    const unadjudicated = candidates.map(({ finding }) => finding);
+    const degradedReview: ReviewResultV1 =
+      unadjudicated.length === 0
+        ? { version: 1, outcome: 'clean', findings: [] }
+        : { version: 1, outcome: 'findings', findings: [unadjudicated[0]!, ...unadjudicated.slice(1)] };
+    return {
+      review: degradedReview,
+      summary: {
+        ...baseSummary,
+        arbiterRan: false,
+        degraded: true,
+        notCoveredShards: 0,
+      },
+    };
+  }
+  // Post-merge there is nothing left to run: staleness still aborts (the publication layer
+  // re-checks freshness before every write), but a moved clock cannot un-run the decision.
+  await input.assertFresh();
   const rejected = new Set(decision.rejectedCandidateIds);
   const retained = mergeSelection.selected.filter((candidate) => !rejected.has(candidate.id));
   const anchors = retained.map((candidate) => candidateAnchor(candidate));

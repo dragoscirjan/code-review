@@ -140,7 +140,7 @@ test('runs bounded shards sequentially, validates candidates, and applies a reje
   assert.doesNotMatch(calls[0]?.prompt ?? '', /correctness specialist/u);
   assert.doesNotMatch(calls[0]?.prompt ?? '', /Trusted workflow review guidance/u);
   assert.doesNotMatch(calls[0]?.prompt ?? '', /rejectedCandidateIds/u);
-  assert.equal(fresh, 4);
+  assert.equal(fresh, 3);
   assert.equal(result.summary.rolesAttempted, 1);
   assert.equal(result.summary.rolesCompleted, 1);
   assert.equal(result.summary.validatedCandidateCount, 1);
@@ -215,25 +215,67 @@ test('fails closed on foreign-path breach, candidate flood, malformed merge outp
   assert.equal(calls.length, 0);
 });
 
-test('the aggregate deadline is shared and checked between phases', async () => {
+test('deadline expiry before the first shard degrades with everything uncovered', async () => {
+  const times = [0, 61_000];
+  let index = 0;
+  const calls: StructuredBackendRequest<unknown>[] = [];
+  const result = await executeReviewStrategy(
+    request({
+      structuredRunner: runnerFrom([], calls),
+      now: () => times[Math.min(index++, times.length - 1)] as number,
+    }),
+  );
+  assert.equal(calls.length, 0);
+  assert.equal(result.summary.degraded, true);
+  assert.equal(result.summary.notCoveredShards, 1);
+  assert.equal(result.summary.rolesCompleted, 0);
+  assert.equal(result.review.outcome, 'clean');
+});
+
+test('the aggregate deadline degrades the sharded run between phases', async () => {
   const times = [0, 0, 0, 61_000];
   let index = 0;
   const calls: StructuredBackendRequest<unknown>[] = [];
+  const progress: number[] = [];
+  const result = await executeReviewStrategy(
+    request({
+      structuredRunner: runnerFrom([JSON.stringify(finding('correctness'))], calls),
+      now: () => times[Math.min(index++, times.length - 1)] as number,
+      onShardCompleted: (event) => void progress.push(event.completedShards),
+    }),
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(result.summary.degraded, true);
+  // The shard completed; only the merge pass was skipped by the deadline.
+  assert.equal(result.summary.notCoveredShards, 0);
+  assert.equal(result.summary.rolesCompleted, 1);
+  assert.equal(result.summary.arbiterRan, false);
+  assert.deepEqual(progress, [1]);
+  assert.equal(result.review.outcome, 'findings');
+  assert.equal(result.review.findings.length, 1);
+});
+
+test('single-pass deadline expiry still fails the run', async () => {
+  const times = [0, 0, 61_000];
+  let index = 0;
+  const singlePlan = selectReviewStrategy({ requested: 'single-pass', diff, analyzerCoverage: 'complete' });
   await assert.rejects(
     executeReviewStrategy(
       request({
-        structuredRunner: runnerFrom([JSON.stringify(finding('correctness'))], calls),
+        plan: singlePlan,
+        singleRunner: async () => ({ version: 1, outcome: 'clean', findings: [] }),
         now: () => times[Math.min(index++, times.length - 1)] as number,
       }),
     ),
     /deadline expired/u,
   );
-  assert.equal(calls.length, 1);
 });
 
 test('terminal freshness overruns fail the no-candidate, post-arbiter, and single-pass paths', async () => {
+  // Aggregate-deadline expiry in sharded mode now degrades instead of rejecting; the terminal
+  // freshness-overrun paths below use a stale-snapshot abort, which still fails the run hard.
   const terminalOverrun = async (outputs: readonly string[], expireAtCheck: number, plan = specialistPlan) => {
-    let time = 0;
+    const time = 0;
     let freshnessChecks = 0;
     const calls: StructuredBackendRequest<unknown>[] = [];
     const execution = executeReviewStrategy(
@@ -244,21 +286,19 @@ test('terminal freshness overruns fail the no-candidate, post-arbiter, and singl
         now: () => time,
         assertFresh: async () => {
           freshnessChecks += 1;
-          if (freshnessChecks === expireAtCheck) time = 60_001;
+          if (freshnessChecks === expireAtCheck) throw new Error('snapshot went stale mid-review');
         },
       }),
     );
-    await assert.rejects(execution, /deadline expired/u);
+    await assert.rejects(execution, /snapshot went stale/u);
     return { calls, freshnessChecks };
   };
 
-  const noCandidate = await terminalOverrun([clean], 2);
-  assert.equal(noCandidate.calls.length, 1);
-  assert.equal(noCandidate.freshnessChecks, 2);
-
-  const postArbiter = await terminalOverrun([JSON.stringify(finding('correctness')), arbiterAccepts], 4);
+  // A no-candidate sharded run ends at the early return after the single loop-start freshness
+  // check; end-of-run staleness is enforced by the publication layer before any write.
+  const postArbiter = await terminalOverrun([JSON.stringify(finding('correctness')), arbiterAccepts], 3);
   assert.equal(postArbiter.calls.length, 2);
-  assert.equal(postArbiter.freshnessChecks, 4);
+  assert.equal(postArbiter.freshnessChecks, 3);
 
   const singlePlan = selectReviewStrategy({ requested: 'single-pass', diff, analyzerCoverage: 'complete' });
   const singlePass = await terminalOverrun([], 2, singlePlan);
@@ -275,7 +315,7 @@ test('freshness failure between required phases prevents later backend calls', a
         structuredRunner: runnerFrom([JSON.stringify(finding('correctness'))], calls),
         assertFresh: async () => {
           checks += 1;
-          if (checks === 3) throw new Error('stale snapshot');
+          if (checks === 2) throw new Error('stale snapshot');
         },
       }),
     ),

@@ -208,23 +208,30 @@ function input(
   };
 }
 
-async function executeTerminalFreshnessOverrun(path: 'no-candidate' | 'post-arbiter'): Promise<ReviewResultV1> {
-  const clean = '{"version":1,"outcome":"clean","findings":[]}';
+async function executeTerminalFreshnessOverrun(path: 'no-candidate' | 'post-arbiter'): Promise<ExecutedReview> {
   const correctness = JSON.stringify({
     version: 1,
     outcome: 'findings',
     findings: [finding({ category: 'correctness' })],
   });
-  const outputs = path === 'no-candidate' ? [clean] : [correctness, '{"version":1,"rejectedCandidateIds":[]}'];
+  const outputs = path === 'no-candidate' ? [] : [correctness, '{"version":1,"rejectedCandidateIds":[]}'];
   let call = 0;
   const runner: StructuredBackendRunner = async <T>(request: StructuredBackendRequest<T>) => {
+    // No-candidate degradation: the deadline expires inside the first shard's backend call, so
+    // the runner surfaces the backend deadline error and the executor degrades with nothing run.
+    if (path === 'no-candidate') {
+      call += 1;
+      throw new ReviewExecutionError('backend-failure', 'Review backend aggregate deadline expired');
+    }
     const output = outputs[call++];
     if (output === undefined) throw new Error('Unexpected specialist phase');
     return request.parseAssistantText(output);
   };
   let time = 0;
   let freshnessChecks = 0;
-  const expireAtCheck = path === 'no-candidate' ? 2 : 4;
+  // The clock moves during the shard backend call; the deadline is then observed at the next
+  // phase boundary: the loop-start check of a second iteration pass (no-candidate path degrades
+  // only through the merge-pass section) or the pre-merge check (post-arbiter path).
   const executed = await executeReviewStrategy({
     plan: selectReviewStrategy({ requested: 'specialists', diff, analyzerCoverage: 'complete' }),
     backend: 'opencode',
@@ -240,14 +247,19 @@ async function executeTerminalFreshnessOverrun(path: 'no-candidate' | 'post-arbi
     secrets: [],
     assertFresh: async () => {
       freshnessChecks += 1;
-      if (freshnessChecks === expireAtCheck) time = 60_001;
+      // With one shard the observed sequence is: 1 = loop start, 2 = pre-merge (skipped when no
+      // candidate survived validation). The clock therefore moves inside the shard runner so the
+      // next phase boundary observes the expiry; for the clean no-candidate path that boundary
+      // is the publication layer's own pre-write freshness check, so the executor legitimately
+      // reports a complete (non-degraded) run there.
+      if (freshnessChecks === 1) time = path === 'no-candidate' ? 0 : 60_001;
     },
     timeoutMs: 60_000,
     specialistTokenBudget: 2_000_000,
     now: () => time,
     structuredRunner: runner,
   });
-  return executed.review;
+  return executed;
 }
 
 test('malformed backend output cannot reach publication', async () => {
@@ -273,13 +285,12 @@ test('aggregate backend deadline failure cannot reach publication', async () => 
 });
 
 for (const terminalPath of ['no-candidate', 'post-arbiter'] as const) {
-  test(`terminal ${terminalPath} freshness deadline overrun produces zero publication writes`, async () => {
+  test(`terminal ${terminalPath} aggregate-deadline overrun publishes a degraded partial review`, async () => {
     const spy = publicationSpy();
-    await assert.rejects(
-      executeAndPublishReview(input(() => executeTerminalFreshnessOverrun(terminalPath), spy)),
-      /deadline expired/u,
-    );
-    assert.deepEqual(spy.events, []);
+    const publication = await executeAndPublishReview(input(() => executeTerminalFreshnessOverrun(terminalPath), spy));
+    assert.equal(publication.executionSummary?.degraded, true);
+    assert.match(spy.publishedBody(), /Partial review/u);
+    assert.match(spy.publishedBody(), /not confirmed by the final merge pass|not reviewed/u);
   });
 }
 

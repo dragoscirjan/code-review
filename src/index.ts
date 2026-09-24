@@ -20,7 +20,7 @@ import {
 import { REVIEW_MEMORY_SEMANTIC_VERSION, assertReviewMemoryCurrent, loadReviewMemory } from './review-memory';
 import { executeAndPublishReview } from './review-publication';
 import { acquireReviewedSnapshot, assertSnapshotFresh, SNAPSHOT_DIFF_TIMEOUT_MS } from './review-snapshot';
-import { executeReviewStrategy, noChangeExecutedReview } from './review-specialists';
+import { executeReviewStrategy, noChangeExecutedReview, type ShardProgress } from './review-specialists';
 import {
   MAX_ARBITER_CANDIDATES,
   MAX_ARBITER_CONTEXT_BYTES,
@@ -257,7 +257,11 @@ async function main(): Promise<void> {
     await assertReviewInputsFresh();
     await assertStateFresh();
   };
+  let shardProgressHandler: ((progress: ShardProgress) => Promise<void> | void) | undefined;
   const publication = await executeAndPublishReview({
+    registerShardHandler: (handler) => {
+      shardProgressHandler = handler;
+    },
     executeReview: () =>
       incremental.mode === 'no-change'
         ? Promise.resolve(noChangeExecutedReview(strategyPlan))
@@ -281,6 +285,7 @@ async function main(): Promise<void> {
             },
             secrets,
             assertFresh: assertExecutionFresh,
+            onShardCompleted: (progress) => shardProgressHandler?.(progress),
           }),
     assertFresh: assertReviewInputsFresh,
     assertStateFresh,
@@ -294,6 +299,7 @@ async function main(): Promise<void> {
     secrets,
     minimumConfidence: config.minimumConfidence,
     maximumInlineComments: config.maxInlineComments,
+    progressive: { enabled: strategyPlan.selected === 'sharded' },
     contextMetadata: reviewContext.bundle.metadata,
     analyzer: {
       findings: incremental.mode === 'no-change' ? [] : analyzer.findings,
