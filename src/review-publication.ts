@@ -43,6 +43,11 @@ export interface ExecuteAndPublishReviewInput {
    * the handler must be idempotent-safe because the executor may skip later shards on deadline.
    */
   registerShardHandler?: (handler: (progress: ShardProgress) => Promise<void> | void) => void;
+  /**
+   * Receives the current managed-comment lease after every progressive write so freshness
+   * assertions stay synchronized with the edited comment body.
+   */
+  registerLeaseListener?: (lease: ManagedCommentLease | null) => void;
   assertFresh: () => Promise<void>;
   assertStateFresh?: () => Promise<void>;
   client: Pick<GitHubClient, 'createOrReuseInlineReview' | 'upsertManagedComment'> &
@@ -293,6 +298,7 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
         progressiveLease,
       );
       progressiveLease = { id: updated.id, bodyDigest: commentDigest(body), marker };
+      input.registerLeaseListener?.(progressiveLease);
     };
     input.registerShardHandler?.(publishProgress);
     const phaseZero = phaseZeroAssessment();
@@ -313,13 +319,14 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
       input.actor,
       input.markers,
       initialBody,
-      lifecycle?.lease ?? undefined,
+      input.lifecycle?.lease ?? undefined,
     );
     progressiveLease = {
       id: created.id,
       bodyDigest: commentDigest(initialBody),
       marker,
     };
+    input.registerLeaseListener?.(progressiveLease);
     return input.executeReview();
   };
   const executed = await executeReview();
@@ -531,6 +538,13 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
     summaryBody,
     progressiveLease ?? lifecycle?.lease,
   );
+  if (progressive) {
+    input.registerLeaseListener?.({
+      id: comment.id,
+      bodyDigest: commentDigest(summaryBody),
+      marker,
+    });
+  }
   await input.assertFresh();
   return { comment, inlineReview, assessment, lifecycle: reconciled, state, executionSummary };
 }

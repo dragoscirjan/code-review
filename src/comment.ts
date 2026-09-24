@@ -60,16 +60,17 @@ export function renderInlineComment(finding: ValidatedFinding, marker: string): 
   return assertCommentSize(`${renderFinding(finding)}\n\n${marker}`, 'Rendered inline review comment');
 }
 
-/** Collapsible presentation used for provisional and progress findings inside the managed summary. */
+/** Collapsible presentation used for deterministic and provisional findings in the managed summary. */
 function renderCollapsibleFinding(finding: ValidatedFinding): string {
   const summary = `${findingHeading(finding)} — ${renderModelTextLiteral(finding.location.path)}:${finding.location.line} (${finding.location.side})`;
   return `<details>\n<summary>${summary}</summary>\n\n${renderFinding(finding)}\n\n</details>`;
 }
 
 /**
- * Renders the in-progress managed summary body: the status header, phase-0 deterministic findings,
- * and every validated shard finding published so far, each collapsible. Findings are dropped from
- * the oldest side when the body approaches the GitHub comment limit; the omission is stated.
+ * Renders the in-progress managed summary body: the status header, the phase-0 deterministic
+ * findings, and every validated shard finding published so far, each collapsible. Provisional
+ * findings are dropped newest-first when the body approaches the GitHub comment limit; the
+ * deterministic phase-0 findings are kept longest. The omission is stated.
  */
 export function renderProgressComment(input: {
   assessment: ReviewAssessment;
@@ -82,12 +83,25 @@ export function renderProgressComment(input: {
   provisionalFindings: readonly ValidatedFinding[];
   marker: string;
 }): string {
+  const deterministic = input.assessment.findings;
   const dropped: ValidatedFinding[] = [];
-  let shown = [...input.provisionalFindings];
+  let shownCount = input.provisionalFindings.length;
   while (true) {
     const progress = `
 - Status: **review in progress** — shards completed ${input.completedShards} / ${input.totalShards}`;
-    const findings = shown.length > 0 ? shown.map(renderCollapsibleFinding).join('\n\n') : '';
+    const sections: string[] = [];
+    if (deterministic.length > 0) {
+      sections.push(`### Deterministic findings\n\n${deterministic.map(renderCollapsibleFinding).join('\n\n')}`);
+    }
+    if (shownCount > 0) {
+      sections.push(
+        `### Provisional review findings — not yet merge-confirmed\n\n${input.provisionalFindings
+          .slice(0, shownCount)
+          .map(renderCollapsibleFinding)
+          .join('\n\n')}`,
+      );
+    }
+    const findings = sections.join('\n\n');
     const omitted =
       dropped.length > 0
         ? `\n\n> ${dropped.length} provisional finding block${dropped.length === 1 ? ' was' : 's were'} omitted to fit the GitHub comment limit.`
@@ -103,9 +117,9 @@ ${findings}${omitted}
 ${input.marker}`;
     if (comment.length <= MAX_GITHUB_COMMENT_BYTES && Buffer.byteLength(comment, 'utf8') <= MAX_GITHUB_COMMENT_BYTES)
       return comment;
-    if (shown.length === 0) return assertCommentSize(comment, 'Rendered progressive review comment');
-    dropped.push(shown[0] as ValidatedFinding);
-    shown = shown.slice(1);
+    if (shownCount === 0) return assertCommentSize(comment, 'Rendered progressive review comment');
+    shownCount -= 1;
+    dropped.push(input.provisionalFindings[shownCount] as ValidatedFinding);
   }
 }
 
@@ -202,8 +216,13 @@ export function renderComment(input: {
 - Resolved findings: ${input.lifecycle.counts.resolved}
 - Superseded findings: ${input.lifecycle.counts.superseded}`
     : '';
+  const coverageScope = input.coverage
+    ? input.coverage.notCoveredShards === 0
+      ? 'The aggregate deadline expired before the final merge pass ran; every diff shard was reviewed.'
+      : `The aggregate deadline expired before every shard completed: ${input.coverage.notCoveredShards} of ${input.coverage.totalShards} diff shard${input.coverage.totalShards === 1 ? '' : 's'} ${input.coverage.notCoveredShards === 1 ? 'was' : 'were'} not reviewed.`
+    : '';
   const coverage = input.coverage
-    ? `\n\n> ⚠️ **Partial review.** The aggregate deadline expired before every shard completed: ${input.coverage.notCoveredShards} of ${input.coverage.totalShards} diff shard${input.coverage.totalShards === 1 ? '' : 's'} ${input.coverage.notCoveredShards === 1 ? 'was' : 'were'} not reviewed. The ${input.coverage.provisionalFindings} finding${input.coverage.provisionalFindings === 1 ? '' : 's'} below ${input.coverage.provisionalFindings === 1 ? 'is' : 'are'} validated but ${input.coverage.provisionalFindings === 1 ? 'was' : 'were'} not confirmed by the final merge pass.\n>`
+    ? `\n\n> ⚠️ **Partial review.** ${coverageScope} The ${input.coverage.provisionalFindings} finding${input.coverage.provisionalFindings === 1 ? '' : 's'} below ${input.coverage.provisionalFindings === 1 ? 'is' : 'are'} validated but ${input.coverage.provisionalFindings === 1 ? 'was' : 'were'} not confirmed by the final merge pass.\n>`
     : '';
   const compact = input.lifecycle
     ? [

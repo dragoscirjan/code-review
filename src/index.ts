@@ -246,8 +246,10 @@ async function main(): Promise<void> {
   });
   const diff = incremental.diff;
 
-  const lease = managedSelection.kind === 'none' ? null : managedSelection.lease;
-  const assertStateFresh = () => client.assertManagedCommentLease(authoritativePullRequest, actor, lease, markers);
+  // Progressive publication edits the managed comment in place; the publication layer reports
+  // each new lease so freshness assertions verify the body that is actually current.
+  let stateLease = managedSelection.kind === 'none' ? null : managedSelection.lease;
+  const assertStateFresh = () => client.assertManagedCommentLease(authoritativePullRequest, actor, stateLease, markers);
   const assertReviewInputsFresh = async () => {
     assertReviewMemoryCurrent(memory);
     await assertSnapshotFresh(client, authoritativePullRequest, snapshot.revision);
@@ -261,6 +263,9 @@ async function main(): Promise<void> {
   const publication = await executeAndPublishReview({
     registerShardHandler: (handler) => {
       shardProgressHandler = handler;
+    },
+    registerLeaseListener: (lease) => {
+      stateLease = lease;
     },
     executeReview: () =>
       incremental.mode === 'no-change'
@@ -316,7 +321,7 @@ async function main(): Promise<void> {
       priorState: incremental.prior,
       carried: incremental.carried,
       affected: incremental.affected,
-      lease,
+      lease: managedSelection.kind === 'none' ? null : managedSelection.lease,
     },
   });
 
