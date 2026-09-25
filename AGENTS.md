@@ -11,6 +11,13 @@
 - GitHub Issues hold work items and acceptance criteria. GitHub Wiki holds requirements and design documents.
 - Read `CONTRIBUTING.md` before changing the repository.
 
+## Development workflow
+
+- For every new feature or issue, create a focused branch from `main` before editing files.
+- Check out that branch in a dedicated worktree at `../code-review--workspaces/<branch-name>` and perform all work there. Do not implement the change in the primary checkout.
+- Commit the completed change, push the branch, and open a pull request linked to the issue and relevant Wiki pages.
+- Never merge a pull request unless the owner explicitly instructs you to merge it. Approval, task completion, or a successful review is not permission to merge.
+
 ## Current POC constraints
 
 - Ship a GitHub Action only.

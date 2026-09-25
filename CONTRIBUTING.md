@@ -25,18 +25,21 @@ Run `mise tasks` to list the available tasks. Use `mise run <task>` when a task 
 2. Read relevant requirements and design pages in the Wiki.
 3. Confirm the acceptance criteria and security impact.
 4. Check the working tree for existing changes.
-5. Create a focused branch. Use a worktree when parallel work could interfere with another task.
+5. Create a focused branch from `main`.
+6. Check out the branch in a dedicated worktree at `../code-review--workspaces/<branch-name>`. Perform all implementation, validation, and commits in that worktree rather than the primary checkout.
 
 Do not start implementation when the requirement changes authentication semantics, comment ownership, trust boundaries, or forge compatibility without a corresponding design update.
 
 ## Branches and pull requests
 
+- Every new feature or issue must use its own branch, dedicated worktree, and pull request.
 - Do not commit directly to `main`.
 - Keep one logical change per branch and pull request.
 - Do not mix formatting sweeps or unrelated refactors with product changes.
+- After implementation and validation, commit the change, push the branch, and open a pull request.
 - Describe the user-visible behavior, security impact, tests, and documentation changes in the pull request.
 - Link the issue that defines the acceptance criteria.
-- Never merge without owner approval.
+- Never merge a pull request unless the owner explicitly instructs you to merge it. Approval or successful review alone is not permission to merge.
 
 ## Implementation rules
 
