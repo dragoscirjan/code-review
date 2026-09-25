@@ -1,5 +1,5 @@
 import type { AnalyzerFindingCandidate } from './analyzer-contract';
-import type { ReviewFinding, ReviewResultV1 } from './review-contract';
+import { SUGGESTION_FIX_PREFIX, type ReviewFinding, type ReviewResultV1 } from './review-contract';
 import { fingerprintFinding, type FindingFingerprint } from './review-lifecycle';
 import {
   applyReviewMemory,
@@ -32,9 +32,17 @@ export interface ReviewCounts {
 
 export type FindingOrigin = { kind: 'model' } | AnalyzerFindingCandidate['origin'];
 
+export interface ValidatedSuggestion {
+  startLine: number;
+  endLine: number;
+  original: string;
+  replacement: string;
+}
+
 export interface ValidatedFinding extends ReviewFinding, FindingFingerprint {
   sourceIndex: number;
   origin?: FindingOrigin;
+  suggestion?: ValidatedSuggestion;
 }
 
 export interface ReviewAssessment {
@@ -61,6 +69,24 @@ function containsSecret(value: string, secrets: readonly string[]): boolean {
 
 function normalizeLineEndings(value: string): string {
   return value.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+}
+
+/** Returns the raw tagged replacement only when the exact `suggestion:\n` prefix appears in the unmodified value. */
+function parseSuggestedFix(value: string): { fix: string; replacement?: string } {
+  const normalized = normalizeLineEndings(value);
+  if (!normalized.startsWith(SUGGESTION_FIX_PREFIX)) return { fix: normalized.trim() };
+  // The prefix must exist verbatim in the raw input: CRLF-only input must not be normalized into the prefix.
+  if (!value.startsWith(SUGGESTION_FIX_PREFIX)) return { fix: normalized.trim() };
+  const replacement = value.slice(SUGGESTION_FIX_PREFIX.length);
+  if (!replacement.trim() || replacement.includes('\r')) return { fix: normalized.trim() };
+  return { fix: replacement, replacement };
+}
+
+/** Replacement text may contain only ordinary prose whitespace: tabs and newlines, never control or format characters. */
+function suggestionIsSafe(replacement: string, evidence: string, secrets: readonly string[]): boolean {
+  return (
+    replacement !== evidence && !containsSecret(replacement, secrets) && !/[^\t\n\P{Cc}]|\p{Cf}/u.test(replacement)
+  );
 }
 
 function resolveFile(diff: UnifiedDiff, path: string, side: 'LEFT' | 'RIGHT'): UnifiedDiffFile | undefined {
@@ -196,6 +222,19 @@ export function validateReviewCandidates(
       belowThreshold += 1;
       return;
     }
+    const parsedFix = parseSuggestedFix(finding.fix);
+    const suggestion =
+      origin.kind === 'model' &&
+      finding.location.side === 'RIGHT' &&
+      parsedFix.replacement !== undefined &&
+      suggestionIsSafe(parsedFix.replacement, evidence, secrets)
+        ? {
+            startLine: finding.location.line,
+            endLine: finding.location.line,
+            original: evidence,
+            replacement: parsedFix.replacement,
+          }
+        : undefined;
     const validated = {
       ...finding,
       sourceIndex,
@@ -203,7 +242,8 @@ export function validateReviewCandidates(
       location: { ...finding.location, path: file.apiPath },
       evidence,
       explanation: normalizeLineEndings(finding.explanation).trim(),
-      fix: normalizeLineEndings(finding.fix).trim(),
+      fix: parsedFix.fix,
+      ...(suggestion ? { suggestion } : {}),
     };
     findings.push({ ...validated, ...fingerprintFinding(validated, diff) });
   });
