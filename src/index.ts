@@ -20,7 +20,7 @@ import {
 import { REVIEW_MEMORY_SEMANTIC_VERSION, assertReviewMemoryCurrent, loadReviewMemory } from './review-memory';
 import { executeAndPublishReview } from './review-publication';
 import { acquireReviewedSnapshot, assertSnapshotFresh, SNAPSHOT_DIFF_TIMEOUT_MS } from './review-snapshot';
-import { executeReviewStrategy, noChangeExecutedReview } from './review-specialists';
+import { executeReviewStrategy, noChangeExecutedReview, type ShardProgress } from './review-specialists';
 import {
   MAX_ARBITER_CANDIDATES,
   MAX_ARBITER_CONTEXT_BYTES,
@@ -246,8 +246,10 @@ async function main(): Promise<void> {
   });
   const diff = incremental.diff;
 
-  const lease = managedSelection.kind === 'none' ? null : managedSelection.lease;
-  const assertStateFresh = () => client.assertManagedCommentLease(authoritativePullRequest, actor, lease, markers);
+  // Progressive publication edits the managed comment in place; the publication layer reports
+  // each new lease so freshness assertions verify the body that is actually current.
+  let stateLease = managedSelection.kind === 'none' ? null : managedSelection.lease;
+  const assertStateFresh = () => client.assertManagedCommentLease(authoritativePullRequest, actor, stateLease, markers);
   const assertReviewInputsFresh = async () => {
     assertReviewMemoryCurrent(memory);
     await assertSnapshotFresh(client, authoritativePullRequest, snapshot.revision);
@@ -257,7 +259,14 @@ async function main(): Promise<void> {
     await assertReviewInputsFresh();
     await assertStateFresh();
   };
+  let shardProgressHandler: ((progress: ShardProgress) => Promise<void> | void) | undefined;
   const publication = await executeAndPublishReview({
+    registerShardHandler: (handler) => {
+      shardProgressHandler = handler;
+    },
+    registerLeaseListener: (lease) => {
+      stateLease = lease;
+    },
     executeReview: () =>
       incremental.mode === 'no-change'
         ? Promise.resolve(noChangeExecutedReview(strategyPlan))
@@ -281,6 +290,7 @@ async function main(): Promise<void> {
             },
             secrets,
             assertFresh: assertExecutionFresh,
+            onShardCompleted: (progress) => shardProgressHandler?.(progress),
           }),
     assertFresh: assertReviewInputsFresh,
     assertStateFresh,
@@ -294,6 +304,7 @@ async function main(): Promise<void> {
     secrets,
     minimumConfidence: config.minimumConfidence,
     maximumInlineComments: config.maxInlineComments,
+    progressive: { enabled: strategyPlan.selected === 'sharded' },
     contextMetadata: reviewContext.bundle.metadata,
     analyzer: {
       findings: incremental.mode === 'no-change' ? [] : analyzer.findings,
@@ -310,7 +321,7 @@ async function main(): Promise<void> {
       priorState: incremental.prior,
       carried: incremental.carried,
       affected: incremental.affected,
-      lease,
+      lease: managedSelection.kind === 'none' ? null : managedSelection.lease,
     },
   });
 

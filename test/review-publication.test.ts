@@ -8,6 +8,7 @@ import type {
   GitHubComment,
   GitHubInlineCommentInput,
   GitHubReview,
+  ManagedCommentLease,
   PullRequestContext,
 } from '../src/github';
 import type { ModelConnection } from '../src/model';
@@ -16,7 +17,12 @@ import { parseReviewResult, type ReviewFinding, type ReviewResultV1 } from '../s
 import { parseReviewState } from '../src/review-lifecycle';
 import { parseReviewMemory } from '../src/review-memory';
 import { executeAndPublishReview } from '../src/review-publication';
-import { executeReviewStrategy, type ExecutedReview, type StructuredBackendRunner } from '../src/review-specialists';
+import {
+  executeReviewStrategy,
+  type ExecutedReview,
+  type ShardProgress,
+  type StructuredBackendRunner,
+} from '../src/review-specialists';
 import { selectReviewStrategy } from '../src/review-strategy';
 import { parseUnifiedDiff, prepareReviewedDiff } from '../src/unified-diff';
 
@@ -208,23 +214,30 @@ function input(
   };
 }
 
-async function executeTerminalFreshnessOverrun(path: 'no-candidate' | 'post-arbiter'): Promise<ReviewResultV1> {
-  const clean = '{"version":1,"outcome":"clean","findings":[]}';
+async function executeTerminalFreshnessOverrun(path: 'no-candidate' | 'post-arbiter'): Promise<ExecutedReview> {
   const correctness = JSON.stringify({
     version: 1,
     outcome: 'findings',
     findings: [finding({ category: 'correctness' })],
   });
-  const outputs = path === 'no-candidate' ? [clean] : [correctness, '{"version":1,"rejectedCandidateIds":[]}'];
+  const outputs = path === 'no-candidate' ? [] : [correctness, '{"version":1,"rejectedCandidateIds":[]}'];
   let call = 0;
   const runner: StructuredBackendRunner = async <T>(request: StructuredBackendRequest<T>) => {
+    // No-candidate degradation: the deadline expires inside the first shard's backend call, so
+    // the runner surfaces the backend deadline error and the executor degrades with nothing run.
+    if (path === 'no-candidate') {
+      call += 1;
+      throw new ReviewExecutionError('backend-failure', 'Review backend aggregate deadline expired');
+    }
     const output = outputs[call++];
     if (output === undefined) throw new Error('Unexpected specialist phase');
-    return request.parseAssistantText(output);
+    const parsed = request.parseAssistantText(output);
+    // Post-arbiter degradation: the clock moves only after the shard backend call returned, so
+    // the shard completes and the expiry lands on the pre-merge freshness check.
+    time = 60_001;
+    return parsed;
   };
   let time = 0;
-  let freshnessChecks = 0;
-  const expireAtCheck = path === 'no-candidate' ? 2 : 4;
   const executed = await executeReviewStrategy({
     plan: selectReviewStrategy({ requested: 'specialists', diff, analyzerCoverage: 'complete' }),
     backend: 'opencode',
@@ -238,16 +251,13 @@ async function executeTerminalFreshnessOverrun(path: 'no-candidate' | 'post-arbi
     priorFindings: [],
     policy: { minimumConfidence: 0, maximumInlineComments: 10 },
     secrets: [],
-    assertFresh: async () => {
-      freshnessChecks += 1;
-      if (freshnessChecks === expireAtCheck) time = 60_001;
-    },
+    assertFresh: async () => undefined,
     timeoutMs: 60_000,
     specialistTokenBudget: 2_000_000,
     now: () => time,
     structuredRunner: runner,
   });
-  return executed.review;
+  return executed;
 }
 
 test('malformed backend output cannot reach publication', async () => {
@@ -272,16 +282,173 @@ test('aggregate backend deadline failure cannot reach publication', async () => 
   assert.deepEqual(spy.events, []);
 });
 
-for (const terminalPath of ['no-candidate', 'post-arbiter'] as const) {
-  test(`terminal ${terminalPath} freshness deadline overrun produces zero publication writes`, async () => {
-    const spy = publicationSpy();
-    await assert.rejects(
-      executeAndPublishReview(input(() => executeTerminalFreshnessOverrun(terminalPath), spy)),
-      /deadline expired/u,
-    );
-    assert.deepEqual(spy.events, []);
+test('terminal no-candidate aggregate-deadline overrun publishes a degraded partial review', async () => {
+  const spy = publicationSpy();
+  const publication = await executeAndPublishReview(input(() => executeTerminalFreshnessOverrun('no-candidate'), spy));
+  assert.equal(publication.executionSummary?.degraded, true);
+  assert.equal(publication.executionSummary?.notCoveredShards, 1);
+  assert.equal(publication.executionSummary?.rolesCompleted, 0);
+  assert.equal(publication.executionSummary?.arbiterRan, false);
+  assert.match(spy.publishedBody(), /Partial review/u);
+  assert.match(spy.publishedBody(), /1 of 1 diff shard was not reviewed/u);
+});
+
+test('terminal post-arbiter aggregate-deadline overrun publishes a degraded partial review', async () => {
+  const spy = publicationSpy();
+  const publication = await executeAndPublishReview(input(() => executeTerminalFreshnessOverrun('post-arbiter'), spy));
+  // Every shard completed; only the merge pass was skipped by the deadline.
+  assert.equal(publication.executionSummary?.degraded, true);
+  assert.equal(publication.executionSummary?.notCoveredShards, 0);
+  assert.equal(publication.executionSummary?.arbiterRan, false);
+  assert.match(spy.publishedBody(), /Partial review/u);
+  assert.match(spy.publishedBody(), /expired before the final merge pass ran/u);
+  assert.match(spy.publishedBody(), /not confirmed by the final merge pass/u);
+});
+
+test('progressive publication creates the phase-0 summary, edits per shard, and keeps lease freshness synchronized', async () => {
+  const spy = publicationSpy();
+  const analyzerFinding = {
+    ...finding({ category: 'correctness' }),
+    origin: {
+      kind: 'analyzer' as const,
+      analyzer: 'conflict-markers' as const,
+      analyzerVersion: 'code-review-conflict@1.0.0',
+      ruleId: 'unresolved-conflict-marker' as const,
+      ruleRevision: 1,
+      observationDigest: `sha256:${'C'.repeat(43)}`,
+    },
+  };
+  let shardHandler: ((progress: ShardProgress) => Promise<void> | void) | undefined;
+  let lastLease: ManagedCommentLease | null | 'unset' = 'unset';
+  const review = JSON.stringify({
+    version: 1,
+    outcome: 'findings',
+    findings: [finding({ category: 'security' })],
   });
-}
+  const runnerOutputs = [review, '{"version":1,"rejectedCandidateIds":[]}'];
+  let runnerCall = 0;
+  const executedReview: ExecutedReview = await executeReviewStrategy({
+    plan: selectReviewStrategy({ requested: 'specialists', diff, analyzerCoverage: 'complete' }),
+    backend: 'opencode',
+    containerEngine: 'podman',
+    connection: specialistConnection,
+    opencodeVersion: '1.18.31',
+    piVersion: '0.85.1',
+    pullRequest,
+    diff,
+    reviewContext: packReviewContext([], specialistRuntime),
+    priorFindings: [],
+    policy: { minimumConfidence: 0, maximumInlineComments: 10 },
+    secrets: [],
+    assertFresh: async () => undefined,
+    timeoutMs: 60_000,
+    specialistTokenBudget: 2_000_000,
+    structuredRunner: async <T>(structuredRequest: StructuredBackendRequest<T>): Promise<T> => {
+      const output = runnerOutputs[runnerCall++];
+      if (output === undefined) throw new Error('Unexpected specialist phase');
+      return structuredRequest.parseAssistantText(output);
+    },
+  });
+  const publication = await executeAndPublishReview(
+    input(async () => executedReview, spy, {
+      analyzer: { findings: [analyzerFinding], summary: analyzerSummary },
+      progressive: { enabled: true },
+      registerShardHandler: (handler) => {
+        shardHandler = handler;
+      },
+      registerLeaseListener: (lease) => {
+        lastLease = lease;
+      },
+    }),
+  );
+  assert.equal(typeof shardHandler, 'function'); // publication registered the progress sink
+  assert.notEqual(lastLease, 'unset');
+  assert.ok(lastLease);
+  // The publication body is the final authoritative edit and mentions the deterministic finding.
+  assert.match(spy.publishedBody(), /conflict-markers/u);
+  assert.match(spy.publishedBody(), /Unsafe behavior\./u);
+  assert.ok(publication.executionSummary);
+});
+
+test('progressive publication writes phase-0, per-shard, and final bodies through one lease chain', async () => {
+  const spy = publicationSpy();
+  const twoFileDiff = prepareReviewedDiff(
+    [
+      'diff --git a/src/one.ts b/src/one.ts',
+      '--- a/src/one.ts',
+      '+++ b/src/one.ts',
+      '@@ -1 +1 @@',
+      '-old();',
+      '+unsafe();',
+      'diff --git a/src/two.ts b/src/two.ts',
+      '--- a/src/two.ts',
+      '+++ b/src/two.ts',
+      '@@ -1 +1 @@',
+      '-old();',
+      '+unsafe();',
+    ].join('\n'),
+    10_000,
+  );
+  const shardOutputs = [
+    JSON.stringify({
+      version: 1,
+      outcome: 'findings',
+      findings: [
+        finding({ location: { path: 'src/one.ts', side: 'RIGHT', line: 1 } }),
+        finding({ location: { path: 'src/two.ts', side: 'RIGHT', line: 1 } }),
+      ],
+    }),
+    '{"version":1,"rejectedCandidateIds":[]}',
+  ];
+  let shardCall = 0;
+  let registeredHandler: ((progress: ShardProgress) => Promise<void> | void) | undefined;
+  const publication = await executeAndPublishReview(
+    input(
+      () =>
+        executeReviewStrategy({
+          plan: selectReviewStrategy({ requested: 'specialists', diff: twoFileDiff, analyzerCoverage: 'complete' }),
+          backend: 'opencode',
+          containerEngine: 'podman',
+          connection: specialistConnection,
+          opencodeVersion: '1.18.31',
+          piVersion: '0.85.1',
+          pullRequest,
+          diff: twoFileDiff,
+          reviewContext: packReviewContext([], specialistRuntime),
+          priorFindings: [],
+          policy: { minimumConfidence: 0, maximumInlineComments: 10 },
+          secrets: [],
+          assertFresh: async () => undefined,
+          timeoutMs: 60_000,
+          specialistTokenBudget: 2_000_000,
+          onShardCompleted: async (progress) => {
+            // Mirrors the index.ts seam: publication's registered handler performs the in-place
+            // edit; registration happens before executeReview runs, exactly as in production.
+            await registeredHandler?.(progress);
+          },
+          structuredRunner: async <T>(structuredRequest: StructuredBackendRequest<T>): Promise<T> => {
+            const output = shardOutputs[shardCall++];
+            if (output === undefined) throw new Error('Unexpected specialist phase');
+            return structuredRequest.parseAssistantText(output);
+          },
+        }),
+      spy,
+      {
+        diff: twoFileDiff,
+        progressive: { enabled: true },
+        registerShardHandler: (handler) => {
+          registeredHandler = handler;
+        },
+      },
+    ),
+  );
+  // Three managed-comment writes: phase-0 summary, one per-shard edit (both files cluster into a
+  // single shard), and the final authoritative body with lifecycle state.
+  const writes = spy.events.filter((event) => event === 'summary').length;
+  assert.equal(writes, 3);
+  assert.match(spy.publishedBody(), /Candidates rejected by arbiter/u);
+  assert.ok(publication.executionSummary);
+});
 
 test('staleness between snapshot/indexing and backend invocation produces zero backend and publication calls', async () => {
   const spy = publicationSpy();

@@ -286,7 +286,8 @@ export type ManagedCommentSelection =
   | { kind: 'current' | 'legacy'; comment: GitHubComment; lease: ManagedCommentLease }
   | { kind: 'ambiguous' };
 
-function commentDigest(body: string): string {
+/** Lease digest of a managed-comment body; progressive edits chain leases through this digest. */
+export function commentDigest(body: string): string {
   return createHash('sha256').update(body).digest('hex');
 }
 
