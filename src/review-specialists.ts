@@ -8,6 +8,7 @@ import {
   BACKEND_CLEANUP_RESERVE_MS,
   buildReviewPrompt,
   IMMUTABLE_BACKEND_SECURITY_POLICY,
+  FORBIDDEN_SECRET_OUTPUT_MESSAGE,
   runReview,
   runStructuredBackend,
   wrapUntrustedData,
@@ -17,7 +18,7 @@ import {
   type ReviewRequest,
   type StructuredBackendRequest,
 } from './review';
-import { parseReviewResult, type ReviewResultV1 } from './review-contract';
+import { parseReviewResult, ReviewContractError, type ReviewResultV1 } from './review-contract';
 import type { ReviewStateFinding } from './review-lifecycle';
 import { splitDiffShards, type DiffShard } from './review-shards';
 import {
@@ -35,7 +36,7 @@ import {
   type ReviewStrategyPlan,
   type SpecialistRole,
 } from './review-strategy';
-import { parseArbiterDecision } from './specialist-contract';
+import { parseArbiterDecision, SpecialistContractError } from './specialist-contract';
 import type { PreparedReviewDiff } from './unified-diff';
 
 export interface ReviewExecutionSummary {
@@ -515,10 +516,24 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
         },
       });
     } catch (error) {
-      if (!isAggregateDeadlineError(error)) throw error;
+      if (isAggregateDeadlineError(error)) {
+        degraded = true;
+        notCoveredShards = shards.length - shardsCompleted;
+        break;
+      }
+      // Deadline-aware degradation extends to strict contract-parse failures: one shard emitting a
+      // response that does not parse against the v1 contract is an uncovered shard, not a failed
+      // review. Host policy violations surfaced through the same wrapper keep a plain-error cause
+      // and stay fatal, as do secret-bearing output and freshness failures.
+      const contractParseFailure =
+        error instanceof ReviewExecutionError &&
+        error.kind === 'malformed-output' &&
+        error.cause instanceof ReviewContractError;
+      if (!contractParseFailure && !(error instanceof ReviewContractError)) throw error;
       degraded = true;
-      notCoveredShards = shards.length - shardsCompleted;
-      break;
+      notCoveredShards += 1;
+      console.warn(`Shard ${shard.index} produced malformed output and is reported as not covered`);
+      continue;
     }
     if (reviewContainsSecret(review, input.secrets)) throw new Error('Shard output contains forbidden secret data');
     rawCandidateCount += review.findings.length;
@@ -667,7 +682,16 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
       parseAssistantText: (raw) => parseArbiterDecision(raw, ids),
     });
   } catch (error) {
-    if (!isAggregateDeadlineError(error)) throw error;
+    const deadlineExpired = isAggregateDeadlineError(error);
+    // A malformed merge-pass response publishes the already-validated candidates as explicitly
+    // unadjudicated partial coverage instead of failing the run. Secret-bearing output and
+    // freshness failures stay fatal.
+    const mergeFailedSoftly =
+      !deadlineExpired &&
+      error instanceof ReviewExecutionError &&
+      error.kind === 'malformed-output' &&
+      !error.message.includes(FORBIDDEN_SECRET_OUTPUT_MESSAGE);
+    if (!deadlineExpired && !mergeFailedSoftly && !(error instanceof SpecialistContractError)) throw error;
     const unadjudicated = candidates.map(({ finding }) => finding);
     const degradedReview: ReviewResultV1 =
       unadjudicated.length === 0

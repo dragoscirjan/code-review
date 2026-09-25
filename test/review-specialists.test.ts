@@ -191,15 +191,6 @@ test('fails closed on foreign-path breach, candidate flood, malformed merge outp
     /exceeded its finding limit/u,
   );
 
-  await assert.rejects(
-    executeReviewStrategy(
-      request({
-        structuredRunner: runnerFrom([JSON.stringify(finding('correctness')), 'not json']),
-      }),
-    ),
-    /strict JSON/u,
-  );
-
   const contaminated = finding('correctness');
   contaminated.findings[0]!.explanation = 'synthetic-secret';
   await assert.rejects(
@@ -213,6 +204,60 @@ test('fails closed on foreign-path breach, candidate flood, malformed merge outp
     /token reservation/u,
   );
   assert.equal(calls.length, 0);
+});
+
+test('malformed shard output degrades that shard while remaining shards still publish', async () => {
+  // Two file sections that cannot cluster into one shard (cluster cap is 24,000 diff bytes).
+  const padLines = Array.from({ length: 700 }, (_, i) => `+pad-${String(i).padStart(3, '0')}-${'x'.repeat(60)}`);
+  const twoFileDiff = prepareReviewedDiff(
+    [
+      'diff --git a/src/one.ts b/src/one.ts',
+      '--- a/src/one.ts',
+      '+++ b/src/one.ts',
+      `@@ -0,0 +1,${padLines.length} @@`,
+      ...padLines,
+      'diff --git a/src/two.ts b/src/two.ts',
+      '--- a/src/two.ts',
+      '+++ b/src/two.ts',
+      '@@ -1 +1 @@',
+      '-safe();',
+      '+unsafe();',
+    ].join('\n'),
+    100_000,
+  );
+  const calls: StructuredBackendRequest<unknown>[] = [];
+  const securityTwo = finding('security');
+  securityTwo.findings[0]!.location.path = 'src/two.ts';
+  // Shard order is deterministic: the small file shards first, then the oversized leftover.
+  const result = await executeReviewStrategy(
+    request({
+      plan: selectReviewStrategy({ requested: 'specialists', diff: twoFileDiff, analyzerCoverage: 'complete' }),
+      diff: twoFileDiff,
+      structuredRunner: runnerFrom([JSON.stringify(securityTwo), 'not json', arbiterAccepts], calls),
+    }),
+  );
+  assert.equal(calls.length, 2);
+  assert.equal(result.summary.degraded, true);
+  assert.equal(result.summary.notCoveredShards, 1);
+  assert.equal(result.summary.rolesAttempted, 2);
+  assert.equal(result.summary.rolesCompleted, 1);
+  // Degraded runs skip the merge pass; the validated candidate is published unadjudicated.
+  assert.equal(result.summary.arbiterRan, false);
+  assert.equal(result.review.outcome, 'findings');
+  assert.equal(result.review.findings.length, 1);
+  assert.equal(result.review.findings[0]?.location.path, 'src/two.ts');
+});
+
+test('malformed arbiter output publishes validated candidates as unadjudicated partial coverage', async () => {
+  const calls: StructuredBackendRequest<unknown>[] = [];
+  const result = await executeReviewStrategy(
+    request({ structuredRunner: runnerFrom([JSON.stringify(finding('correctness')), 'not json'], calls) }),
+  );
+  assert.equal(calls.length, 2);
+  assert.equal(result.summary.arbiterRan, false);
+  assert.equal(result.summary.degraded, true);
+  assert.equal(result.review.outcome, 'findings');
+  assert.equal(result.review.findings.length, 1);
 });
 
 test('deadline expiry before the first shard degrades with everything uncovered', async () => {
