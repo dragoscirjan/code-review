@@ -27,12 +27,16 @@ export const SANDBOX_IMAGE =
 export type ReviewBackend = 'opencode' | 'pi';
 export type ReviewExecutionFailureKind = 'malformed-output' | 'backend-failure';
 
+/** Fixed message for backend output that echoes secret material; never degraded silently. */
+export const FORBIDDEN_SECRET_OUTPUT_MESSAGE = 'Structured backend output contains forbidden secret data';
+
 export class ReviewExecutionError extends Error {
   constructor(
     readonly kind: ReviewExecutionFailureKind,
     message: string,
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
     this.name = 'ReviewExecutionError';
   }
 }
@@ -725,7 +729,7 @@ export async function runStructuredBackend<T>(request: StructuredBackendRequest<
         ? extractOpenCodeAssistantText(result.stdout)
         : extractPiAssistantText(result.stdout);
     if (request.rejectSecretOutput && valueContainsSecret(assistantText, promptSecrets)) {
-      throw new ReviewExecutionError('malformed-output', 'Structured backend output contains forbidden secret data');
+      throw new ReviewExecutionError('malformed-output', FORBIDDEN_SECRET_OUTPUT_MESSAGE);
     }
     try {
       parsedResult = request.parseAssistantText(assistantText);
@@ -733,9 +737,12 @@ export async function runStructuredBackend<T>(request: StructuredBackendRequest<
       deadlineRemaining(deadline, cleanupReserveMs);
     } catch (error) {
       if (error instanceof ReviewExecutionError) throw error;
+      // The cause distinguishes strict contract-parse failures (degradable in sharded mode) from
+      // host policy violations raised inside parseAssistantText (always fatal).
       throw new ReviewExecutionError(
         'malformed-output',
         redactSecrets(error instanceof Error ? error.message : String(error), promptSecrets),
+        { cause: error },
       );
     }
   } catch (error) {
