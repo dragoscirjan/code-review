@@ -3,11 +3,18 @@ import type { GitHubClient, PullRequestContext, PullRequestDiff, PullRequestRevi
 export const SNAPSHOT_METADATA_TIMEOUT_MS = 15_000;
 export const SNAPSHOT_DIFF_TIMEOUT_MS = 30_000;
 
-function sameRevision(expected: PullRequestRevision, actual: PullRequestRevision): boolean {
+/** Fields that identify the exact reviewed revision; metadata prose is untrusted data, not identity. */
+function sameRevisionIdentity(expected: PullRequestRevision, actual: PullRequestRevision): boolean {
   return (
     expected.baseSha === actual.baseSha &&
     expected.headSha === actual.headSha &&
-    expected.changedFiles === actual.changedFiles &&
+    expected.changedFiles === actual.changedFiles
+  );
+}
+
+function sameRevision(expected: PullRequestRevision, actual: PullRequestRevision): boolean {
+  return (
+    sameRevisionIdentity(expected, actual) &&
     expected.title === actual.title &&
     expected.body === actual.body &&
     expected.author === actual.author
@@ -54,13 +61,19 @@ export async function acquireReviewedSnapshot(
   };
 }
 
+/**
+ * Long-window freshness check used between setup phases and before each publication write. Only
+ * revision identity (base, head, changed-file count) fails the run. Title, body, and author edits
+ * that happen while a slow indexer or backend executes must not abort an otherwise-valid review of
+ * the same head revision; the snapshot's captured metadata stays the untrusted prompt data.
+ */
 export async function assertSnapshotFresh(
   client: Pick<GitHubClient, 'getPullRequestRevision'>,
   pullRequest: PullRequestContext,
   revision: PullRequestRevision,
 ): Promise<void> {
   if (
-    !sameRevision(
+    !sameRevisionIdentity(
       revision,
       await client.getPullRequestRevision(pullRequest, AbortSignal.timeout(SNAPSHOT_METADATA_TIMEOUT_MS)),
     )
