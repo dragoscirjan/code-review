@@ -109,14 +109,12 @@ test('rejects an incomplete GitHub changed-file set', async () => {
   );
 });
 
-test('final freshness check rejects changed revision or mutable pull request metadata', async () => {
+test('final freshness check rejects changed revision identity but tolerates metadata edits', async () => {
+  // Revision identity changes remain fatal.
   for (const changed of [
     { ...revision, headSha: 'replacement' },
     { ...revision, baseSha: 'replacement' },
     { ...revision, changedFiles: 2 },
-    { ...revision, title: 'Replacement title' },
-    { ...revision, body: 'Replacement body' },
-    { ...revision, author: 'replacement-author' },
   ]) {
     await assert.rejects(
       assertSnapshotFresh(
@@ -128,7 +126,23 @@ test('final freshness check rejects changed revision or mutable pull request met
         pullRequest,
         revision,
       ),
-      /changed during review/,
+      /revision changed during review/,
+    );
+  }
+  // Title, body, and author edits during a long indexer or backend phase do not abort the run.
+  for (const changed of [
+    { ...revision, title: 'Replacement title' },
+    { ...revision, body: 'Replacement body' },
+    { ...revision, author: 'replacement-author' },
+  ]) {
+    await assertSnapshotFresh(
+      {
+        async getPullRequestRevision() {
+          return changed;
+        },
+      },
+      pullRequest,
+      revision,
     );
   }
 });
