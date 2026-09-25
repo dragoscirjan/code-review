@@ -88,10 +88,14 @@ export interface ProgressivePublicationOptions {
 }
 
 function redactFinding(finding: ValidatedFinding, secrets: readonly string[]): ValidatedFinding {
+  const fix = redactSecrets(finding.fix, secrets);
+  const withoutSuggestion: ValidatedFinding = { ...finding };
+  delete withoutSuggestion.suggestion;
   return {
-    ...finding,
+    ...withoutSuggestion,
     explanation: redactSecrets(finding.explanation, secrets),
-    fix: redactSecrets(finding.fix, secrets),
+    fix,
+    ...(finding.suggestion && fix === finding.fix ? { suggestion: finding.suggestion } : {}),
   };
 }
 

@@ -136,6 +136,8 @@ Response style:
 const REVIEW_FINDING_POLICY = `Review rules:
 - Report concrete correctness, security, regression, and test coverage problems.
 - For each finding, propose the smallest practical fix. Include a code example only when the supplied context is sufficient; otherwise describe the exact change needed.
+- To request a GitHub suggested change for one cited RIGHT-side line, set fix to the exact prefix "suggestion:\\n" followed by the complete literal replacement text. Preserve indentation and use this prefix only when the supplied diff proves the whole replacement.
+- Otherwise use a concise prose fix without the suggestion prefix. Never request a suggestion for LEFT-side findings or incomplete replacements.
 - Do not report style preferences or speculative concerns.
 - Every finding must cite one changed line from the supplied diff. Use RIGHT for an added line and LEFT for a deleted line.
 - Use the exact side-specific repository path from the --- header for LEFT or +++ header for RIGHT, without the a/ or b/ prefix.

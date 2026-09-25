@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
-import { assessReview } from '../src/finding-validation';
-import { parseReviewResult, type ReviewFinding } from '../src/review-contract';
+import { assessReview, validateReviewCandidates } from '../src/finding-validation';
+import { parseReviewResult, type ReviewFinding, type ReviewResultV1 } from '../src/review-contract';
 import { parseUnifiedDiff, prepareReviewedDiff } from '../src/unified-diff';
 
 const diff = parseUnifiedDiff(
@@ -91,6 +91,59 @@ test('rejects evidence spoofing, whitespace changes, Unicode substitutions, mult
   assert.equal(result.counts.rejected, 5);
   assert.equal(result.counts.evidenceRejected, 5);
   assert.equal(result.counts.globalLimitOmitted, 0);
+});
+
+test('authorizes suggestions only for explicit safe replacements on exact RIGHT-side lines', () => {
+  const result = validateReviewCandidates(
+    review([
+      finding({ fix: 'suggestion:\n  safe();' }),
+      finding({ fix: 'Describe the change in prose.' }),
+      finding({
+        location: { path: 'old.ts', side: 'LEFT', line: 2 },
+        evidence: 'const value = "old";',
+        fix: 'suggestion:\nconst value = "older";',
+      }),
+      finding({ fix: 'suggestion:\nconst value = "new";' }),
+      finding({ fix: 'suggestion:\nprovider-secret();' }),
+      finding({ fix: 'suggestion:\nsafe();\u202E' }),
+      finding({ fix: 'suggestion:\r\nsafe();' }),
+    ]),
+    diff,
+    0,
+    ['provider-secret'],
+  );
+
+  assert.equal(result.findings.length, 7);
+  assert.deepEqual(result.findings[0]?.suggestion, {
+    startLine: 2,
+    endLine: 2,
+    original: 'const value = "new";',
+    replacement: '  safe();',
+  });
+  assert.equal(result.findings[0]?.fix, '  safe();');
+  assert.equal(result.findings[1]?.suggestion, undefined);
+  assert.equal(result.findings[2]?.suggestion, undefined);
+  assert.equal(result.findings[2]?.fix, 'const value = "older";');
+  assert.equal(result.findings[3]?.suggestion, undefined);
+  assert.equal(result.findings[4]?.suggestion, undefined);
+  assert.equal(result.findings[5]?.suggestion, undefined);
+  // CRLF never satisfies the literal prefix: the fix stays the normalized prose.
+  assert.equal(result.findings[6]?.suggestion, undefined);
+  assert.equal(result.findings[6]?.fix, 'suggestion:\nsafe();');
+
+  // Control characters such as ESC (not just format characters) are prose-downgraded. The contract
+  // parser already rejects ESC outright for parsed results, so use raw candidates here.
+  const raw = validateReviewCandidates(
+    {
+      version: 1,
+      outcome: 'findings',
+      findings: [finding({ fix: 'suggestion:\nsafe();\u001B' })],
+    } as ReviewResultV1,
+    diff,
+    0,
+  );
+  assert.equal(raw.findings[0]?.suggestion, undefined);
+  assert.equal(raw.findings[0]?.fix, 'safe();\u001B');
 });
 
 test('treats findings in safely omitted truncated hunks as unmapped', () => {

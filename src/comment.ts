@@ -18,8 +18,19 @@ function findingHeading(finding: ValidatedFinding): string {
   return `${severity} ${category}`;
 }
 
-function renderFinding(finding: ValidatedFinding, index?: number): string {
+function renderSuggestionBlock(replacement: string): string {
+  const longestBacktickRun = Math.max(0, ...[...replacement.matchAll(/`+/gu)].map((match) => match[0].length));
+  const fence = '`'.repeat(Math.max(3, longestBacktickRun + 1));
+  const finalNewline = replacement.endsWith('\n') ? '' : '\n';
+  return `${fence}suggestion\n${replacement}${finalNewline}${fence}`;
+}
+
+function renderFinding(finding: ValidatedFinding, index?: number, includeSuggestion = false): string {
   const prefix = index === undefined ? '###' : `### ${index}.`;
+  const fix =
+    includeSuggestion && finding.suggestion
+      ? `- **Suggested change:**\n${renderSuggestionBlock(finding.suggestion.replacement)}`
+      : `- **Suggested fix:**\n${renderModelTextLiteral(finding.fix)}`;
   return `${prefix} ${findingHeading(finding)}
 
 - **Line:** ${finding.location.line} (${finding.location.side})
@@ -34,8 +45,7 @@ ${renderModelTextLiteral(finding.location.path)}
 ${renderModelTextLiteral(finding.evidence)}
 - **Explanation:**
 ${renderModelTextLiteral(finding.explanation)}
-- **Suggested fix:**
-${renderModelTextLiteral(finding.fix)}`;
+${fix}`;
 }
 
 function renderAssessment(assessment: ReviewAssessment): string {
@@ -57,7 +67,7 @@ function assertCommentSize(comment: string, label: string): string {
 }
 
 export function renderInlineComment(finding: ValidatedFinding, marker: string): string {
-  return assertCommentSize(`${renderFinding(finding)}\n\n${marker}`, 'Rendered inline review comment');
+  return assertCommentSize(`${renderFinding(finding, undefined, true)}\n\n${marker}`, 'Rendered inline review comment');
 }
 
 /** Collapsible presentation used for deterministic and provisional findings in the managed summary. */

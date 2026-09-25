@@ -176,6 +176,25 @@ test('renders a bounded inline comment with all format controls visible and the 
   assert.ok(Buffer.byteLength(comment, 'utf8') <= MAX_GITHUB_COMMENT_BYTES);
 });
 
+test('renders validated replacements as collision-safe GitHub suggestion blocks', () => {
+  const comment = renderInlineComment(
+    finding({
+      fix: 'const marker = "```";',
+      suggestion: {
+        startLine: 3,
+        endLine: 3,
+        original: 'unsafe();',
+        replacement: 'const marker = "```";',
+      },
+    }),
+    '<!-- inline -->',
+  );
+
+  assert.match(comment, /````suggestion\nconst marker = "```";\n````/u);
+  assert.doesNotMatch(comment, /\*\*Suggested fix:\*\*/u);
+  assert.equal(comment.trimEnd().split(/\r?\n/u).at(-1), '<!-- inline -->');
+});
+
 test('renders accepted findings near the contract aggregate boundary within the publication limit', () => {
   const findings = Array.from({ length: 10 }, (_, index) =>
     finding({

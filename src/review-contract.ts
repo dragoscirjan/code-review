@@ -10,6 +10,7 @@ export const MAX_PATH_BYTES = 1_024;
 export const MAX_EVIDENCE_BYTES = 1_000;
 export const MAX_EXPLANATION_BYTES = 1_000;
 export const MAX_SUGGESTED_FIX_BYTES = 2_000;
+export const SUGGESTION_FIX_PREFIX = 'suggestion:\n';
 
 export const FINDING_CATEGORIES = ['correctness', 'security', 'regression', 'testing'] as const;
 export const FINDING_SEVERITIES = ['critical', 'high', 'medium', 'low'] as const;

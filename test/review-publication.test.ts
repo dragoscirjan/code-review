@@ -714,6 +714,93 @@ test('publishes all selected inline findings in one batch before the managed sum
   );
 });
 
+test('emits suggestions only for explicitly tagged exact replacements', async () => {
+  const twoLineDiff = prepareReviewedDiff(
+    [
+      'diff --git a/src/file.ts b/src/file.ts',
+      '--- a/src/file.ts',
+      '+++ b/src/file.ts',
+      '@@ -1,2 +1,2 @@',
+      '-oldOne();',
+      '-oldTwo();',
+      '+unsafeOne();',
+      '+unsafeTwo();',
+    ].join('\n'),
+    10_000,
+  );
+  const review = parseReviewResult(
+    JSON.stringify({
+      version: 1,
+      outcome: 'findings',
+      findings: [
+        finding({
+          location: { path: 'src/file.ts', side: 'RIGHT', line: 1 },
+          evidence: 'unsafeOne();',
+          fix: 'suggestion:\nsafeOne();',
+        }),
+        finding({
+          location: { path: 'src/file.ts', side: 'RIGHT', line: 2 },
+          evidence: 'unsafeTwo();',
+          fix: 'Call the safe helper instead.',
+        }),
+      ],
+    }),
+  );
+  const spy = publicationSpy();
+  await executeAndPublishReview(input(async () => review, spy, { diff: twoLineDiff, maximumInlineComments: 2 }));
+
+  assert.match(spy.inlineComments()[0]?.body ?? '', /```suggestion\nsafeOne\(\);\n```/u);
+  assert.doesNotMatch(spy.inlineComments()[1]?.body ?? '', /```suggestion/u);
+  assert.match(spy.inlineComments()[1]?.body ?? '', /Call the safe helper instead\./u);
+});
+
+test('caps inline publication after exact mapping and canonical deduplication', async () => {
+  const twoFileDiff = prepareReviewedDiff(
+    [
+      'diff --git a/src/one.ts b/src/one.ts',
+      '--- a/src/one.ts',
+      '+++ b/src/one.ts',
+      '@@ -0,0 +1 @@',
+      '+one();',
+      'diff --git a/src/two.ts b/src/two.ts',
+      '--- a/src/two.ts',
+      '+++ b/src/two.ts',
+      '@@ -0,0 +1 @@',
+      '+two();',
+    ].join('\n'),
+    10_000,
+  );
+  const review = parseReviewResult(
+    JSON.stringify({
+      version: 1,
+      outcome: 'findings',
+      findings: [
+        finding({
+          location: { path: 'src/one.ts', side: 'RIGHT', line: 1 },
+          evidence: 'one();',
+          severity: 'critical',
+        }),
+        finding({
+          location: { path: 'src/one.ts', side: 'RIGHT', line: 1 },
+          evidence: 'one();',
+          severity: 'low',
+        }),
+        finding({ location: { path: 'src/two.ts', side: 'RIGHT', line: 1 }, evidence: 'two();' }),
+        finding({ location: { path: 'src/missing.ts', side: 'RIGHT', line: 1 }, evidence: 'missing();' }),
+      ],
+    }),
+  );
+  const spy = publicationSpy();
+  const result = await executeAndPublishReview(
+    input(async () => review, spy, { diff: twoFileDiff, maximumInlineComments: 1 }),
+  );
+
+  assert.equal(spy.inlineComments().length, 1);
+  assert.equal(result.assessment.counts.duplicates, 1);
+  assert.equal(result.assessment.counts.unmapped, 1);
+  assert.equal(result.assessment.counts.inlineLimitOmitted, 1);
+});
+
 test('a head change after inline creation prevents the managed summary', async () => {
   const spy = publicationSpy();
   const review = parseReviewResult(JSON.stringify({ version: 1, outcome: 'findings', findings: [finding()] }));
