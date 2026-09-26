@@ -54,6 +54,7 @@ describe('GitActionReleaseRepository', () => {
       targetSha: firstSha,
       mainSha: snapshot.mainSha,
       targetIsMainAncestor: true,
+      nonConventionalCommits: 0,
       refs: snapshot.refs,
       releases: [],
     });
@@ -111,6 +112,7 @@ describe('GitActionReleaseRepository', () => {
       targetSha: firstSha,
       mainSha: snapshot.mainSha,
       targetIsMainAncestor: true,
+      nonConventionalCommits: 0,
       refs: snapshot.refs,
       releases: [],
     });
@@ -137,6 +139,7 @@ describe('GitActionReleaseRepository', () => {
       targetSha: secondSha,
       mainSha: snapshot.mainSha,
       targetIsMainAncestor: true,
+      nonConventionalCommits: 0,
       refs: snapshot.refs,
       releases: [stableRelease('v1.0.0')],
     });
@@ -169,6 +172,7 @@ describe('GitActionReleaseRepository', () => {
       targetSha: secondSha,
       mainSha: snapshot.mainSha,
       targetIsMainAncestor: true,
+      nonConventionalCommits: 0,
       refs: snapshot.refs,
       releases: [stableRelease('v1.0.0')],
     });
@@ -197,6 +201,7 @@ describe('GitActionReleaseRepository', () => {
         targetSha: firstSha,
         mainSha: snapshot.mainSha,
         targetIsMainAncestor: true,
+        nonConventionalCommits: 0,
         refs: snapshot.refs,
         releases: [],
       }),

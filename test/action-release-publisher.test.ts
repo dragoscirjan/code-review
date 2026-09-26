@@ -180,7 +180,7 @@ describe('action release publisher', () => {
     expect(repository.historyBaselines).toEqual([OLD_SHA, OLD_SHA]);
   });
 
-  test('rejects malformed conventional history before any mutation', async () => {
+  test('tolerates non-conventional subjects as patch and records the count in the plan', async () => {
     const repository = new FakeRepository(
       MAIN_SHA,
       { 'v1.0.0': ref(OLD_SHA), v1: ref(OLD_SHA) },
@@ -188,11 +188,9 @@ describe('action release publisher', () => {
       ['not a conventional commit'],
     );
     const releases = new FakeReleases([release('v1.0.0')]);
-    await expect(
-      publishActionRelease({ version: 'v1.0.1', expectedMainSha: MAIN_SHA }, repository, releases),
-    ).rejects.toThrow('non-conventional commit');
-    expect(repository.pushes).toBe(0);
-    expect(releases.creates).toBe(0);
+    const result = await publishActionRelease({ version: 'v1.0.1', expectedMainSha: MAIN_SHA }, repository, releases);
+    expect(result.plan.nonConventionalCommits).toBe(1);
+    expect(result.plan.version.tag).toBe('v1.0.1');
   });
 
   test('rejects a pinned version when conventional history selects a different release', async () => {

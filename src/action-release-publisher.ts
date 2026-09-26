@@ -54,6 +54,7 @@ async function planFromRemote(
   const targetRevision = input.expectedMainSha ?? snapshot.mainSha;
   const releaseRecords = await releases.list();
   let resolvedVersion;
+  let resolvedNonConventionalCommits = 0;
   if (!exactVersion || validateSelection) {
     const baseline = inspectActionReleaseBaseline({
       targetSha: targetRevision,
@@ -64,12 +65,14 @@ async function planFromRemote(
       baseline.currentVersion || !baseline.latestTargetSha
         ? []
         : await snapshot.commitMessagesSince(baseline.latestTargetSha);
-    resolvedVersion = resolveActionReleaseVersion({
+    const resolved = resolveActionReleaseVersion({
       commitMessages,
       targetSha: targetRevision,
       refs: snapshot.refs,
       releases: releaseRecords,
     });
+    resolvedVersion = resolved.version;
+    resolvedNonConventionalCommits = resolved.nonConventionalCommits;
   }
   if (exactVersion && resolvedVersion && exactVersion.tag !== resolvedVersion.tag) {
     throw new Error('Action release aborted: selected version no longer matches conventional commit history');
@@ -86,6 +89,7 @@ async function planFromRemote(
     targetSha,
     mainSha: snapshot.mainSha,
     targetIsMainAncestor,
+    nonConventionalCommits: resolvedNonConventionalCommits,
     refs: snapshot.refs,
     releases: releaseRecords,
   });
@@ -127,6 +131,9 @@ export async function publishActionRelease(
     // A second authoritative read immediately before mutation prevents executing a stale dry-run plan.
     let plan = await planFromRemote(input, repository, releases, requiredTargetSha);
     // Once mutation starts, verify only the captured version and target so an unrelated main advance cannot strand it.
+    // The non-conventional count describes the history that selected this release and is captured
+    // before mutation; later re-plans skip history validation and must not reset it.
+    const nonConventionalCommits = plan.nonConventionalCommits;
     const exactInput: ActionReleasePublisherInput = { version: input.version };
     let published = false;
 
@@ -166,7 +173,9 @@ export async function publishActionRelease(
     if (!verified.noop) {
       throw new Error('Action release failed: final remote state is incomplete');
     }
-    return { plan: verified, published };
+    // The post-publication verification re-plans without history validation; restore the count
+    // captured from the history that selected this release.
+    return { plan: { ...verified, nonConventionalCommits }, published };
   } finally {
     await repository.close();
   }
