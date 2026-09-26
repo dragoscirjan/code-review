@@ -268,7 +268,11 @@ async function main(): Promise<void> {
   let shardProgressHandler: ((progress: ShardProgress) => Promise<void> | void) | undefined;
   let shardStartHandler: ((info: { shardIndex: number; totalShards: number }) => void) | undefined;
   let shardSkipHandler:
-    | ((info: { shardIndex: number; totalShards: number; reason: 'malformed-output' | 'aggregate-deadline' }) => void)
+    | ((info: {
+        shardIndex: number;
+        totalShards: number;
+        reason: 'malformed-output' | 'aggregate-deadline';
+      }) => Promise<void> | void)
     | undefined;
   const publication = await executeAndPublishReview({
     registerShardHandler: (handler) => {
@@ -310,8 +314,8 @@ async function main(): Promise<void> {
             onShardStarted: (info) => {
               shardStartHandler?.(info);
             },
-            onShardSkipped: (info) => {
-              shardSkipHandler?.(info);
+            onShardSkipped: async (info) => {
+              await shardSkipHandler?.(info);
             },
             onProgress: (event) => progressLogger.event(event),
           }),

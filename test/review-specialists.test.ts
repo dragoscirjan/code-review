@@ -605,6 +605,8 @@ test('shard prompts carry the versioned incremental emission protocol and single
   });
   assert.match(shardPrompt, /Incremental emission protocol v1/u);
   assert.match(shardPrompt, /A line that is not a complete valid document is ignored/u);
+  // The prompt states the host-side combined cap so a compliant response can never trip it.
+  assert.match(shardPrompt, /combined findings across all emissions must not exceed 3/u);
   const singlePrompt = buildReviewPrompt(pullRequest, diff, context, []);
   assert.doesNotMatch(singlePrompt, /Incremental emission protocol/u);
 });
@@ -629,4 +631,101 @@ test('the executor emits bounded progress events across shard lifecycle and the 
     'merge-pass-completed',
     'review-completed',
   ]);
+});
+
+test('the shard-skip handler is awaited so in-flight progressive writes drain before the next shard', async () => {
+  // Two shards: the small file clusters first; the oversized single-hunk file lands in the
+  // leftover shard, so the diff splits into exactly two shards.
+  const padLines = Array.from({ length: 700 }, (_, i) => `+pad-${String(i).padStart(3, '0')}-${'x'.repeat(60)}`);
+  const twoFileDiff = prepareReviewedDiff(
+    [
+      'diff --git a/src/one.ts b/src/one.ts',
+      '--- a/src/one.ts',
+      '+++ b/src/one.ts',
+      `@@ -0,0 +1,${padLines.length} @@`,
+      ...padLines,
+      'diff --git a/src/two.ts b/src/two.ts',
+      '--- a/src/two.ts',
+      '+++ b/src/two.ts',
+      '@@ -1 +1 @@',
+      '-safe();',
+      '+unsafe();',
+    ].join('\n'),
+    100_000,
+  );
+  const calls: StructuredBackendRequest<unknown>[] = [];
+  const order: string[] = [];
+  const leftoverFinding = finding('security');
+  leftoverFinding.findings[0]!.location.path = 'src/one.ts';
+  leftoverFinding.findings[0]!.evidence = `pad-000-${'x'.repeat(60)}`;
+  const result = await executeReviewStrategy(
+    request({
+      plan: selectReviewStrategy({ requested: 'specialists', diff: twoFileDiff, analyzerCoverage: 'complete' }),
+      diff: twoFileDiff,
+      structuredRunner: runnerFrom(['not json', JSON.stringify(leftoverFinding), arbiterAccepts], calls),
+      onShardSkipped: async (info) => {
+        // Proves the executor awaits the handler: the drain lands before the next shard starts.
+        await Promise.resolve();
+        order.push(`skipped-${info.shardIndex}`);
+      },
+      onProgress: (event) => {
+        if (event.phase === 'shard-started') order.push(`started-${event.shardIndex}`);
+      },
+    }),
+  );
+  assert.equal(calls.length, 2);
+  assert.equal(result.summary.degraded, true);
+  assert.equal(result.summary.notCoveredShards, 1);
+  assert.equal(result.summary.totalShards, 2);
+  assert.deepEqual(order, ['started-0', 'skipped-0', 'started-1']);
+});
+
+test('a partial shard stays not covered when a later shard hits the aggregate deadline', async () => {
+  // Two shards: the small file clusters first; the oversized files collapse into one leftover.
+  const padLines = Array.from({ length: 700 }, (_, i) => `+pad-${String(i).padStart(3, '0')}-${'x'.repeat(60)}`);
+  const threeFileDiff = prepareReviewedDiff(
+    [
+      'diff --git a/src/one.ts b/src/one.ts',
+      '--- a/src/one.ts',
+      '+++ b/src/one.ts',
+      `@@ -0,0 +1,${padLines.length} @@`,
+      ...padLines,
+      'diff --git a/src/two.ts b/src/two.ts',
+      '--- a/src/two.ts',
+      '+++ b/src/two.ts',
+      `@@ -0,0 +1,${padLines.length} @@`,
+      ...padLines,
+      'diff --git a/src/three.ts b/src/three.ts',
+      '--- a/src/three.ts',
+      '+++ b/src/three.ts',
+      '@@ -1 +1 @@',
+      '-safe();',
+      '+unsafe();',
+    ].join('\n'),
+    300_000,
+  );
+  const smallFileFinding = finding('correctness');
+  smallFileFinding.findings[0]!.location.path = 'src/three.ts';
+  // Shard 0 emits a partial (valid increment + malformed tail); shard 1 then hits the deadline.
+  const partialOutput = `${JSON.stringify(smallFileFinding)}\nmalformed tail`;
+  const times = [0, 0, 0, 0, 61_000];
+  let timeIndex = 0;
+  const result = await executeReviewStrategy(
+    request({
+      plan: selectReviewStrategy({ requested: 'specialists', diff: threeFileDiff, analyzerCoverage: 'complete' }),
+      diff: threeFileDiff,
+      structuredRunner: runnerFrom([partialOutput, 'unused', 'unused'], []),
+      now: () => times[Math.min(timeIndex++, times.length - 1)] as number,
+    }),
+  );
+  assert.equal(result.summary.rolesCompleted, 1);
+  // Both the partial shard and the deadline-skipped shard are reported not covered, and the
+  // overwrite formula can no longer erase the partial shard from the count.
+  assert.equal(result.summary.notCoveredShards, 2);
+  assert.equal(result.summary.totalShards, 2);
+  assert.equal(result.summary.degraded, true);
+  // The partial shard's valid increment is still published.
+  assert.equal(result.review.outcome, 'findings');
+  assert.equal(result.review.findings.length, 1);
+  assert.equal(result.review.findings[0]?.location.path, 'src/three.ts');
 });

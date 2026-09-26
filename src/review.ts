@@ -10,13 +10,7 @@ import type { PullRequestContext, PullRequestDiff } from './github';
 import { redactSecrets, validateModelEndpoint, type ModelConnection } from './model';
 import { buildOpenCodeCommand, extractOpenCodeAssistantText } from './opencode';
 import { extractPiAssistantText, buildPiCommand } from './pi';
-import {
-  MAX_SHARD_EMISSION_LINES,
-  parseReviewResult,
-  ReviewContractError,
-  SHARD_EMISSION_PROTOCOL_VERSION,
-  type ReviewResultV1,
-} from './review-contract';
+import { parseReviewResult, ReviewContractError, type ReviewResultV1 } from './review-contract';
 import type { ReviewStateFinding } from './review-lifecycle';
 import { MAX_FINDINGS_PER_SHARD, type SpecialistRole } from './review-strategy';
 import { buildHarnessConfig, SANDBOX_BOOTSTRAP } from './sandbox';
@@ -171,17 +165,6 @@ Output contract:
 - Keep the combined path, evidence, explanation, and fix content concise; its publication-safe encoded form must be at most 55000 UTF-8 bytes.
 - The complete JSON document must be at most 60000 UTF-8 bytes.
 - Do not add fields, omit fields, use null, or invent a newer contract version.`;
-
-/**
- * Fixed versioned addendum appended only to sharded prompts: bounded incremental emission so a
- * malformed tail degrades without discarding already-emitted findings.
- */
-export const SHARD_EMISSION_PROTOCOL = `Incremental emission protocol v${SHARD_EMISSION_PROTOCOL_VERSION}:
-- Instead of one final document, you may emit each file's result as soon as you finish reviewing it.
-- Each emission is one complete JSON document with exactly the schema above, compact, on its own line, with no other text.
-- Emit at most one document per line and at most ${MAX_SHARD_EMISSION_LINES} documents.
-- A line that is not a complete valid document is ignored; every later valid line still applies.
-- Never repeat a finding you already emitted.`;
 
 export const REVIEW_POLICY = `${IMMUTABLE_BACKEND_SECURITY_POLICY}\n\n${REVIEW_FINDING_POLICY}`;
 

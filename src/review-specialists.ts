@@ -11,7 +11,6 @@ import {
   FORBIDDEN_SECRET_OUTPUT_MESSAGE,
   runReview,
   runStructuredBackend,
-  SHARD_EMISSION_PROTOCOL,
   wrapUntrustedData,
   ReviewExecutionError,
   type BackendDeadline,
@@ -20,8 +19,10 @@ import {
   type StructuredBackendRequest,
 } from './review';
 import {
+  MAX_SHARD_EMISSION_LINES,
   ReviewContractError,
   parseShardReviewOutput,
+  SHARD_EMISSION_PROTOCOL_VERSION,
   type ParsedShardReviewOutput,
   type ReviewResultV1,
 } from './review-contract';
@@ -46,6 +47,19 @@ import {
 import { parseArbiterDecision, SpecialistContractError } from './specialist-contract';
 import type { PreparedReviewDiff } from './unified-diff';
 
+/**
+ * Fixed versioned addendum appended only to sharded prompts: bounded incremental emission so a
+ * malformed tail degrades without discarding already-emitted findings. The combined finding cap
+ * matches the host-side per-shard limit, so a protocol-compliant response can never trip it.
+ */
+export const SHARD_EMISSION_PROTOCOL = `Incremental emission protocol v${SHARD_EMISSION_PROTOCOL_VERSION}:
+- Instead of one final document, you may emit each file's result as soon as you finish reviewing it.
+- Each emission is one complete JSON document with exactly the schema above, compact, on its own line, with no other text.
+- Emit at most one document per line and at most ${MAX_SHARD_EMISSION_LINES} documents.
+- The combined findings across all emissions must not exceed ${MAX_FINDINGS_PER_SHARD}.
+- A line that is not a complete valid document is ignored; every later valid line still applies.
+- Never repeat a finding you already emitted.`;
+
 export interface ReviewExecutionSummary {
   plan: ReviewStrategyPlan;
   /** Shards (or single-pass runs) attempted, including shards that failed validation. */
@@ -61,6 +75,8 @@ export interface ReviewExecutionSummary {
   degraded?: boolean;
   /** Number of queued shards that were never executed because the deadline expired. */
   notCoveredShards?: number;
+  /** Actual number of shards in the executed plan; present for every sharded run. */
+  totalShards?: number;
   /** True when a sharded plan was downgraded to single-pass execution because it yielded one shard. */
   singleShardFallback?: true;
 }
@@ -114,7 +130,7 @@ export interface ExecuteReviewStrategyInput {
     shardIndex: number;
     totalShards: number;
     reason: 'malformed-output' | 'aggregate-deadline';
-  }) => void;
+  }) => Promise<void> | void;
   /** Receives bounded run-log events across the execution lifecycle (host-side only). */
   onProgress?: (event: ReviewProgressEvent) => void;
 }
@@ -515,8 +531,12 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
     } catch (error) {
       if (!isAggregateDeadlineError(error)) throw error;
       degraded = true;
-      notCoveredShards = shards.length - shardsCompleted;
-      input.onShardSkipped?.({ shardIndex: shard.index, totalShards: shards.length, reason: 'aggregate-deadline' });
+      notCoveredShards += shards.length - index;
+      await input.onShardSkipped?.({
+        shardIndex: shard.index,
+        totalShards: shards.length,
+        reason: 'aggregate-deadline',
+      });
       input.onProgress?.({
         phase: 'shard-skipped',
         shardIndex: shard.index,
@@ -559,8 +579,12 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
     } catch (error) {
       if (isAggregateDeadlineError(error)) {
         degraded = true;
-        notCoveredShards = shards.length - shardsCompleted;
-        input.onShardSkipped?.({ shardIndex: shard.index, totalShards: shards.length, reason: 'aggregate-deadline' });
+        notCoveredShards += shards.length - index;
+        await input.onShardSkipped?.({
+          shardIndex: shard.index,
+          totalShards: shards.length,
+          reason: 'aggregate-deadline',
+        });
         input.onProgress?.({
           phase: 'shard-skipped',
           shardIndex: shard.index,
@@ -580,7 +604,7 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
       if (!contractParseFailure && !(error instanceof ReviewContractError)) throw error;
       degraded = true;
       notCoveredShards += 1;
-      input.onShardSkipped?.({ shardIndex: shard.index, totalShards: shards.length, reason: 'malformed-output' });
+      await input.onShardSkipped?.({ shardIndex: shard.index, totalShards: shards.length, reason: 'malformed-output' });
       input.onProgress?.({
         phase: 'shard-skipped',
         shardIndex: shard.index,
@@ -596,7 +620,7 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
       // without discarding the already-emitted, already-validated increments.
       degraded = true;
       notCoveredShards += 1;
-      input.onShardSkipped?.({ shardIndex: shard.index, totalShards: shards.length, reason: 'malformed-output' });
+      await input.onShardSkipped?.({ shardIndex: shard.index, totalShards: shards.length, reason: 'malformed-output' });
       input.onProgress?.({
         phase: 'shard-partial',
         shardIndex: shard.index,
@@ -670,6 +694,7 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
         preArbiterOmittedCount: 0,
         arbiterRejectedCount: 0,
         reservedTokens,
+        totalShards: shards.length,
         ...degradedFlags,
       },
     };
@@ -703,6 +728,7 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
     preArbiterOmittedCount: mergeSelection.omitted,
     arbiterRejectedCount: 0,
     reservedTokens,
+    totalShards: shards.length,
     ...degradedFlags,
   };
   if (mergeSelection.selected.length === 0) {
@@ -742,7 +768,7 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
         ...baseSummary,
         arbiterRan: false,
         degraded: true,
-        notCoveredShards: 0,
+        notCoveredShards,
       },
     };
   }
@@ -792,7 +818,7 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
         ...baseSummary,
         arbiterRan: false,
         degraded: true,
-        notCoveredShards: 0,
+        notCoveredShards,
       },
     };
   }

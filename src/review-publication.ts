@@ -59,7 +59,7 @@ export interface ExecuteAndPublishReviewInput {
       shardIndex: number;
       totalShards: number;
       reason: 'malformed-output' | 'aggregate-deadline';
-    }) => void,
+    }) => Promise<void> | void,
   ) => void;
   /**
    * Receives the current managed-comment lease after every progressive write so freshness
@@ -137,6 +137,15 @@ function redactAssessment(assessment: ReviewAssessment, secrets: readonly string
 
 function inlineMarker(backend: ReviewBackend, fingerprint: string): string {
   return `<!-- code-review-inline:${backend}:v2:${fingerprint.replace(/^sha256:/u, '')} -->`;
+}
+
+/**
+ * Distinct trailing marker for provisional inline comments. It must never match the final
+ * inline marker: a provisional comment left behind by a failed run must stay invisible to
+ * history suppression so the next run can sweep it instead of silently suppressing the finding.
+ */
+function provisionalInlineMarker(backend: ReviewBackend, fingerprint: string): string {
+  return `<!-- code-review-inline-provisional:${backend}:v1:${fingerprint.replace(/^sha256:/u, '')} -->`;
 }
 
 function batchMarker(input: ExecuteAndPublishReviewInput, comments: readonly GitHubInlineCommentInput[]): string {
@@ -415,7 +424,7 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
       if (inlineRegistry.size >= input.maximumInlineComments) return;
       if (runInlineFingerprints.has(finding.fingerprint)) continue;
       if (inlineRegistry.has(anchorKeyOf(finding))) continue;
-      const body = renderInlineComment(finding, inlineMarkerFor(finding.fingerprint), true);
+      const body = renderInlineComment(finding, provisionalInlineMarker(input.backend, finding.fingerprint), true);
       assertPayloadsContainNoSecrets([body], input.secrets);
       const created = await createInline(input.pullRequest, {
         path: finding.location.path,
@@ -429,6 +438,27 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
         finding,
       });
       runInlineFingerprints.add(finding.fingerprint);
+    }
+  };
+
+  /**
+   * Deletes provisional inline comments abandoned by earlier failed runs (same actor, same
+   * backend, trailing provisional marker). They must not linger as stale provisional reviews and
+   * must never influence history suppression, which only matches final inline markers.
+   */
+  const sweepAbandonedProvisionalInline = async (): Promise<void> => {
+    const listComments = input.client.listPullRequestReviewComments;
+    const deleteInline = input.client.deletePullRequestReviewComment;
+    if (!progressive || !listComments || !deleteInline) return;
+    const pattern = new RegExp(
+      `^<!-- code-review-inline-provisional:${input.backend}:v1:([A-Za-z0-9_-]{43}) -->$`,
+      'u',
+    );
+    for (const comment of await listComments(input.pullRequest)) {
+      if (comment.user?.id !== input.actor.id || comment.in_reply_to_id !== undefined) continue;
+      const match = pattern.exec(comment.body?.trimEnd().split(/\r?\n/u).at(-1) ?? '');
+      if (!match) continue;
+      await deleteInline(input.pullRequest, input.actor, comment.id, match[0]);
     }
   };
 
@@ -446,7 +476,13 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
     };
     input.registerShardHandler?.(publishProgress);
     input.registerShardStartHandler?.((info) => startHeartbeat(info));
-    input.registerShardSkipHandler?.(() => stopHeartbeat());
+    // The skip handler must drain any in-flight heartbeat write before returning: the executor
+    // awaits it, so the next shard's lease freshness check never observes the comment mid-edit.
+    input.registerShardSkipHandler?.(async () => {
+      stopHeartbeat();
+      await writeQueue.catch(() => undefined);
+    });
+    await sweepAbandonedProvisionalInline();
     const phaseZero = phaseZeroAssessment();
     const initialBody = renderProgressComment({
       assessment: phaseZero,
@@ -568,9 +604,10 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
   }
 
   // Merge-pass reconciliation of provisional inline comments: confirmed findings keep their
-  // comment (upgraded from provisional to final rendering); findings rejected, deduplicated, or
-  // beyond the run-wide cap are deleted. Every write first checks comment ownership (expected
-  // author plus trailing machine marker) and never touches a foreign comment.
+  // comment, upgraded in place from the provisional marker to the final inline marker; findings
+  // rejected, deduplicated, or beyond the run-wide cap are deleted. Ownership is verified against
+  // the provisional marker the comment was created with (expected author plus trailing machine
+  // marker); a mismatch fails publication closed.
   const createInline = input.client.createPullRequestReviewComment;
   const updateInline = input.client.updatePullRequestReviewComment;
   const deleteInline = input.client.deletePullRequestReviewComment;
@@ -581,9 +618,20 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
       if (confirmed) {
         const body = renderInlineComment(entry.finding, inlineMarkerFor(entry.fingerprint), false);
         assertPayloadsContainNoSecrets([body], input.secrets);
-        await updateInline(input.pullRequest, input.actor, entry.commentId, inlineMarkerFor(entry.fingerprint), body);
+        await updateInline(
+          input.pullRequest,
+          input.actor,
+          entry.commentId,
+          provisionalInlineMarker(input.backend, entry.fingerprint),
+          body,
+        );
       } else {
-        await deleteInline(input.pullRequest, input.actor, entry.commentId, inlineMarkerFor(entry.fingerprint));
+        await deleteInline(
+          input.pullRequest,
+          input.actor,
+          entry.commentId,
+          provisionalInlineMarker(input.backend, entry.fingerprint),
+        );
         inlineRegistry.delete(anchor);
       }
     }
@@ -650,7 +698,9 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
           coverage: {
             degraded: executionSummary.degraded,
             notCoveredShards: executionSummary.notCoveredShards ?? 0,
-            totalShards: (executionSummary.rolesCompleted ?? 0) + (executionSummary.notCoveredShards ?? 0),
+            totalShards:
+              executionSummary.totalShards ??
+              (executionSummary.rolesCompleted ?? 0) + (executionSummary.notCoveredShards ?? 0),
             provisionalFindings: executionSummary.validatedCandidateCount,
           },
         }

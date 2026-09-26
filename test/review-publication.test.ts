@@ -1383,6 +1383,9 @@ test('provisional per-file comments publish per shard, before the merge pass, an
   assert.equal(spy.updatedInline.length, 1);
   assert.ok(!spy.updatedInline[0].body.includes('Provisional'));
   assert.match(spy.updatedInline[0].body, /Unsafe behavior\./u);
+  // Confirmation rewrites the body with the final inline marker, so the comment is real history.
+  assert.ok(spy.updatedInline[0].body.includes('<!-- code-review-inline:opencode:v2:'));
+  assert.ok(!spy.updatedInline[0].body.includes('code-review-inline-provisional'));
   assert.equal(spy.deletedInline.length, 0);
   // The confirmed provisional finding is not duplicated in the final inline batch.
   assert.deepEqual(spy.inlineComments(), []);
@@ -1623,4 +1626,81 @@ test('heartbeat updates are bounded by a hard update cap', async () => {
   await publicationPromise;
   assert.equal(spy.bodies.length, MAX_HEARTBEAT_UPDATES + 2);
   vi.useRealTimers();
+});
+
+test('provisional comments abandoned by a failed run are swept and never suppress history', async () => {
+  const spy = inlineSpy();
+  // A previous failed run left a provisional comment behind for the same finding.
+  const staleMarker = `<!-- code-review-inline-provisional:opencode:v1:${'A'.repeat(43)} -->`;
+  spy.stored.set(900, {
+    body: `stale provisional review\n\n${staleMarker}`,
+    path: 'src/file.ts',
+    side: 'RIGHT',
+    line: 1,
+  });
+  let shardHandler: ShardHandler | undefined;
+  const shardFindings = provisionalShardFindings([finding()]);
+  const publication = await executeAndPublishReview(
+    input(
+      async () => {
+        await shardHandler?.({
+          completedShards: 1,
+          totalShards: 2,
+          shardIndex: 0,
+          shardPaths: ['src/file.ts'],
+          findings: shardFindings,
+          degraded: false,
+        });
+        return {
+          review: { version: 1, outcome: 'findings', findings: [finding()] } as ReviewResultV1,
+          summary: forcedShardedSummary(),
+        };
+      },
+      spy,
+      {
+        progressive: { enabled: true },
+        maximumInlineComments: 2,
+        registerShardHandler: (handler) => {
+          shardHandler = handler;
+        },
+      },
+    ),
+  );
+  // The stale provisional comment is swept at run start, before anything is published.
+  assert.deepEqual(spy.deletedInline, [900]);
+  // The stale provisional marker never suppressed the finding: it is published fresh.
+  assert.equal(spy.createdInline.length, 1);
+  assert.equal(spy.updatedInline.length, 1);
+  assert.equal(publication.assessment.counts.inlineSelected, 1);
+  assert.equal(publication.assessment.counts.inlineHistorySuppressed, 0);
+});
+
+test('degraded coverage uses the actual shard total, not completed plus not-covered', async () => {
+  const spy = publicationSpy();
+  const summary = {
+    plan: selectReviewStrategy({ requested: 'specialists', diff, analyzerCoverage: 'complete' }),
+    rolesAttempted: 2,
+    rolesCompleted: 2,
+    arbiterRan: false,
+    rawCandidateCount: 1,
+    validatedCandidateCount: 1,
+    preArbiterOmittedCount: 0,
+    arbiterRejectedCount: 0,
+    reservedTokens: 1,
+    totalShards: 3,
+    degraded: true,
+    notCoveredShards: 2,
+  } satisfies ExecutedReview['summary'];
+  const publication = await executeAndPublishReview(
+    input(
+      async () => ({
+        review: { version: 1, outcome: 'findings', findings: [finding()] } as ReviewResultV1,
+        summary,
+      }),
+      spy,
+    ),
+  );
+  // Completed (2) plus not covered (2) would render 2 of 4; the actual plan has 3 shards.
+  assert.match(spy.publishedBody(), /2 of 3 diff shards were not reviewed/u);
+  assert.ok(publication.executionSummary);
 });
