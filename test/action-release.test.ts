@@ -25,6 +25,7 @@ function plan(overrides: Partial<Parameters<typeof planActionRelease>[0]> = {}):
     targetSha: MAIN_SHA,
     mainSha: MAIN_SHA,
     targetIsMainAncestor: true,
+    nonConventionalCommits: 0,
     refs: {},
     releases: [],
     ...overrides,
@@ -93,35 +94,32 @@ describe('resolveActionReleaseVersion', () => {
 
   test('establishes v1.0.0 for the first stable release without reading historical commits', () => {
     expect(resolve([])).toEqual({
-      tag: 'v1.0.0',
-      majorTag: 'v1',
-      major: '1',
-      minor: '0',
-      patch: '0',
+      version: { tag: 'v1.0.0', majorTag: 'v1', major: '1', minor: '0', patch: '0' },
+      nonConventionalCommits: 0,
     });
   });
 
   test('derives patch, minor, and major versions from conventional commits', () => {
-    expect(resolve(['fix(#57): correct release behavior'], state).tag).toBe('v2.3.10');
-    expect(resolve(['docs(#57): update notes', 'feat(#57): automate releases'], state).tag).toBe('v2.4.0');
-    expect(resolve(['feat(#57)!: replace release contract'], state).tag).toBe('v3.0.0');
-    expect(resolve(['fix(#57): update behavior\n\nBREAKING CHANGE: replace the public contract'], state).tag).toBe(
-      'v3.0.0',
-    );
-    expect(resolve(['fix(#57): update behavior\n\nBREAKING-CHANGE: replace the public contract'], state).tag).toBe(
-      'v3.0.0',
-    );
+    expect(resolve(['fix(#57): correct release behavior'], state).version.tag).toBe('v2.3.10');
+    expect(resolve(['docs(#57): update notes', 'feat(#57): automate releases'], state).version.tag).toBe('v2.4.0');
+    expect(resolve(['feat(#57)!: replace release contract'], state).version.tag).toBe('v3.0.0');
+    expect(
+      resolve(['fix(#57): update behavior\n\nBREAKING CHANGE: replace the public contract'], state).version.tag,
+    ).toBe('v3.0.0');
+    expect(
+      resolve(['fix(#57): update behavior\n\nBREAKING-CHANGE: replace the public contract'], state).version.tag,
+    ).toBe('v3.0.0');
     expect(
       resolve(
         ['fix(#57): update behavior\n\nBREAKING CHANGE: replace the public contract\n\nSigned-off-by: A <a@b>'],
         state,
-      ).tag,
+      ).version.tag,
     ).toBe('v3.0.0');
     expect(
       resolve(
         ['fix(#57): clarify documentation\n\nThe previous output included:\nBREAKING CHANGE: example text'],
         state,
-      ).tag,
+      ).version.tag,
     ).toBe('v2.3.10');
   });
 
@@ -135,7 +133,7 @@ describe('resolveActionReleaseVersion', () => {
       resolve([], {
         refs: { 'v1.2.3': ref(MAIN_SHA), v1: ref(MAIN_SHA) },
         releases: [release('v1.2.3')],
-      }).tag,
+      }).version.tag,
     ).toBe('v1.2.3');
   });
 
@@ -144,16 +142,23 @@ describe('resolveActionReleaseVersion', () => {
       refs: { 'v1.2.2': ref(PRIOR_SHA), 'v1.2.3': ref(MAIN_SHA), v1: ref(MAIN_SHA) },
       releases: [release('v1.2.2')],
     };
-    expect(resolve(['fix(#57): complete publication'], partial).tag).toBe('v1.2.3');
+    expect(resolve(['fix(#57): complete publication'], partial).version.tag).toBe('v1.2.3');
     expect(() => resolve(['feat(#57): complete publication'], partial)).toThrow(
       'immutable tag v1.2.3 has no corresponding published GitHub Release',
     );
   });
 
-  test('rejects malformed, empty, excessive, and oversized conventional commit history', () => {
-    expect(() => deriveActionReleaseBump([])).toThrow('commit history must contain between 1 and 1000 commits');
-    expect(() => deriveActionReleaseBump(['not conventional'])).toThrow('non-conventional commit');
-    expect(() => deriveActionReleaseBump(['fix(#57): bad\tcontrol'])).toThrow('non-conventional commit');
+  test('counts non-conventional subjects as patch without an increment and keeps invalid footers fatal', () => {
+    expect(deriveActionReleaseBump(['not conventional'])).toEqual({ bump: 'patch', nonConventionalCommits: 1 });
+    expect(deriveActionReleaseBump(['fix(#57): bad\tcontrol'])).toEqual({ bump: 'patch', nonConventionalCommits: 1 });
+    expect(deriveActionReleaseBump(['not conventional', 'feat(#57): automate releases'])).toEqual({
+      bump: 'minor',
+      nonConventionalCommits: 1,
+    });
+    expect(deriveActionReleaseBump(['Update code-review.yml', 'fix(#57): correct behavior'])).toEqual({
+      bump: 'patch',
+      nonConventionalCommits: 1,
+    });
     expect(() => deriveActionReleaseBump(['fix(#57): change\n\nBREAKING CHANGE: bad\tcontrol'])).toThrow(
       'invalid breaking-change footer',
     );
@@ -198,6 +203,7 @@ describe('planActionRelease', () => {
       updateMajorTag: true,
       createGitHubRelease: true,
       noop: false,
+      nonConventionalCommits: 0,
     });
   });
 
