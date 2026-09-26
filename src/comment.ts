@@ -405,7 +405,11 @@ export function renderComment(input: {
           : ''
         : renderAssessment(detailAssessment);
     const findingHeadingText =
-      compactSection === '' && details.length > 0 ? `### 🐛 Findings (${input.assessment.findings.length})\n\n` : '';
+      details.length === 0
+        ? ''
+        : compactSection === ''
+          ? `### 🐛 Findings (${input.assessment.findings.length})\n\n`
+          : `### 🐛 Unpublished findings (${notInlinePublished.length}) — no per-file inline comment\n\n`;
     const omission =
       omitted > 0
         ? `\n\n> ${omitted} detailed finding block${omitted === 1 ? ' was' : 's were'} omitted to fit the GitHub comment limit.`

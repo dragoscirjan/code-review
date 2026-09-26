@@ -437,6 +437,57 @@ test('mixed publication renders the compact index plus full blocks for the rest'
   const comment = renderCompactInput([published.findings[0]!.fingerprint]);
   assert.match(comment, /### 🐛 Findings \(1\) — full details in the per-file inline comments/u);
   assert.match(comment, /1\. 🔴 Critical 🛡️ Security — <code>src\/auth\.ts<\/code>:3 \(RIGHT\)/u);
-  // The unpublished finding keeps its full collapsible block, unnumbered.
-  assert.match(comment, /#### 1\. 🔴 Critical 🧪 Testing — <code>src\/auth\.ts<\/code>/u);
+  // The unpublished findings get their own heading with their own count.
+  assert.match(
+    comment,
+    /### 🐛 Unpublished findings \(1\) — no per-file inline comment\n\n#### 1\. 🔴 Critical 🧪 Testing/u,
+  );
+});
+
+test('wide Unicode characters are measured at their real display width when wrapping', () => {
+  // 60 CJK ideographs render as 120 columns and 50 emoji as 100 columns; both must wrap so no
+  // rendered line exceeds 80 columns (a wide code point occupies two columns).
+  const cjk = '漢'.repeat(60);
+  const emoji = '🚀'.repeat(50);
+  const comment = renderComment({
+    assessment: assessment([finding({ explanation: `${cjk}\n${emoji}` })], 'findings'),
+    backend: 'opencode',
+    model: 'model',
+    headSha: '1'.repeat(40),
+    actor: 'reviewer',
+    diffTruncated: false,
+    originalDiffBytes: 1,
+    marker: '<!-- managed -->',
+  });
+  const explanationBlock = [...comment.matchAll(/<pre><code>([\s\S]*?)<\/code><\/pre>/gu)]
+    .map((match) => match[1])
+    .at(0) as string;
+  const lines = explanationBlock.split('\n');
+  assert.ok(lines.length >= 3, `expected wide prose to wrap, got ${lines.length} lines`);
+  for (const line of lines) {
+    // Every character on these lines is double-width, so ≤40 code points means ≤80 columns.
+    assert.ok([...line].length <= 40, `line too wide: ${[...line].length} code points`);
+  }
+});
+
+test('wrapping never splits a surrogate pair across lines', () => {
+  const emojiRun = '🚀'.repeat(60);
+  const comment = renderComment({
+    assessment: assessment([finding({ explanation: emojiRun })], 'findings'),
+    backend: 'opencode',
+    model: 'model',
+    headSha: '1'.repeat(40),
+    actor: 'reviewer',
+    diffTruncated: false,
+    originalDiffBytes: 1,
+    marker: '<!-- managed -->',
+  });
+  const explanationBlock = [...comment.matchAll(/<pre><code>([\s\S]*?)<\/code><\/pre>/gu)]
+    .map((match) => match[1])
+    .at(0) as string;
+  for (const line of explanationBlock.split('\n')) {
+    // A lone surrogate at a chunk boundary would render as U+FFFD; every chunk must stay
+    // well-formed under code-point round-tripping.
+    assert.ok(line === String.fromCodePoint(...[...line].map((c) => c.codePointAt(0) as number)));
+  }
 });

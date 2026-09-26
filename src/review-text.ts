@@ -20,12 +20,38 @@ export const MODEL_TEXT_LINE_LIMIT = 80;
 
 const HTML_ENTITY = /&[a-zA-Z]+;|&#\d+;/gu;
 
-/** Display width of an encoded fragment: HTML entities occupy exactly one column. */
-function displayWidth(fragment: string): number {
-  return fragment.replace(HTML_ENTITY, ' ').length;
+/**
+ * Monospace display columns of one code point, wcwidth-style: CJK and emoji code points render
+ * double-width, combining marks and variation selectors occupy no column of their own, and
+ * regional-indicator pairs (flags) are approximated at one column each so a flag ≈ two columns.
+ */
+function codePointWidth(codePoint: number): number {
+  if ((codePoint >= 0x0300 && codePoint <= 0x036f) || codePoint === 0xfe0e || codePoint === 0xfe0f) return 0;
+  if (codePoint >= 0x1f1e6 && codePoint <= 0x1f1ff) return 1;
+  const wide =
+    (codePoint >= 0x1100 && codePoint <= 0x115f) ||
+    (codePoint >= 0x2e80 && codePoint <= 0xa4cf) ||
+    (codePoint >= 0xa960 && codePoint <= 0xa97f) ||
+    (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+    (codePoint >= 0xfe10 && codePoint <= 0xfe6f) ||
+    (codePoint >= 0xff00 && codePoint <= 0xff60) ||
+    (codePoint >= 0xffe0 && codePoint <= 0xffe6) ||
+    (codePoint >= 0x1f000 && codePoint <= 0x1ffff) ||
+    (codePoint >= 0x20000 && codePoint <= 0x3fffd);
+  return wide ? 2 : 1;
 }
 
-/** Tokenizes an encoded line into display units: one HTML entity or one character each. */
+/** Display width of an encoded fragment: HTML entities occupy one column; Unicode-aware. */
+function displayWidth(fragment: string): number {
+  let width = 0;
+  for (const character of fragment.replace(HTML_ENTITY, ' ')) {
+    width += codePointWidth(character.codePointAt(0) as number);
+  }
+  return width;
+}
+
+/** Tokenizes an encoded line into display units: one HTML entity or one code point each. */
 function encodedUnits(line: string): string[] {
   const entity = /&[a-zA-Z]+;|&#\d+;/y;
   const units: string[] = [];
@@ -36,10 +62,12 @@ function encodedUnits(line: string): string[] {
     if (match) {
       units.push(match[0]);
       index += match[0].length;
-    } else {
-      units.push(line[index] as string);
-      index += 1;
+      continue;
     }
+    // Code points, not UTF-16 units: a surrogate pair must never be split across lines.
+    const character = String.fromCodePoint(line.codePointAt(index) as number);
+    units.push(character);
+    index += character.length;
   }
   return units;
 }
