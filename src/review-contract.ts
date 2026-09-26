@@ -2,6 +2,10 @@ import { encodedModelTextBytes } from './review-text';
 
 export const REVIEW_RESULT_VERSION = 1 as const;
 export const MAX_REVIEW_RESULT_BYTES = 60_000;
+/** Version of the bounded incremental emission protocol appended to shard prompts. */
+export const SHARD_EMISSION_PROTOCOL_VERSION = 1 as const;
+/** Maximum number of increment documents one shard output may contain. */
+export const MAX_SHARD_EMISSION_LINES = 32;
 export const MAX_JSON_NESTING_DEPTH = 32;
 // Reserves 10,536 bytes for deterministic labels and bounded action metadata under GitHub's 65,536-byte limit.
 export const MAX_RENDERED_MODEL_TEXT_BYTES = 55_000;
@@ -329,5 +333,53 @@ export function parseReviewResult(raw: string): ReviewResultV1 {
     version: REVIEW_RESULT_VERSION,
     outcome: 'findings',
     findings: findings as [ReviewFinding, ...ReviewFinding[]],
+  };
+}
+
+export interface ParsedShardReviewOutput {
+  review: ReviewResultV1;
+  /** Increment lines that failed strict contract parsing; a malformed tail degrades the shard. */
+  malformedIncrements: number;
+}
+
+/**
+ * Parses one shard's backend output under the incremental emission protocol v1. A single complete
+ * v1 document is accepted unchanged. Otherwise the output is parsed line by line: every complete
+ * v1 document on its own line is a valid increment whose findings accumulate, and lines that fail
+ * strict parsing are counted as malformed increments instead of discarding earlier valid ones.
+ * When every line fails, the output is malformed as a whole and the shard degrades as before.
+ */
+export function parseShardReviewOutput(raw: string): ParsedShardReviewOutput {
+  try {
+    return { review: parseReviewResult(raw), malformedIncrements: 0 };
+  } catch (error) {
+    if (!(error instanceof ReviewContractError)) throw error;
+  }
+  const lines = raw
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (lines.length === 0 || lines.length > MAX_SHARD_EMISSION_LINES) fail('invalid-shape');
+  const findings: ReviewFinding[] = [];
+  let malformed = 0;
+  for (const line of lines) {
+    try {
+      findings.push(...parseReviewResult(line).findings);
+    } catch (error) {
+      if (!(error instanceof ReviewContractError)) throw error;
+      malformed += 1;
+    }
+  }
+  if (malformed === lines.length) fail('invalid-json');
+  return {
+    review:
+      findings.length === 0
+        ? { version: REVIEW_RESULT_VERSION, outcome: 'clean', findings: [] }
+        : {
+            version: REVIEW_RESULT_VERSION,
+            outcome: 'findings',
+            findings: findings as [ReviewFinding, ...ReviewFinding[]],
+          },
+    malformedIncrements: malformed,
   };
 }

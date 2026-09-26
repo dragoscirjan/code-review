@@ -970,3 +970,80 @@ test('lists paginated review comments and guards managed summary leases', async 
   assert.match(requests[0]?.url ?? '', /pulls\/7\/comments/);
   assert.equal(requests[2]?.method, 'PATCH');
 });
+
+test('provisional inline comment lifecycle: create, ownership-checked update, and ownership-checked delete', async () => {
+  const requests: Array<{ url: string; method?: string; body?: string }> = [];
+  const marker = '<!-- code-review-inline:pi:v2:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA -->';
+  const actor = { id: 20, login: 'bot' };
+  const context: PullRequestContext = {
+    owner: 'owner',
+    repository: 'repository',
+    number: 7,
+    title: '',
+    body: '',
+    url: '',
+    baseSha: 'base',
+    headSha: 'h'.repeat(40),
+    author: '',
+  };
+  const created: { id: number; body: string }[] = [];
+  let tamper = false;
+  const client = new GitHubClient('token', 'https://api.example.test', async (url, init) => {
+    requests.push({
+      url: String(url),
+      method: init?.method,
+      body: typeof init?.body === 'string' ? init.body : undefined,
+    });
+    const path = String(url);
+    if (init?.method === 'POST') {
+      const parsed = JSON.parse(String(init.body)) as { body: string; path: string };
+      created.push({ id: 9, body: parsed.body });
+      return new Response(JSON.stringify({ id: 9, body: parsed.body, html_url: 'u', user: actor, path: parsed.path }), {
+        status: 201,
+      });
+    }
+    if (init?.method === 'PATCH') {
+      created[0]!.body = JSON.parse(String(init.body)).body as string;
+      return new Response(JSON.stringify({ id: 9, body: created[0]!.body, html_url: 'u', user: actor }), {
+        status: 200,
+      });
+    }
+    if (init?.method === 'DELETE') return new Response(null, { status: 204 });
+    if (path.endsWith('/pulls/comments/9')) {
+      const body = created.find((entry) => entry.id === 9)?.body ?? '';
+      const served = tamper ? `${body}\n<!-- tampered -->` : body;
+      return new Response(JSON.stringify({ id: 9, body: served, html_url: 'u', user: actor }), { status: 200 });
+    }
+    throw new Error(`unexpected request ${init?.method ?? 'GET'} ${path}`);
+  });
+  const inline = await client.createPullRequestReviewComment(context, {
+    path: 'src/file.ts',
+    side: 'RIGHT',
+    line: 3,
+    body: `finding\n\n${marker}`,
+  });
+  assert.equal(inline.id, 9);
+  assert.match(requests[0]?.url ?? '', /pulls\/7\/comments$/u);
+  assert.match(requests[0]?.body ?? '', /"commit_id":"h{40}"/u);
+  assert.match(requests[0]?.body ?? '', /"side":"RIGHT"/u);
+
+  const updated = await client.updatePullRequestReviewComment(context, actor, 9, marker, `confirmed\n\n${marker}`);
+  assert.match(updated.body ?? '', /confirmed/u);
+  assert.match(requests[1]?.url ?? '', /pulls\/comments\/9$/u);
+  // The ownership check GET precedes the PATCH.
+  assert.equal(requests[2]?.method, 'PATCH');
+
+  await client.deletePullRequestReviewComment(context, actor, 9, marker);
+  assert.equal(requests[4]?.method, 'DELETE');
+
+  // A trailing-marker mismatch fails closed before any mutation request.
+  tamper = true;
+  created.push({ id: 9, body: `finding\n\n${marker}` });
+  await assert.rejects(
+    client.updatePullRequestReviewComment(context, actor, 9, marker, `x\n${marker}`),
+    /ownership check failed/u,
+  );
+  await assert.rejects(client.deletePullRequestReviewComment(context, actor, 9, marker), /ownership check failed/u);
+  const mutationCount = requests.filter((request) => request.method === 'PATCH' || request.method === 'DELETE').length;
+  assert.equal(mutationCount, 2);
+});

@@ -145,7 +145,7 @@ test('renders only host-generated specialist execution metadata', () => {
     diffTruncated: false,
     originalDiffBytes: 1,
     executionSummary: {
-      plan: { version: 2, requested: 'auto', selected: 'sharded', reasons: ['sensitive-surface'] },
+      plan: { version: 3, requested: 'auto', selected: 'sharded', reasons: ['sensitive-surface'] },
       rolesAttempted: 2,
       rolesCompleted: 2,
       arbiterRan: true,

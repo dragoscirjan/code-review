@@ -103,7 +103,7 @@ test('progress summary drops oldest provisional findings to stay within the comm
 test('degraded final comment renders the coverage statement and keeps findings', () => {
   const summary = {
     plan: {
-      version: 2 as const,
+      version: 3 as const,
       requested: 'specialists' as const,
       selected: 'sharded' as const,
       reasons: ['forced-sharded'],
@@ -141,7 +141,7 @@ test('degraded final comment renders the coverage statement and keeps findings',
 test('complete runs render no coverage statement', () => {
   const summary = {
     plan: {
-      version: 2 as const,
+      version: 3 as const,
       requested: 'specialists' as const,
       selected: 'sharded' as const,
       reasons: ['forced-sharded'],
@@ -190,4 +190,23 @@ test('deterministic phase-0 findings render in the progress summary', () => {
   });
   assert.match(body, /👋 Hola! We're doing code review, yo! Have a bit of patience!/u);
   assert.doesNotMatch(body, /Review in progress/u);
+});
+
+test('heartbeat status renders the running shard index and elapsed time', () => {
+  const body = renderProgressComment({
+    assessment: provisionalAssessment([]),
+    backend: 'pi',
+    model: 'm',
+    headSha: 'b'.repeat(40),
+    actor: 'reviewer',
+    completedShards: 1,
+    totalShards: 5,
+    runningShard: { index: 1, totalShards: 5, elapsedSeconds: 451 },
+    provisionalFindings: [],
+    marker,
+  });
+  // The heartbeat content carries only status words, shard indices, and timings — never PR content.
+  assert.match(body, /shard 2 of 5 running, 451s elapsed/u);
+  assert.ok(!body.includes('unsafe();'));
+  assert.ok(body.trimEnd().endsWith(marker));
 });

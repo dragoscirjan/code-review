@@ -18,6 +18,7 @@ import {
   type ReviewStateV1,
 } from './review-lifecycle';
 import { REVIEW_MEMORY_SEMANTIC_VERSION, assertReviewMemoryCurrent, loadReviewMemory } from './review-memory';
+import { createReviewProgressLogger } from './review-progress';
 import { executeAndPublishReview } from './review-publication';
 import { acquireReviewedSnapshot, assertSnapshotFresh, SNAPSHOT_DIFF_TIMEOUT_MS } from './review-snapshot';
 import { executeReviewStrategy, noChangeExecutedReview, type ShardProgress } from './review-specialists';
@@ -61,6 +62,10 @@ async function main(): Promise<void> {
   }
   const config = loadActionConfig();
   secrets.push(...config.modelCredentialValues);
+  // Bounded, versioned run-log channel: status words, shard indices, and timings only. The
+  // secrets array is shared by reference so masks added later are still enforced per line.
+  const progressLogger = createReviewProgressLogger({ secrets });
+  progressLogger.event({ phase: 'review-started' });
   for (const secret of secrets) console.log(`::add-mask::${workflowCommandValue(secret)}`);
   const eventPath = process.env.GITHUB_EVENT_PATH;
   if (!eventPath) throw new Error('GITHUB_EVENT_PATH is required');
@@ -166,6 +171,7 @@ async function main(): Promise<void> {
     analyzerSummary: analyzer.summary,
   });
   const codeIndexCacheHit = reviewContext.cacheHit;
+  progressLogger.event({ phase: 'context-planned' });
   console.log(
     `Prepared ${reviewContext.bundle.metadata.includedBytes} bounded review context bytes${codeIndexCacheHit ? ' from a fresh index cache' : ''}`,
   );
@@ -260,9 +266,19 @@ async function main(): Promise<void> {
     await assertStateFresh();
   };
   let shardProgressHandler: ((progress: ShardProgress) => Promise<void> | void) | undefined;
+  let shardStartHandler: ((info: { shardIndex: number; totalShards: number }) => void) | undefined;
+  let shardSkipHandler:
+    | ((info: { shardIndex: number; totalShards: number; reason: 'malformed-output' | 'aggregate-deadline' }) => void)
+    | undefined;
   const publication = await executeAndPublishReview({
     registerShardHandler: (handler) => {
       shardProgressHandler = handler;
+    },
+    registerShardStartHandler: (handler) => {
+      shardStartHandler = handler;
+    },
+    registerShardSkipHandler: (handler) => {
+      shardSkipHandler = handler;
     },
     registerLeaseListener: (lease) => {
       stateLease = lease;
@@ -291,6 +307,13 @@ async function main(): Promise<void> {
             secrets,
             assertFresh: assertExecutionFresh,
             onShardCompleted: (progress) => shardProgressHandler?.(progress),
+            onShardStarted: (info) => {
+              shardStartHandler?.(info);
+            },
+            onShardSkipped: (info) => {
+              shardSkipHandler?.(info);
+            },
+            onProgress: (event) => progressLogger.event(event),
           }),
     assertFresh: assertReviewInputsFresh,
     assertStateFresh,
@@ -353,6 +376,7 @@ async function main(): Promise<void> {
   await setOutput('superseded-finding-count', String(publication.lifecycle.counts.superseded));
   await setOutput('code-indexer', config.codeIndexer);
   await setOutput('code-index-cache-hit', String(codeIndexCacheHit));
+  progressLogger.event({ phase: 'publication-completed' });
   console.log(`Published review: ${publication.comment.html_url}`);
 }
 

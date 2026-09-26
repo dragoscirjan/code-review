@@ -30,7 +30,7 @@
     },
     {
       "caseId": "security-inverted-auth-guard",
-      "expectedAuto": "specialists",
+      "expectedAuto": "single-pass",
       "roles": {
         "correctness": {
           "assistantOutput": "{\"version\":1,\"outcome\":\"clean\",\"findings\":[]}",
@@ -180,7 +180,7 @@
     },
     {
       "caseId": "left-side-removed-validation",
-      "expectedAuto": "specialists",
+      "expectedAuto": "single-pass",
       "roles": {
         "correctness": {
           "assistantOutput": "{\"version\":1,\"outcome\":\"clean\",\"findings\":[]}",
@@ -206,7 +206,7 @@
     },
     {
       "caseId": "analyzer-duplicate-json-key",
-      "expectedAuto": "specialists",
+      "expectedAuto": "single-pass",
       "roles": {
         "correctness": {
           "assistantOutput": "{\"version\":1,\"outcome\":\"clean\",\"findings\":[]}",

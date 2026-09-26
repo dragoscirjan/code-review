@@ -792,6 +792,95 @@ export class GitHubClient {
     throw new Error('Pull request has more than 2000 reviews');
   }
 
+  async getPullRequestReviewComment(context: PullRequestContext, commentId: number): Promise<GitHubReviewComment> {
+    return this.request<GitHubReviewComment>(
+      `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/pulls/comments/${commentId}`,
+    );
+  }
+
+  /** Asserts the comment belongs to the expected actor and carries the expected trailing marker. */
+  private async assertInlineCommentOwnership(
+    context: PullRequestContext,
+    actor: AuthenticatedActor,
+    commentId: number,
+    expectedMarker: string,
+  ): Promise<void> {
+    const comment = await this.getPullRequestReviewComment(context, commentId);
+    if (comment.user?.id !== actor.id || !hasFinalMarker(comment, expectedMarker)) {
+      throw new Error('Inline review comment ownership check failed');
+    }
+  }
+
+  /**
+   * Creates one standalone pull request review comment without wrapping it in a review
+   * submission; progressive publication uses this to emit provisional per-file findings per shard.
+   */
+  async createPullRequestReviewComment(
+    context: PullRequestContext,
+    input: { path: string; side: 'LEFT' | 'RIGHT'; line: number; body: string },
+  ): Promise<GitHubReviewComment> {
+    return this.request<GitHubReviewComment>(
+      `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/pulls/${context.number}/comments`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          body: input.body,
+          path: input.path,
+          side: input.side,
+          line: input.line,
+          commit_id: context.headSha,
+        }),
+        headers: { 'Content-Type': 'application/json' },
+      },
+    );
+  }
+
+  /** Updates one review comment after an ownership check against the expected trailing marker. */
+  async updatePullRequestReviewComment(
+    context: PullRequestContext,
+    actor: AuthenticatedActor,
+    commentId: number,
+    expectedMarker: string,
+    body: string,
+  ): Promise<GitHubReviewComment> {
+    await this.assertInlineCommentOwnership(context, actor, commentId, expectedMarker);
+    return this.request<GitHubReviewComment>(
+      `/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/pulls/comments/${commentId}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ body }),
+        headers: { 'Content-Type': 'application/json' },
+      },
+    );
+  }
+
+  /** Deletes one review comment after an ownership check against the expected trailing marker. */
+  async deletePullRequestReviewComment(
+    context: PullRequestContext,
+    actor: AuthenticatedActor,
+    commentId: number,
+    expectedMarker: string,
+  ): Promise<void> {
+    await this.assertInlineCommentOwnership(context, actor, commentId, expectedMarker);
+    const response = await this.fetchImplementation(
+      `${this.apiUrl}/repos/${encodeURIComponent(context.owner)}/${encodeURIComponent(context.repository)}/pulls/comments/${commentId}`,
+      {
+        method: 'DELETE',
+        headers: {
+          Accept: 'application/vnd.github+json',
+          Authorization: `Bearer ${this.token}`,
+          'X-GitHub-Api-Version': '2022-11-28',
+          'User-Agent': 'code-review-action',
+        },
+      },
+    );
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error(`GitHub API DELETE pulls/comments/${commentId} failed with ${response.status}`);
+    }
+    await response.body?.cancel().catch(() => undefined);
+  }
+
   async createOrReuseInlineReview(
     context: PullRequestContext,
     actor: AuthenticatedActor,

@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'vitest';
 import {
   MAX_JSON_NESTING_DEPTH,
+  MAX_SHARD_EMISSION_LINES,
   MAX_RENDERED_MODEL_TEXT_BYTES,
   MAX_REVIEW_RESULT_BYTES,
   ReviewContractError,
   parseReviewResult,
+  parseShardReviewOutput,
   type ReviewFinding,
 } from '../src/review-contract';
 
@@ -168,4 +170,59 @@ test('rejects excessive JSON nesting with a contract error before stack exhausti
 
 test('rejects a complete assistant payload over the total byte limit', () => {
   assertContractError(' '.repeat(MAX_REVIEW_RESULT_BYTES + 1), 'oversized-output');
+});
+
+test('incremental emission accepts a single complete v1 document unchanged', () => {
+  const parsed = parseShardReviewOutput(findingResult());
+  assert.equal(parsed.review.outcome, 'findings');
+  assert.equal(parsed.review.findings.length, 1);
+  assert.equal(parsed.malformedIncrements, 0);
+  const clean = parseShardReviewOutput('  {"version":1,"outcome":"clean","findings":[]}  ');
+  assert.equal(clean.review.outcome, 'clean');
+  assert.equal(clean.malformedIncrements, 0);
+});
+
+test('incremental emission keeps valid increments and counts a malformed tail', () => {
+  const first = findingResult();
+  const second = JSON.stringify({
+    version: 1,
+    outcome: 'findings',
+    findings: [{ ...finding, location: { path: 'src/other.ts', side: 'RIGHT', line: 2 } }],
+  });
+  const parsed = parseShardReviewOutput(`${first}\n${second}\nthis line is not json`);
+  assert.equal(parsed.review.outcome, 'findings');
+  assert.deepEqual(
+    parsed.review.findings.map((item) => item.location.path),
+    ['src/math.ts', 'src/other.ts'],
+  );
+  assert.equal(parsed.malformedIncrements, 1);
+});
+
+test('incremental emission rejects blank output, an all-invalid tail, and unbounded line counts', () => {
+  assert.throws(() => parseShardReviewOutput('   \n  '), ReviewContractError);
+  assert.throws(() => parseShardReviewOutput('nope\nalso nope'), ReviewContractError);
+  const valid = findingResult();
+  const tooMany = Array.from({ length: MAX_SHARD_EMISSION_LINES + 1 }, () => valid).join('\n');
+  assert.throws(() => parseShardReviewOutput(tooMany), ReviewContractError);
+});
+
+test('incremental emission still enforces the per-document contract on every line', () => {
+  // A duplicate property inside one increment line fails that increment only.
+  const duplicateLine = '{"version":1,"version":1,"outcome":"clean","findings":[]}';
+  const parsed = parseShardReviewOutput(`${findingResult()}\n${duplicateLine}`);
+  assert.equal(parsed.review.findings.length, 1);
+  assert.equal(parsed.malformedIncrements, 1);
+  // A valid-format line with an invalid field fails only that increment.
+  const invalidField = JSON.stringify({
+    version: 1,
+    outcome: 'findings',
+    findings: [{ ...finding, severity: 'catastrophic' }],
+  });
+  const parsedInvalid = parseShardReviewOutput(`${findingResult()}\n${invalidField}`);
+  assert.equal(parsedInvalid.review.findings.length, 1);
+  assert.equal(parsedInvalid.malformedIncrements, 1);
+  // Blank separator lines between increments are ignored.
+  const spaced = parseShardReviewOutput(`${findingResult()}\n\n   \n${findingResult()}`);
+  assert.equal(spaced.review.findings.length, 2);
+  assert.equal(spaced.malformedIncrements, 0);
 });
