@@ -2,20 +2,39 @@ import type { AnalyzerSummary } from './analyzer';
 import type { ReviewContextMetadata } from './context-planner';
 import type { ReviewAssessment, ValidatedFinding } from './finding-validation';
 import type { ReviewBackend } from './review';
+import type { FindingCategory, FindingSeverity } from './review-contract';
 import type { ReviewLifecycleCounts, ReviewMode, ReviewStateFinding } from './review-lifecycle';
 import type { ReviewExecutionSummary } from './review-specialists';
 import { renderModelTextLiteral } from './review-text';
 
 export const MAX_GITHUB_COMMENT_BYTES = 65_536;
 
+/** Fixed, versioned presentation of the follow-up AI prompt offered on inline comments. */
+const FOLLOW_UP_PROMPT_VERSION = 1;
+
+const SEVERITY_EMOJI: Record<FindingSeverity, string> = { critical: '🔴', high: '🟠', medium: '🟡', low: '🟢' };
+const CATEGORY_EMOJI: Record<FindingCategory, string> = {
+  correctness: '🎯',
+  security: '🛡️',
+  regression: '🔁',
+  testing: '🧪',
+};
+
 function backendLabel(backend: ReviewBackend): string {
   return backend === 'opencode' ? 'OpenCode' : 'Pi';
 }
 
+function capitalize(value: string): string {
+  return `${value[0].toUpperCase()}${value.slice(1)}`;
+}
+
 function findingHeading(finding: ValidatedFinding): string {
-  const severity = `${finding.severity[0].toUpperCase()}${finding.severity.slice(1)}`;
-  const category = `${finding.category[0].toUpperCase()}${finding.category.slice(1)}`;
-  return `${severity} ${category}`;
+  return `${SEVERITY_EMOJI[finding.severity]} ${capitalize(finding.severity)} ${CATEGORY_EMOJI[finding.category]} ${capitalize(finding.category)}`;
+}
+
+/** CodeRabbit-style badge line rendered first in every inline per-file comment. */
+function findingBadgeLine(finding: ValidatedFinding): string {
+  return `_${CATEGORY_EMOJI[finding.category]} ${capitalize(finding.category)}_ | _${SEVERITY_EMOJI[finding.severity]} ${capitalize(finding.severity)}_`;
 }
 
 function renderSuggestionBlock(replacement: string): string {
@@ -25,13 +44,19 @@ function renderSuggestionBlock(replacement: string): string {
   return `${fence}suggestion\n${replacement}${finalNewline}${fence}`;
 }
 
-function renderFinding(finding: ValidatedFinding, index?: number, includeSuggestion = false): string {
-  const prefix = index === undefined ? '###' : `### ${index}.`;
+/** Actionable part kept visible in every finding presentation: explanation and the fix. */
+function renderFindingActionable(finding: ValidatedFinding, includeSuggestion: boolean): string {
   const fix =
     includeSuggestion && finding.suggestion
       ? `- **Suggested change:**\n${renderSuggestionBlock(finding.suggestion.replacement)}`
       : `- **Suggested fix:**\n${renderModelTextLiteral(finding.fix)}`;
-  return `${prefix} ${findingHeading(finding)}
+  return `- **Explanation:**\n${renderModelTextLiteral(finding.explanation)}\n${fix}`;
+}
+
+/** Secondary provenance and high-volume evidence collapsed by default in every finding presentation. */
+function renderFindingEvidence(finding: ValidatedFinding): string {
+  return `<details>
+<summary>🔎 Evidence & analysis</summary>
 
 - **Line:** ${finding.location.line} (${finding.location.side})
 - **Confidence:** ${Math.round(finding.confidence * 100)}%
@@ -43,14 +68,23 @@ ${
 ${renderModelTextLiteral(finding.location.path)}
 - **Evidence:**
 ${renderModelTextLiteral(finding.evidence)}
-- **Explanation:**
-${renderModelTextLiteral(finding.explanation)}
-${fix}`;
+
+</details>`;
+}
+
+/** Fixed, versioned prompt template so authors can hand one finding to an AI agent for follow-up. */
+function renderFollowUpPrompt(finding: ValidatedFinding): string {
+  return `<details>
+<summary>🤖 Follow-up prompt (v${FOLLOW_UP_PROMPT_VERSION})</summary>
+
+Please fix the ${finding.severity} ${finding.category} finding at ${renderModelTextLiteral(finding.location.path)}:${finding.location.line} (${finding.location.side}).
+
+</details>`;
 }
 
 function renderAssessment(assessment: ReviewAssessment): string {
   if (assessment.findings.length > 0) {
-    return assessment.findings.map((finding, index) => renderFinding(finding, index + 1)).join('\n\n');
+    return assessment.findings.map((finding, index) => renderCollapsibleFinding(finding, index + 1)).join('\n\n');
   }
   if (assessment.counts.memorySuppressed > 0) {
     return 'No validated findings remain after repository-memory suppressions.';
@@ -66,21 +100,47 @@ function assertCommentSize(comment: string, label: string): string {
   return comment;
 }
 
+/**
+ * Per-file inline comment in the reference shape: a category/severity badge line, visible
+ * explanation and fix, and the high-volume evidence plus the follow-up prompt collapsed.
+ */
 export function renderInlineComment(finding: ValidatedFinding, marker: string): string {
-  return assertCommentSize(`${renderFinding(finding, undefined, true)}\n\n${marker}`, 'Rendered inline review comment');
-}
+  const comment = `${findingBadgeLine(finding)}
 
-/** Collapsible presentation used for deterministic and provisional findings in the managed summary. */
-function renderCollapsibleFinding(finding: ValidatedFinding): string {
-  const summary = `${findingHeading(finding)} — ${renderModelTextLiteral(finding.location.path)}:${finding.location.line} (${finding.location.side})`;
-  return `<details>\n<summary>${summary}</summary>\n\n${renderFinding(finding)}\n\n</details>`;
+${renderFindingActionable(finding, true)}
+
+${renderFindingEvidence(finding)}
+
+${renderFollowUpPrompt(finding)}
+
+${marker}`;
+  return assertCommentSize(comment, 'Rendered inline review comment');
 }
 
 /**
- * Renders the in-progress managed summary body: the status header, the phase-0 deterministic
- * findings, and every validated shard finding published so far, each collapsible. Provisional
- * findings are dropped newest-first when the body approaches the GitHub comment limit; the
- * deterministic phase-0 findings are kept longest. The omission is stated.
+ * Collapsible presentation used for deterministic, provisional, and final findings: the heading,
+ * explanation, and suggested fix stay visible so key findings never hide behind an expansion;
+ * only secondary evidence and analysis collapse.
+ */
+function renderCollapsibleFinding(finding: ValidatedFinding, index?: number): string {
+  const title = index === undefined ? findingHeading(finding) : `${index}. ${findingHeading(finding)}`;
+  const heading = `#### ${title} — ${renderModelTextLiteral(finding.location.path)}:${finding.location.line} (${finding.location.side})`;
+  return `${heading}\n\n${renderFindingActionable(finding, false)}\n\n${renderFindingEvidence(finding)}`;
+}
+
+/** Greeting and running status shown in the managed summary until the review finishes. */
+function progressStatus(completedShards: number, totalShards: number): string {
+  if (completedShards === 0) {
+    return `- Status: 👋 Hola! We're doing code review, yo! Have a bit of patience!`;
+  }
+  return `- Status: 👀 Review in progress — shards completed ${completedShards} / ${totalShards}`;
+}
+
+/**
+ * Renders the in-progress managed summary body: the friendly status header, the phase-0
+ * deterministic findings, and every validated shard finding published so far, each collapsible.
+ * Provisional findings are dropped newest-first when the body approaches the GitHub comment
+ * limit; the deterministic phase-0 findings are kept longest. The omission is stated.
  */
 export function renderProgressComment(input: {
   assessment: ReviewAssessment;
@@ -97,17 +157,17 @@ export function renderProgressComment(input: {
   const dropped: ValidatedFinding[] = [];
   let shownCount = input.provisionalFindings.length;
   while (true) {
-    const progress = `
-- Status: **review in progress** — shards completed ${input.completedShards} / ${input.totalShards}`;
     const sections: string[] = [];
     if (deterministic.length > 0) {
-      sections.push(`### Deterministic findings\n\n${deterministic.map(renderCollapsibleFinding).join('\n\n')}`);
+      sections.push(
+        `### 🔎 Deterministic findings\n\n${deterministic.map((finding) => renderCollapsibleFinding(finding)).join('\n\n')}`,
+      );
     }
     if (shownCount > 0) {
       sections.push(
-        `### Provisional review findings — not yet merge-confirmed\n\n${input.provisionalFindings
+        `### 🧩 Provisional review findings — not yet merge-confirmed\n\n${input.provisionalFindings
           .slice(0, shownCount)
-          .map(renderCollapsibleFinding)
+          .map((finding) => renderCollapsibleFinding(finding))
           .join('\n\n')}`,
       );
     }
@@ -120,7 +180,8 @@ export function renderProgressComment(input: {
     const comment = `## Code Review (\`${input.model}\` via ${backendLabel(input.backend)})
 
 - Head: \`${input.headSha.slice(0, 12)}\`
-- Published through: \`@${input.actor}\`${progress}${counts.received > 0 ? `\n- Accepted deterministic findings: ${counts.accepted}` : ''}
+- Published through: \`@${input.actor}\`
+${progressStatus(input.completedShards, input.totalShards)}${counts.received > 0 ? `\n- Accepted deterministic findings: ${counts.accepted}` : ''}
 
 ${findings}${omitted}
 
@@ -234,6 +295,9 @@ export function renderComment(input: {
   const coverage = input.coverage
     ? `\n\n> ⚠️ **Partial review.** ${coverageScope} The ${input.coverage.provisionalFindings} finding${input.coverage.provisionalFindings === 1 ? '' : 's'} below ${input.coverage.provisionalFindings === 1 ? 'is' : 'are'} validated but ${input.coverage.provisionalFindings === 1 ? 'was' : 'were'} not confirmed by the final merge pass.\n>`
     : '';
+  const reviewStatus = input.coverage?.degraded
+    ? '- Review status: ⚠️ partially covered'
+    : '- Review status: ✅ complete';
   const compact = input.lifecycle
     ? [
         ...input.lifecycle.active.map(
@@ -246,6 +310,24 @@ export function renderComment(input: {
         ),
       ].join('\n')
     : '';
+  const findingLifecycle = compact
+    ? `<details>\n<summary>🔖 Finding lifecycle</summary>\n\n${compact}\n\n</details>`
+    : '';
+  const analysisReport = `<details>
+<summary>👀 Analysis report</summary>
+
+- Findings received: ${counts.received}
+- Accepted: ${counts.accepted}
+- Rejected (evidence or secret policy): ${counts.rejected}
+- Unmapped: ${counts.unmapped}
+- Duplicates removed: ${counts.duplicates}
+- Below confidence threshold: ${counts.belowThreshold}
+- Suppressed by repository memory: ${counts.memorySuppressed}
+- Inline comments published: ${counts.inlineSelected}
+- Inline comments suppressed by publication history: ${counts.inlineHistorySuppressed}
+- Accepted findings omitted from inline comments by limit: ${counts.inlineLimitOmitted}${truncation}${context}${analysis}${execution}${memory}${lifecycle}
+
+</details>`;
   const details = [...input.assessment.findings];
   let omitted = 0;
   while (true) {
@@ -256,6 +338,7 @@ export function renderComment(input: {
     };
     const detailsText =
       details.length === 0 && input.assessment.findings.length > 0 ? '' : renderAssessment(detailAssessment);
+    const findingHeadingText = details.length > 0 ? `### 🐛 Findings (${input.assessment.findings.length})\n\n` : '';
     const omission =
       omitted > 0
         ? `\n\n> ${omitted} detailed finding block${omitted === 1 ? ' was' : 's were'} omitted to fit the GitHub comment limit.`
@@ -263,20 +346,15 @@ export function renderComment(input: {
     const state = input.lifecycle ? `\n${input.lifecycle.stateLine}` : '';
     const comment = `## Code Review (\`${input.model}\` via ${backendLabel(input.backend)})
 
-- Head: \`${input.headSha.slice(0, 12)}\`${context}
-- Published through: \`@${input.actor}\`${analysis}${execution}${memory}${lifecycle}
-- Findings received: ${counts.received}
-- Accepted: ${counts.accepted}
-- Rejected (evidence or secret policy): ${counts.rejected}
-- Unmapped: ${counts.unmapped}
-- Duplicates removed: ${counts.duplicates}
-- Below confidence threshold: ${counts.belowThreshold}
-- Suppressed by repository memory: ${counts.memorySuppressed}
-- Inline comments published: ${counts.inlineSelected}
-- Inline comments suppressed by publication history: ${counts.inlineHistorySuppressed}
-- Accepted findings omitted from inline comments by limit: ${counts.inlineLimitOmitted}${truncation}${coverage}
+- Head: \`${input.headSha.slice(0, 12)}\`
+- Published through: \`@${input.actor}\`
+${reviewStatus}${truncation}${coverage}
 
-${compact ? `### Finding lifecycle\n${compact}\n\n` : ''}${detailsText}${omission}
+${findingHeadingText}${detailsText}${omission}
+
+${findingLifecycle}
+
+${analysisReport}
 ${state}
 ${input.marker}`;
     if (comment.length <= MAX_GITHUB_COMMENT_BYTES && Buffer.byteLength(comment, 'utf8') <= MAX_GITHUB_COMMENT_BYTES)
