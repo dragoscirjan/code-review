@@ -35,6 +35,11 @@ import {
 import { assertReviewMemoryCurrent, type ReviewMemory } from './review-memory';
 import type { ExecutedReview, ReviewExecutionSummary, ShardProgress } from './review-specialists';
 
+/** Cadence of the mid-run managed-comment heartbeat while a shard executes. */
+export const HEARTBEAT_INTERVAL_MS = 60_000;
+/** Hard ceiling on heartbeat updates so a verbose run cannot flood the comment history. */
+export const MAX_HEARTBEAT_UPDATES = 30;
+
 export interface ExecuteAndPublishReviewInput {
   executeReview: () => Promise<ReviewResultV1 | ExecutedReview>;
   /**
@@ -44,6 +49,19 @@ export interface ExecuteAndPublishReviewInput {
    */
   registerShardHandler?: (handler: (progress: ShardProgress) => Promise<void> | void) => void;
   /**
+   * Registers the shard-start handler used to schedule the bounded mid-run managed-comment
+   * heartbeat while one shard executes.
+   */
+  registerShardStartHandler?: (handler: (info: { shardIndex: number; totalShards: number }) => void) => void;
+  /** Registers the shard-skip handler that stops the heartbeat for a shard reported not covered. */
+  registerShardSkipHandler?: (
+    handler: (info: {
+      shardIndex: number;
+      totalShards: number;
+      reason: 'malformed-output' | 'aggregate-deadline';
+    }) => Promise<void> | void,
+  ) => void;
+  /**
    * Receives the current managed-comment lease after every progressive write so freshness
    * assertions stay synchronized with the edited comment body.
    */
@@ -52,7 +70,15 @@ export interface ExecuteAndPublishReviewInput {
   assertStateFresh?: () => Promise<void>;
   client: Pick<GitHubClient, 'createOrReuseInlineReview' | 'upsertManagedComment'> &
     Partial<
-      Pick<GitHubClient, 'listPullRequestReviewComments' | 'listPullRequestReviews' | 'assertManagedCommentLease'>
+      Pick<
+        GitHubClient,
+        | 'listPullRequestReviewComments'
+        | 'listPullRequestReviews'
+        | 'assertManagedCommentLease'
+        | 'createPullRequestReviewComment'
+        | 'updatePullRequestReviewComment'
+        | 'deletePullRequestReviewComment'
+      >
     >;
   pullRequest: PullRequestContext;
   diff: PullRequestDiff;
@@ -111,6 +137,15 @@ function redactAssessment(assessment: ReviewAssessment, secrets: readonly string
 
 function inlineMarker(backend: ReviewBackend, fingerprint: string): string {
   return `<!-- code-review-inline:${backend}:v2:${fingerprint.replace(/^sha256:/u, '')} -->`;
+}
+
+/**
+ * Distinct trailing marker for provisional inline comments. It must never match the final
+ * inline marker: a provisional comment left behind by a failed run must stay invisible to
+ * history suppression so the next run can sweep it instead of silently suppressing the finding.
+ */
+function provisionalInlineMarker(backend: ReviewBackend, fingerprint: string): string {
+  return `<!-- code-review-inline-provisional:${backend}:v1:${fingerprint.replace(/^sha256:/u, '')} -->`;
 }
 
 function batchMarker(input: ExecuteAndPublishReviewInput, comments: readonly GitHubInlineCommentInput[]): string {
@@ -275,36 +310,179 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
       ),
       input.secrets,
     );
+
+  // Progressive inline publication state: one per-run registry of provisional per-file comments.
+  // Caps and dedup are enforced across the whole run through this registry, not per shard.
+  const inlineRegistry = new Map<string, { commentId: number; fingerprint: string; finding: ValidatedFinding }>();
+  const runInlineFingerprints = new Set<string>();
+  const inlineMarkerFor = (fingerprint: string): string => inlineMarker(input.backend, fingerprint);
+  const anchorKeyOf = (finding: ValidatedFinding): string =>
+    `${finding.location.path}\0${finding.location.side}\0${finding.location.line}`;
+
+  // Bounded mid-run heartbeat: while a shard executes, the managed comment is re-edited on a
+  // fixed cadence with live elapsed time so it never sits unchanged for a whole long shard.
+  // Every write re-verifies the lease; heartbeat failures never fail the review, shard-completion
+  // failures abort it exactly as before.
+  let heartbeatTimer: NodeJS.Timeout | undefined;
+  let heartbeatUpdates = 0;
+  let runningShard: { index: number; totalShards: number; startedAtMs: number } | undefined;
+  let writeQueue: Promise<void> = Promise.resolve();
+  let queuedWriteError: unknown;
+
+  const stopHeartbeat = (): void => {
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = undefined;
+    }
+    runningShard = undefined;
+  };
+
+  const renderProgressiveBody = (): string =>
+    renderProgressComment({
+      assessment: phaseZeroAssessment(),
+      backend: input.backend,
+      model: input.model,
+      headSha: input.pullRequest.headSha,
+      actor: input.actor.login,
+      completedShards,
+      totalShards,
+      provisionalFindings,
+      ...(runningShard
+        ? {
+            runningShard: {
+              index: runningShard.index,
+              totalShards: runningShard.totalShards,
+              elapsedSeconds: Math.max(0, Math.floor((Date.now() - runningShard.startedAtMs) / 1_000)),
+            },
+          }
+        : {}),
+      marker,
+    });
+
+  const writeProgressiveComment = async (body: string): Promise<void> => {
+    assertPayloadsContainNoSecrets([body], input.secrets);
+    const updated = await input.client.upsertManagedComment(
+      input.pullRequest,
+      input.actor,
+      input.markers,
+      body,
+      progressiveLease ?? undefined,
+    );
+    progressiveLease = { id: updated.id, bodyDigest: commentDigest(body), marker };
+    input.registerLeaseListener?.(progressiveLease);
+  };
+
+  /** Serializes every progressive write through one queue so the lease chain never forks. */
+  const enqueueWrite = (task: () => Promise<void>, swallow: boolean): Promise<void> =>
+    new Promise((resolve, reject) => {
+      writeQueue = writeQueue.then(task).then(
+        () => resolve(),
+        (error) => {
+          if (swallow) {
+            // A failed heartbeat must never fail the review; the final publication still asserts
+            // freshness before its own write.
+            console.warn(
+              `Progressive comment update skipped: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            stopHeartbeat();
+            resolve();
+            return;
+          }
+          queuedWriteError = queuedWriteError ?? error;
+          reject(error);
+        },
+      );
+    });
+
+  const heartbeatTick = (): void => {
+    if (!runningShard || heartbeatUpdates >= MAX_HEARTBEAT_UPDATES) {
+      stopHeartbeat();
+      return;
+    }
+    void enqueueWrite(async () => {
+      if (!runningShard) return;
+      await writeProgressiveComment(renderProgressiveBody());
+      heartbeatUpdates += 1;
+    }, true).then(() => {
+      if (heartbeatUpdates >= MAX_HEARTBEAT_UPDATES) stopHeartbeat();
+    });
+  };
+
+  const startHeartbeat = (info: { shardIndex: number; totalShards: number }): void => {
+    if (!progressive || heartbeatUpdates >= MAX_HEARTBEAT_UPDATES) return;
+    stopHeartbeat();
+    runningShard = { index: info.shardIndex, totalShards: info.totalShards, startedAtMs: Date.now() };
+    heartbeatTimer = setInterval(heartbeatTick, HEARTBEAT_INTERVAL_MS);
+    heartbeatTimer.unref?.();
+  };
+
+  /** Publishes provisional per-file inline comments for one completed shard, cap and dedup enforced. */
+  const publishProvisionalInline = async (findings: readonly ValidatedFinding[]): Promise<void> => {
+    const createInline = input.client.createPullRequestReviewComment;
+    if (!progressive || !createInline) return;
+    for (const finding of orderAcceptedFindingsForInline(findings, input.memory)) {
+      if (inlineRegistry.size >= input.maximumInlineComments) return;
+      if (runInlineFingerprints.has(finding.fingerprint)) continue;
+      if (inlineRegistry.has(anchorKeyOf(finding))) continue;
+      const body = renderInlineComment(finding, provisionalInlineMarker(input.backend, finding.fingerprint), true);
+      assertPayloadsContainNoSecrets([body], input.secrets);
+      const created = await createInline(input.pullRequest, {
+        path: finding.location.path,
+        side: finding.location.side,
+        line: finding.location.line,
+        body,
+      });
+      inlineRegistry.set(anchorKeyOf(finding), {
+        commentId: created.id,
+        fingerprint: finding.fingerprint,
+        finding,
+      });
+      runInlineFingerprints.add(finding.fingerprint);
+    }
+  };
+
+  /**
+   * Deletes provisional inline comments abandoned by earlier failed runs (same actor, same
+   * backend, trailing provisional marker). They must not linger as stale provisional reviews and
+   * must never influence history suppression, which only matches final inline markers.
+   */
+  const sweepAbandonedProvisionalInline = async (): Promise<void> => {
+    const listComments = input.client.listPullRequestReviewComments;
+    const deleteInline = input.client.deletePullRequestReviewComment;
+    if (!progressive || !listComments || !deleteInline) return;
+    const pattern = new RegExp(
+      `^<!-- code-review-inline-provisional:${input.backend}:v1:([A-Za-z0-9_-]{43}) -->$`,
+      'u',
+    );
+    for (const comment of await listComments(input.pullRequest)) {
+      if (comment.user?.id !== input.actor.id || comment.in_reply_to_id !== undefined) continue;
+      const match = pattern.exec(comment.body?.trimEnd().split(/\r?\n/u).at(-1) ?? '');
+      if (!match) continue;
+      await deleteInline(input.pullRequest, input.actor, comment.id, match[0]);
+    }
+  };
+
   const executeReview = async (): Promise<ReviewResultV1 | ExecutedReview> => {
     if (!progressive) return input.executeReview();
     const publishProgress = async (progress: ShardProgress): Promise<void> => {
+      stopHeartbeat();
       completedShards = progress.completedShards;
       totalShards = progress.totalShards;
       provisionalFindings.push(...progress.findings);
-      if (!progressiveLease) return;
-      const body = renderProgressComment({
-        assessment: phaseZeroAssessment(),
-        backend: input.backend,
-        model: input.model,
-        headSha: input.pullRequest.headSha,
-        actor: input.actor.login,
-        completedShards,
-        totalShards,
-        provisionalFindings,
-        marker,
-      });
-      assertPayloadsContainNoSecrets([body], input.secrets);
-      const updated = await input.client.upsertManagedComment(
-        input.pullRequest,
-        input.actor,
-        input.markers,
-        body,
-        progressiveLease,
-      );
-      progressiveLease = { id: updated.id, bodyDigest: commentDigest(body), marker };
-      input.registerLeaseListener?.(progressiveLease);
+      await enqueueWrite(async () => {
+        await publishProvisionalInline(progress.findings);
+        await writeProgressiveComment(renderProgressiveBody());
+      }, false);
     };
     input.registerShardHandler?.(publishProgress);
+    input.registerShardStartHandler?.((info) => startHeartbeat(info));
+    // The skip handler must drain any in-flight heartbeat write before returning: the executor
+    // awaits it, so the next shard's lease freshness check never observes the comment mid-edit.
+    input.registerShardSkipHandler?.(async () => {
+      stopHeartbeat();
+      await writeQueue.catch(() => undefined);
+    });
+    await sweepAbandonedProvisionalInline();
     const phaseZero = phaseZeroAssessment();
     const initialBody = renderProgressComment({
       assessment: phaseZero,
@@ -336,8 +514,6 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
   const executed = await executeReview();
   const review = 'review' in executed ? executed.review : executed;
   const executionSummary: ReviewExecutionSummary | undefined = 'review' in executed ? executed.summary : undefined;
-  void totalShards;
-  void completedShards;
   let assessment = redactAssessment(
     assessReview(
       review,
@@ -426,19 +602,67 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
         legacyPattern.test(existing.body.trimEnd().split(/\r?\n/u).at(-1) ?? ''),
     );
   }
+
+  // Merge-pass reconciliation of provisional inline comments: confirmed findings keep their
+  // comment, upgraded in place from the provisional marker to the final inline marker; findings
+  // rejected, deduplicated, or beyond the run-wide cap are deleted. Ownership is verified against
+  // the provisional marker the comment was created with (expected author plus trailing machine
+  // marker); a mismatch fails publication closed.
+  const createInline = input.client.createPullRequestReviewComment;
+  const updateInline = input.client.updatePullRequestReviewComment;
+  const deleteInline = input.client.deletePullRequestReviewComment;
+  if (progressive && createInline && updateInline && deleteInline) {
+    const acceptedFingerprints = new Set(assessment.findings.map((finding) => finding.fingerprint));
+    for (const [anchor, entry] of [...inlineRegistry]) {
+      const confirmed = !suppressLegacyMigration && acceptedFingerprints.has(entry.fingerprint);
+      if (confirmed) {
+        const body = renderInlineComment(entry.finding, inlineMarkerFor(entry.fingerprint), false);
+        assertPayloadsContainNoSecrets([body], input.secrets);
+        await updateInline(
+          input.pullRequest,
+          input.actor,
+          entry.commentId,
+          provisionalInlineMarker(input.backend, entry.fingerprint),
+          body,
+        );
+      } else {
+        await deleteInline(
+          input.pullRequest,
+          input.actor,
+          entry.commentId,
+          provisionalInlineMarker(input.backend, entry.fingerprint),
+        );
+        inlineRegistry.delete(anchor);
+      }
+    }
+  }
+  if (progressive) {
+    stopHeartbeat();
+    await writeQueue;
+    if (queuedWriteError) throw queuedWriteError;
+  }
+
+  // Fingerprints published provisionally during this run are this run's publications, not history:
+  // history suppression must not count them, and the run-wide inline cap must account for them.
+  const registryFingerprints = new Set([...inlineRegistry.values()].map((entry) => entry.fingerprint));
+  const historical = new Set([...published].filter((fingerprint) => !registryFingerprints.has(fingerprint)));
   const inlineOrder = orderAcceptedFindingsForInline(assessment.findings, input.memory);
-  const eligible = suppressLegacyMigration ? [] : inlineOrder.filter((finding) => !published.has(finding.fingerprint));
-  const selected = eligible.slice(0, input.maximumInlineComments);
+  const candidatesForInline = suppressLegacyMigration
+    ? []
+    : inlineOrder.filter(
+        (finding) => !historical.has(finding.fingerprint) && !registryFingerprints.has(finding.fingerprint),
+      );
+  const selected = candidatesForInline.slice(0, Math.max(0, input.maximumInlineComments - inlineRegistry.size));
   const inlineHistorySuppressed = suppressLegacyMigration
     ? assessment.findings.length
-    : assessment.findings.length - eligible.length;
-  const inlineLimitOmitted = eligible.length - selected.length;
+    : assessment.findings.length - candidatesForInline.length - inlineRegistry.size;
+  const inlineLimitOmitted = candidatesForInline.length - selected.length;
   assessment = {
     ...assessment,
     inlineFindings: selected,
     counts: {
       ...assessment.counts,
-      inlineSelected: selected.length,
+      inlineSelected: selected.length + inlineRegistry.size,
       inlineHistorySuppressed,
       inlineLimitOmitted,
       inlineOmitted: inlineHistorySuppressed + inlineLimitOmitted,
@@ -474,7 +698,9 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
           coverage: {
             degraded: executionSummary.degraded,
             notCoveredShards: executionSummary.notCoveredShards ?? 0,
-            totalShards: (executionSummary.rolesCompleted ?? 0) + (executionSummary.notCoveredShards ?? 0),
+            totalShards:
+              executionSummary.totalShards ??
+              (executionSummary.rolesCompleted ?? 0) + (executionSummary.notCoveredShards ?? 0),
             provisionalFindings: executionSummary.validatedCandidateCount,
           },
         }

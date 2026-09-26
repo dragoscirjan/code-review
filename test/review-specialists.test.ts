@@ -3,9 +3,9 @@ import { test } from 'vitest';
 import { packReviewContext, type ContextRuntimeSummary } from '../src/context-planner';
 import type { PullRequestContext } from '../src/github';
 import type { ModelConnection } from '../src/model';
-import type { StructuredBackendRequest } from '../src/review';
-import { executeReviewStrategy, type StructuredBackendRunner } from '../src/review-specialists';
-import { selectReviewStrategy } from '../src/review-strategy';
+import { buildReviewPrompt, type StructuredBackendRequest } from '../src/review';
+import { buildSpecialistPrompt, executeReviewStrategy, type StructuredBackendRunner } from '../src/review-specialists';
+import { selectReviewStrategy, type ReviewStrategyPlan } from '../src/review-strategy';
 import { prepareReviewedDiff } from '../src/unified-diff';
 
 const runtime: ContextRuntimeSummary = {
@@ -509,4 +509,223 @@ test('single-pass remains the default selected execution for a low-risk auto pla
   assert.equal(plan.selected, 'single-pass');
   assert.equal(calls, 1);
   assert.equal(result.summary.rolesCompleted, 0);
+});
+
+test('an auto plan over a single-shard diff executes as one single pass and records the fallback', async () => {
+  const shardedAutoPlan: ReviewStrategyPlan = {
+    version: 3,
+    requested: 'auto',
+    selected: 'sharded',
+    reasons: ['many-files'],
+  };
+  let singleCalls = 0;
+  const result = await executeReviewStrategy(
+    request({
+      plan: shardedAutoPlan,
+      singleRunner: async () => {
+        singleCalls += 1;
+        return { version: 1, outcome: 'clean', findings: [] };
+      },
+      structuredRunner: runnerFrom([], []),
+    }),
+  );
+  assert.equal(singleCalls, 1);
+  assert.equal(result.summary.singleShardFallback, true);
+  assert.equal(result.summary.rolesCompleted, 0);
+  assert.equal(result.summary.arbiterRan, false);
+});
+
+test('explicitly forced sharded plans keep sharded execution for a single shard', async () => {
+  let shardCalls = 0;
+  const result = await executeReviewStrategy(
+    request({
+      structuredRunner: runnerFrom([JSON.stringify(finding('correctness')), arbiterAccepts], []),
+      onProgress: undefined,
+      singleRunner: async () => {
+        shardCalls += 1;
+        return { version: 1, outcome: 'clean', findings: [] };
+      },
+    }),
+  );
+  assert.equal(shardCalls, 0);
+  assert.equal(result.summary.singleShardFallback, undefined);
+  assert.equal(result.summary.arbiterRan, true);
+});
+
+test('valid emission increments survive a malformed shard tail and the shard counts as not covered', async () => {
+  const calls: StructuredBackendRequest<unknown>[] = [];
+  const skipped: Array<{ shardIndex: number; reason: string }> = [];
+  const completed: Array<{ degraded: boolean; findings: number }> = [];
+  const increments = `${JSON.stringify(finding('correctness'))}\nthis tail is not a document`;
+  const result = await executeReviewStrategy(
+    request({
+      structuredRunner: runnerFrom([increments], calls),
+      onShardSkipped: (info) => void skipped.push({ shardIndex: info.shardIndex, reason: info.reason }),
+      onShardCompleted: (progress) =>
+        void completed.push({ degraded: progress.degraded, findings: progress.findings.length }),
+    }),
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(result.summary.degraded, true);
+  assert.equal(result.summary.notCoveredShards, 1);
+  assert.equal(result.summary.rolesCompleted, 1);
+  // The valid increment is published; only the malformed tail is lost.
+  assert.equal(result.review.outcome, 'findings');
+  assert.equal(result.review.findings.length, 1);
+  assert.equal(result.review.findings[0]?.location.path, 'src/value.ts');
+  assert.deepEqual(skipped, [{ shardIndex: 0, reason: 'malformed-output' }]);
+  assert.deepEqual(completed, [{ degraded: true, findings: 1 }]);
+  // Degraded runs skip the merge pass, so the arbiter is never called.
+  assert.equal(result.summary.arbiterRan, false);
+});
+
+test('multi-line incremental emission accumulates findings across valid increments', async () => {
+  const first = finding('correctness');
+  const second = finding('security');
+  second.findings[0]!.severity = 'critical';
+  second.findings[0]!.location.path = 'src/value.ts';
+  const increments = [JSON.stringify(first), JSON.stringify(second)].join('\n');
+  const result = await executeReviewStrategy(
+    request({ structuredRunner: runnerFrom([increments, arbiterAccepts], []) }),
+  );
+  // Both increments are one-dimension documents; the merge pass collapses to the shared anchor.
+  assert.equal(result.summary.rolesCompleted, 1);
+  assert.equal(result.summary.arbiterRan, true);
+  assert.equal(result.review.findings.length, 1);
+  assert.equal(result.review.findings[0]?.category, 'security');
+});
+
+test('shard prompts carry the versioned incremental emission protocol and single-pass prompts do not', () => {
+  const shardPrompt = buildSpecialistPrompt({
+    shard: { index: 0, paths: ['src/value.ts'], text: diff.text },
+    pullRequest,
+    diff,
+    reviewContext: context,
+    priorFindings: [],
+  });
+  assert.match(shardPrompt, /Incremental emission protocol v1/u);
+  assert.match(shardPrompt, /A line that is not a complete valid document is ignored/u);
+  // The prompt states the host-side combined cap so a compliant response can never trip it.
+  assert.match(shardPrompt, /combined findings across all emissions must not exceed 3/u);
+  const singlePrompt = buildReviewPrompt(pullRequest, diff, context, []);
+  assert.doesNotMatch(singlePrompt, /Incremental emission protocol/u);
+});
+
+test('the executor emits bounded progress events across shard lifecycle and the merge pass', async () => {
+  const phases: string[] = [];
+  const started: number[] = [];
+  const result = await executeReviewStrategy(
+    request({
+      structuredRunner: runnerFrom([JSON.stringify(finding('correctness')), arbiterAccepts], []),
+      onProgress: (event) => void phases.push(event.phase),
+      onShardStarted: (info) => void started.push(info.shardIndex),
+    }),
+  );
+  assert.ok(result.summary.arbiterRan);
+  assert.deepEqual(started, [0]);
+  assert.deepEqual(phases, [
+    'shard-queued',
+    'shard-started',
+    'shard-completed',
+    'merge-pass-started',
+    'merge-pass-completed',
+    'review-completed',
+  ]);
+});
+
+test('the shard-skip handler is awaited so in-flight progressive writes drain before the next shard', async () => {
+  // Two shards: the small file clusters first; the oversized single-hunk file lands in the
+  // leftover shard, so the diff splits into exactly two shards.
+  const padLines = Array.from({ length: 700 }, (_, i) => `+pad-${String(i).padStart(3, '0')}-${'x'.repeat(60)}`);
+  const twoFileDiff = prepareReviewedDiff(
+    [
+      'diff --git a/src/one.ts b/src/one.ts',
+      '--- a/src/one.ts',
+      '+++ b/src/one.ts',
+      `@@ -0,0 +1,${padLines.length} @@`,
+      ...padLines,
+      'diff --git a/src/two.ts b/src/two.ts',
+      '--- a/src/two.ts',
+      '+++ b/src/two.ts',
+      '@@ -1 +1 @@',
+      '-safe();',
+      '+unsafe();',
+    ].join('\n'),
+    100_000,
+  );
+  const calls: StructuredBackendRequest<unknown>[] = [];
+  const order: string[] = [];
+  const leftoverFinding = finding('security');
+  leftoverFinding.findings[0]!.location.path = 'src/one.ts';
+  leftoverFinding.findings[0]!.evidence = `pad-000-${'x'.repeat(60)}`;
+  const result = await executeReviewStrategy(
+    request({
+      plan: selectReviewStrategy({ requested: 'specialists', diff: twoFileDiff, analyzerCoverage: 'complete' }),
+      diff: twoFileDiff,
+      structuredRunner: runnerFrom(['not json', JSON.stringify(leftoverFinding), arbiterAccepts], calls),
+      onShardSkipped: async (info) => {
+        // Proves the executor awaits the handler: the drain lands before the next shard starts.
+        await Promise.resolve();
+        order.push(`skipped-${info.shardIndex}`);
+      },
+      onProgress: (event) => {
+        if (event.phase === 'shard-started') order.push(`started-${event.shardIndex}`);
+      },
+    }),
+  );
+  assert.equal(calls.length, 2);
+  assert.equal(result.summary.degraded, true);
+  assert.equal(result.summary.notCoveredShards, 1);
+  assert.equal(result.summary.totalShards, 2);
+  assert.deepEqual(order, ['started-0', 'skipped-0', 'started-1']);
+});
+
+test('a partial shard stays not covered when a later shard hits the aggregate deadline', async () => {
+  // Two shards: the small file clusters first; the oversized files collapse into one leftover.
+  const padLines = Array.from({ length: 700 }, (_, i) => `+pad-${String(i).padStart(3, '0')}-${'x'.repeat(60)}`);
+  const threeFileDiff = prepareReviewedDiff(
+    [
+      'diff --git a/src/one.ts b/src/one.ts',
+      '--- a/src/one.ts',
+      '+++ b/src/one.ts',
+      `@@ -0,0 +1,${padLines.length} @@`,
+      ...padLines,
+      'diff --git a/src/two.ts b/src/two.ts',
+      '--- a/src/two.ts',
+      '+++ b/src/two.ts',
+      `@@ -0,0 +1,${padLines.length} @@`,
+      ...padLines,
+      'diff --git a/src/three.ts b/src/three.ts',
+      '--- a/src/three.ts',
+      '+++ b/src/three.ts',
+      '@@ -1 +1 @@',
+      '-safe();',
+      '+unsafe();',
+    ].join('\n'),
+    300_000,
+  );
+  const smallFileFinding = finding('correctness');
+  smallFileFinding.findings[0]!.location.path = 'src/three.ts';
+  // Shard 0 emits a partial (valid increment + malformed tail); shard 1 then hits the deadline.
+  const partialOutput = `${JSON.stringify(smallFileFinding)}\nmalformed tail`;
+  const times = [0, 0, 0, 0, 61_000];
+  let timeIndex = 0;
+  const result = await executeReviewStrategy(
+    request({
+      plan: selectReviewStrategy({ requested: 'specialists', diff: threeFileDiff, analyzerCoverage: 'complete' }),
+      diff: threeFileDiff,
+      structuredRunner: runnerFrom([partialOutput, 'unused', 'unused'], []),
+      now: () => times[Math.min(timeIndex++, times.length - 1)] as number,
+    }),
+  );
+  assert.equal(result.summary.rolesCompleted, 1);
+  // Both the partial shard and the deadline-skipped shard are reported not covered, and the
+  // overwrite formula can no longer erase the partial shard from the count.
+  assert.equal(result.summary.notCoveredShards, 2);
+  assert.equal(result.summary.totalShards, 2);
+  assert.equal(result.summary.degraded, true);
+  // The partial shard's valid increment is still published.
+  assert.equal(result.review.outcome, 'findings');
+  assert.equal(result.review.findings.length, 1);
+  assert.equal(result.review.findings[0]?.location.path, 'src/three.ts');
 });

@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { test } from 'vitest';
+import { test, vi } from 'vitest';
 import type { AnalyzerSummary } from '../src/analyzer';
 import type { AnalyzerFindingCandidate } from '../src/analyzer-contract';
 import { packReviewContext, type ContextRuntimeSummary } from '../src/context-planner';
+import { validateReviewCandidates } from '../src/finding-validation';
 import type {
   AuthenticatedActor,
   GitHubComment,
@@ -11,12 +12,13 @@ import type {
   ManagedCommentLease,
   PullRequestContext,
 } from '../src/github';
+import { commentDigest } from '../src/github';
 import type { ModelConnection } from '../src/model';
 import { ReviewExecutionError, type StructuredBackendRequest } from '../src/review';
 import { parseReviewResult, type ReviewFinding, type ReviewResultV1 } from '../src/review-contract';
 import { parseReviewState } from '../src/review-lifecycle';
 import { parseReviewMemory } from '../src/review-memory';
-import { executeAndPublishReview } from '../src/review-publication';
+import { executeAndPublishReview, HEARTBEAT_INTERVAL_MS, MAX_HEARTBEAT_UPDATES } from '../src/review-publication';
 import {
   executeReviewStrategy,
   type ExecutedReview,
@@ -545,7 +547,7 @@ test('applies exact-base memory only after validation and publishes safe audit m
       async () => ({
         review,
         summary: {
-          plan: { version: 2, requested: 'specialists', selected: 'sharded', reasons: ['forced-sharded'] },
+          plan: { version: 3, requested: 'specialists', selected: 'sharded', reasons: ['forced-sharded'] },
           rolesAttempted: 2,
           rolesCompleted: 2,
           arbiterRan: true,
@@ -1234,4 +1236,471 @@ test('state freshness failure prevents backend and all publication', async () =>
   );
   assert.equal(backendCalls, 0);
   assert.deepEqual(spy.events, []);
+});
+
+function inlineSpy(options: { tamper?: boolean } = {}) {
+  const base = publicationSpy();
+  const createdInline: Array<{ id: number; path: string; side: string; line: number; body: string }> = [];
+  const updatedInline: Array<{ id: number; body: string }> = [];
+  const deletedInline: number[] = [];
+  const bodies: string[] = [];
+  const leases: Array<ManagedCommentLease | undefined> = [];
+  const stored = new Map<number, { body: string; path: string; side: string; line: number }>();
+  const assertOwnership = async (id: number, expectedMarker: string): Promise<void> => {
+    const entry = stored.get(id);
+    if (!entry) throw new Error(`no stored comment ${id}`);
+    if (entry.body.trimEnd().split(/\r?\n/).at(-1) !== expectedMarker) {
+      throw new Error('Inline review comment ownership check failed');
+    }
+  };
+  const client = {
+    ...base.client,
+    async listPullRequestReviewComments() {
+      return [...stored.entries()].map(([id, entry]) => ({
+        id,
+        body: entry.body,
+        html_url: 'url',
+        user: actor,
+        path: entry.path,
+        side: entry.side as 'LEFT' | 'RIGHT',
+        line: entry.line,
+      }));
+    },
+    async createPullRequestReviewComment(
+      _context: PullRequestContext,
+      comment: { path: string; side: 'LEFT' | 'RIGHT'; line: number; body: string },
+    ) {
+      const id = 300 + createdInline.length;
+      const body = options.tamper ? `${comment.body}\n<!-- tampered -->` : comment.body;
+      stored.set(id, { body, path: comment.path, side: comment.side, line: comment.line });
+      createdInline.push({ id, path: comment.path, side: comment.side, line: comment.line, body: comment.body });
+      return { id, body: comment.body, html_url: 'url', user: actor };
+    },
+    async updatePullRequestReviewComment(
+      _context: PullRequestContext,
+      _actorRef: AuthenticatedActor,
+      id: number,
+      expectedMarker: string,
+      body: string,
+    ) {
+      await assertOwnership(id, expectedMarker);
+      const entry = stored.get(id)!;
+      stored.set(id, { ...entry, body });
+      updatedInline.push({ id, body });
+      return { id, body, html_url: 'url', user: actor };
+    },
+    async deletePullRequestReviewComment(
+      _context: PullRequestContext,
+      _actorRef: AuthenticatedActor,
+      id: number,
+      expectedMarker: string,
+    ): Promise<void> {
+      await assertOwnership(id, expectedMarker);
+      stored.delete(id);
+      deletedInline.push(id);
+    },
+    async upsertManagedComment(
+      _context: PullRequestContext,
+      _actorRef: AuthenticatedActor,
+      _markers: string | readonly string[],
+      body: string,
+      lease?: ManagedCommentLease,
+    ) {
+      leases.push(lease);
+      bodies.push(body);
+      return base.client.upsertManagedComment(_context, _actorRef, _markers, body);
+    },
+  };
+  return { ...base, client, createdInline, updatedInline, deletedInline, bodies, leases, stored };
+}
+
+function forcedShardedSummary() {
+  return {
+    plan: selectReviewStrategy({ requested: 'specialists', diff, analyzerCoverage: 'complete' }),
+    rolesAttempted: 1,
+    rolesCompleted: 1,
+    arbiterRan: false,
+    rawCandidateCount: 1,
+    validatedCandidateCount: 1,
+    preArbiterOmittedCount: 0,
+    arbiterRejectedCount: 0,
+    reservedTokens: 1,
+  } satisfies ExecutedReview['summary'];
+}
+
+type ShardHandler = NonNullable<
+  Parameters<NonNullable<Parameters<typeof executeAndPublishReview>[0]['registerShardHandler']>>[0]
+>;
+
+function provisionalShardFindings(findings: ReviewFinding[]) {
+  return validateReviewCandidates(
+    { version: 1, outcome: 'findings', findings: findings as [ReviewFinding, ...ReviewFinding[]] },
+    diff.parsed!,
+    0,
+    [],
+  ).findings;
+}
+
+test('provisional per-file comments publish per shard, before the merge pass, and reconcile as confirmed', async () => {
+  const spy = inlineSpy();
+  let shardHandler: ShardHandler | undefined;
+  const shardFindings = provisionalShardFindings([finding()]);
+  const publication = await executeAndPublishReview(
+    input(
+      async () => {
+        await shardHandler?.({
+          completedShards: 1,
+          totalShards: 2,
+          shardIndex: 0,
+          shardPaths: ['src/file.ts'],
+          findings: shardFindings,
+          degraded: false,
+        });
+        return {
+          review: { version: 1, outcome: 'findings', findings: [finding()] } as ReviewResultV1,
+          summary: forcedShardedSummary(),
+        };
+      },
+      spy,
+      {
+        progressive: { enabled: true },
+        maximumInlineComments: 2,
+        registerShardHandler: (handler) => {
+          shardHandler = handler;
+        },
+      },
+    ),
+  );
+  // The inline comment was created during shard progress, marked provisional, then upgraded.
+  assert.equal(spy.createdInline.length, 1);
+  assert.match(
+    spy.createdInline[0].body,
+    /Provisional — published while the review is still running; pending merge-pass confirmation/u,
+  );
+  assert.equal(spy.createdInline[0].path, 'src/file.ts');
+  assert.equal(spy.createdInline[0].side, 'RIGHT');
+  assert.equal(spy.createdInline[0].line, 1);
+  assert.equal(spy.updatedInline.length, 1);
+  assert.ok(!spy.updatedInline[0].body.includes('Provisional'));
+  assert.match(spy.updatedInline[0].body, /Unsafe behavior\./u);
+  // Confirmation rewrites the body with the final inline marker, so the comment is real history.
+  assert.ok(spy.updatedInline[0].body.includes('<!-- code-review-inline:opencode:v2:'));
+  assert.ok(!spy.updatedInline[0].body.includes('code-review-inline-provisional'));
+  assert.equal(spy.deletedInline.length, 0);
+  // The confirmed provisional finding is not duplicated in the final inline batch.
+  assert.deepEqual(spy.inlineComments(), []);
+  assert.equal(publication.assessment.counts.inlineSelected, 1);
+});
+
+test('merge-pass rejection deletes the provisional inline comment through ownership checks', async () => {
+  const spy = inlineSpy();
+  let shardHandler: ShardHandler | undefined;
+  const shardFindings = provisionalShardFindings([finding()]);
+  const publication = await executeAndPublishReview(
+    input(
+      async () => {
+        await shardHandler?.({
+          completedShards: 1,
+          totalShards: 2,
+          shardIndex: 0,
+          shardPaths: ['src/file.ts'],
+          findings: shardFindings,
+          degraded: false,
+        });
+        // The merge pass rejected the provisional finding; the final review is clean.
+        return {
+          review: { version: 1, outcome: 'clean', findings: [] } as ReviewResultV1,
+          summary: forcedShardedSummary(),
+        };
+      },
+      spy,
+      {
+        progressive: { enabled: true },
+        maximumInlineComments: 2,
+        registerShardHandler: (handler) => {
+          shardHandler = handler;
+        },
+      },
+    ),
+  );
+  assert.equal(spy.createdInline.length, 1);
+  assert.equal(spy.updatedInline.length, 0);
+  assert.deepEqual(spy.deletedInline, [spy.createdInline[0].id]);
+  assert.equal(publication.assessment.counts.inlineSelected, 0);
+});
+
+test('caps and dedup are enforced across shards, not per shard', async () => {
+  const spy = inlineSpy();
+  let shardHandler: ShardHandler | undefined;
+  const first = provisionalShardFindings([finding()]);
+  const publication = await executeAndPublishReview(
+    input(
+      async () => {
+        await shardHandler?.({
+          completedShards: 1,
+          totalShards: 3,
+          shardIndex: 0,
+          shardPaths: ['src/file.ts'],
+          findings: first,
+          degraded: false,
+        });
+        // The same finding reported again by another shard is deduplicated, not re-created.
+        await shardHandler?.({
+          completedShards: 2,
+          totalShards: 3,
+          shardIndex: 1,
+          shardPaths: ['src/file.ts'],
+          findings: first,
+          degraded: false,
+        });
+        return {
+          review: { version: 1, outcome: 'findings', findings: [finding()] } as ReviewResultV1,
+          summary: forcedShardedSummary(),
+        };
+      },
+      spy,
+      {
+        progressive: { enabled: true },
+        maximumInlineComments: 1,
+        registerShardHandler: (handler) => {
+          shardHandler = handler;
+        },
+      },
+    ),
+  );
+  assert.equal(spy.createdInline.length, 1);
+  assert.equal(spy.updatedInline.length, 1);
+  assert.equal(publication.assessment.counts.inlineSelected, 1);
+  assert.equal(publication.assessment.counts.inlineHistorySuppressed, 0);
+});
+
+test('a contested provisional comment fails publication closed', async () => {
+  const spy = inlineSpy({ tamper: true });
+  let shardHandler: ShardHandler | undefined;
+  const shardFindings = provisionalShardFindings([finding()]);
+  await assert.rejects(
+    executeAndPublishReview(
+      input(
+        async () => {
+          await shardHandler?.({
+            completedShards: 1,
+            totalShards: 2,
+            shardIndex: 0,
+            shardPaths: ['src/file.ts'],
+            findings: shardFindings,
+            degraded: false,
+          });
+          return {
+            review: { version: 1, outcome: 'findings', findings: [finding()] } as ReviewResultV1,
+            summary: forcedShardedSummary(),
+          };
+        },
+        spy,
+        {
+          progressive: { enabled: true },
+          maximumInlineComments: 2,
+          registerShardHandler: (handler) => {
+            shardHandler = handler;
+          },
+        },
+      ),
+    ),
+    /ownership check failed/u,
+  );
+});
+
+test('secret-bearing provisional content can never reach an inline comment', async () => {
+  const spy = inlineSpy();
+  let shardHandler: ShardHandler | undefined;
+  const contaminated = provisionalShardFindings([finding({ explanation: 'provider-secret' })]);
+  await assert.rejects(
+    executeAndPublishReview(
+      input(
+        async () => {
+          await shardHandler?.({
+            completedShards: 1,
+            totalShards: 2,
+            shardIndex: 0,
+            shardPaths: ['src/file.ts'],
+            findings: contaminated,
+            degraded: false,
+          });
+          return {
+            review: { version: 1, outcome: 'clean', findings: [] } as ReviewResultV1,
+            summary: forcedShardedSummary(),
+          };
+        },
+        spy,
+        {
+          progressive: { enabled: true },
+          maximumInlineComments: 2,
+          registerShardHandler: (handler) => {
+            shardHandler = handler;
+          },
+        },
+      ),
+    ),
+    /contains forbidden secret data/u,
+  );
+  assert.equal(spy.createdInline.length, 0);
+});
+
+test('the managed comment receives a bounded mid-run heartbeat with elapsed time over the lease chain', async () => {
+  vi.useFakeTimers({ now: 0 });
+  const spy = inlineSpy();
+  let startHandler: ((info: { shardIndex: number; totalShards: number }) => void) | undefined;
+  let releaseGate: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    releaseGate = resolve;
+  });
+  const publicationPromise = executeAndPublishReview(
+    input(
+      async () => {
+        startHandler?.({ shardIndex: 0, totalShards: 2 });
+        await gate;
+        return {
+          review: { version: 1, outcome: 'findings', findings: [finding()] } as ReviewResultV1,
+          summary: forcedShardedSummary(),
+        };
+      },
+      spy,
+      {
+        progressive: { enabled: true },
+        maximumInlineComments: 2,
+        registerShardStartHandler: (handler) => {
+          startHandler = handler;
+        },
+      },
+    ),
+  );
+  await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS * 2 + 1);
+  // Phase-0 write plus two heartbeat ticks, serialized in order.
+  assert.equal(spy.bodies.length, 3);
+  assert.match(spy.bodies[1], /shard 1 of 2 running, 60s elapsed/u);
+  assert.match(spy.bodies[2], /shard 1 of 2 running, 120s elapsed/u);
+  // Every heartbeat write chains through the lease of the body written just before it.
+  assert.equal(spy.leases[0], undefined);
+  assert.equal(spy.leases[1]?.bodyDigest, commentDigest(spy.bodies[0]));
+  assert.equal(spy.leases[2]?.bodyDigest, commentDigest(spy.bodies[1]));
+  releaseGate();
+  const publication = await publicationPromise;
+  await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS * 3);
+  // The heartbeat stopped: exactly one final authoritative write after the ticks.
+  assert.equal(spy.bodies.length, 4);
+  assert.ok(!spy.publishedBody().includes('running,'));
+  assert.equal(publication.assessment.counts.inlineSelected, 1);
+  vi.useRealTimers();
+});
+
+test('heartbeat updates are bounded by a hard update cap', async () => {
+  vi.useFakeTimers({ now: 0 });
+  const spy = inlineSpy();
+  let startHandler: ((info: { shardIndex: number; totalShards: number }) => void) | undefined;
+  let releaseGate: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    releaseGate = resolve;
+  });
+  const publicationPromise = executeAndPublishReview(
+    input(
+      async () => {
+        startHandler?.({ shardIndex: 0, totalShards: 2 });
+        await gate;
+        return {
+          review: { version: 1, outcome: 'clean', findings: [] } as ReviewResultV1,
+          summary: forcedShardedSummary(),
+        };
+      },
+      spy,
+      {
+        progressive: { enabled: true },
+        maximumInlineComments: 0,
+        registerShardStartHandler: (handler) => {
+          startHandler = handler;
+        },
+      },
+    ),
+  );
+  await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS * (MAX_HEARTBEAT_UPDATES + 5));
+  assert.equal(spy.bodies.length, MAX_HEARTBEAT_UPDATES + 1);
+  releaseGate();
+  await publicationPromise;
+  assert.equal(spy.bodies.length, MAX_HEARTBEAT_UPDATES + 2);
+  vi.useRealTimers();
+});
+
+test('provisional comments abandoned by a failed run are swept and never suppress history', async () => {
+  const spy = inlineSpy();
+  // A previous failed run left a provisional comment behind for the same finding.
+  const staleMarker = `<!-- code-review-inline-provisional:opencode:v1:${'A'.repeat(43)} -->`;
+  spy.stored.set(900, {
+    body: `stale provisional review\n\n${staleMarker}`,
+    path: 'src/file.ts',
+    side: 'RIGHT',
+    line: 1,
+  });
+  let shardHandler: ShardHandler | undefined;
+  const shardFindings = provisionalShardFindings([finding()]);
+  const publication = await executeAndPublishReview(
+    input(
+      async () => {
+        await shardHandler?.({
+          completedShards: 1,
+          totalShards: 2,
+          shardIndex: 0,
+          shardPaths: ['src/file.ts'],
+          findings: shardFindings,
+          degraded: false,
+        });
+        return {
+          review: { version: 1, outcome: 'findings', findings: [finding()] } as ReviewResultV1,
+          summary: forcedShardedSummary(),
+        };
+      },
+      spy,
+      {
+        progressive: { enabled: true },
+        maximumInlineComments: 2,
+        registerShardHandler: (handler) => {
+          shardHandler = handler;
+        },
+      },
+    ),
+  );
+  // The stale provisional comment is swept at run start, before anything is published.
+  assert.deepEqual(spy.deletedInline, [900]);
+  // The stale provisional marker never suppressed the finding: it is published fresh.
+  assert.equal(spy.createdInline.length, 1);
+  assert.equal(spy.updatedInline.length, 1);
+  assert.equal(publication.assessment.counts.inlineSelected, 1);
+  assert.equal(publication.assessment.counts.inlineHistorySuppressed, 0);
+});
+
+test('degraded coverage uses the actual shard total, not completed plus not-covered', async () => {
+  const spy = publicationSpy();
+  const summary = {
+    plan: selectReviewStrategy({ requested: 'specialists', diff, analyzerCoverage: 'complete' }),
+    rolesAttempted: 2,
+    rolesCompleted: 2,
+    arbiterRan: false,
+    rawCandidateCount: 1,
+    validatedCandidateCount: 1,
+    preArbiterOmittedCount: 0,
+    arbiterRejectedCount: 0,
+    reservedTokens: 1,
+    totalShards: 3,
+    degraded: true,
+    notCoveredShards: 2,
+  } satisfies ExecutedReview['summary'];
+  const publication = await executeAndPublishReview(
+    input(
+      async () => ({
+        review: { version: 1, outcome: 'findings', findings: [finding()] } as ReviewResultV1,
+        summary,
+      }),
+      spy,
+    ),
+  );
+  // Completed (2) plus not covered (2) would render 2 of 4; the actual plan has 3 shards.
+  assert.match(spy.publishedBody(), /2 of 3 diff shards were not reviewed/u);
+  assert.ok(publication.executionSummary);
 });

@@ -104,10 +104,13 @@ function assertCommentSize(comment: string, label: string): string {
  * Per-file inline comment in the reference shape: a category/severity badge line, visible
  * explanation and fix, and the high-volume evidence plus the follow-up prompt collapsed.
  */
-export function renderInlineComment(finding: ValidatedFinding, marker: string): string {
+export function renderInlineComment(finding: ValidatedFinding, marker: string, provisional = false): string {
+  const provisionalNote = provisional
+    ? '> ⚠️ Provisional — published while the review is still running; pending merge-pass confirmation.\n\n'
+    : '';
   const comment = `${findingBadgeLine(finding)}
 
-${renderFindingActionable(finding, true)}
+${provisionalNote}${renderFindingActionable(finding, true)}
 
 ${renderFindingEvidence(finding)}
 
@@ -129,7 +132,14 @@ function renderCollapsibleFinding(finding: ValidatedFinding, index?: number): st
 }
 
 /** Greeting and running status shown in the managed summary until the review finishes. */
-function progressStatus(completedShards: number, totalShards: number): string {
+function progressStatus(
+  completedShards: number,
+  totalShards: number,
+  runningShard?: { index: number; totalShards: number; elapsedSeconds: number },
+): string {
+  if (runningShard) {
+    return `- Status: 👀 Review in progress — shard ${runningShard.index + 1} of ${runningShard.totalShards} running, ${runningShard.elapsedSeconds}s elapsed`;
+  }
   if (completedShards === 0) {
     return `- Status: 👋 Hola! We're doing code review, yo! Have a bit of patience!`;
   }
@@ -151,6 +161,8 @@ export function renderProgressComment(input: {
   completedShards: number;
   totalShards: number;
   provisionalFindings: readonly ValidatedFinding[];
+  /** Present while one shard is executing; heartbeat updates carry live elapsed time. */
+  runningShard?: { index: number; totalShards: number; elapsedSeconds: number };
   marker: string;
 }): string {
   const deterministic = input.assessment.findings;
@@ -181,7 +193,7 @@ export function renderProgressComment(input: {
 
 - Head: \`${input.headSha.slice(0, 12)}\`
 - Published through: \`@${input.actor}\`
-${progressStatus(input.completedShards, input.totalShards)}${counts.received > 0 ? `\n- Accepted deterministic findings: ${counts.accepted}` : ''}
+${progressStatus(input.completedShards, input.totalShards, input.runningShard)}${counts.received > 0 ? `\n- Accepted deterministic findings: ${counts.accepted}` : ''}
 
 ${findings}${omitted}
 
@@ -253,7 +265,11 @@ export function renderComment(input: {
     ? `
 - Requested review strategy: ${input.executionSummary.plan.requested}
 - Selected review strategy: ${input.executionSummary.plan.selected}
-- Strategy reasons: ${input.executionSummary.plan.reasons.join(', ')}
+- Strategy reasons: ${input.executionSummary.plan.reasons.join(', ')}${
+        input.executionSummary.singleShardFallback
+          ? '\n- Execution note: the selected plan yielded a single diff shard, so the review executed as one single pass.'
+          : ''
+      }
 - Review passes completed: ${input.executionSummary.rolesCompleted}
 - Raw specialist candidates: ${input.executionSummary.rawCandidateCount}
 - Candidates validated for arbitration: ${input.executionSummary.validatedCandidateCount}

@@ -426,9 +426,28 @@ test('recorded specialist and auto execution are production-replayed, determinis
   assert.equal(renderSpecialistEvaluationMarkdown(first), renderSpecialistEvaluationMarkdown(second));
   assert.equal(first.specialists.metrics.recall.value, baseline.metrics.recall.value);
   assert.equal(first.auto.metrics.precision.value, baseline.metrics.precision.value);
+  // The single-shard selection guard downgrades every single-shard auto plan — including the
+  // formerly sharded sensitive-surface and partial-analyzer cases — to single-pass execution.
   assert.deepEqual(
     first.autoCases.filter((item) => item.selected === 'sharded').map((item) => item.caseId),
-    ['analyzer-duplicate-json-key', 'left-side-removed-validation', 'security-inverted-auth-guard'],
+    [],
+  );
+  assert.deepEqual(
+    first.autoCases
+      .filter((item) => item.selected === 'single-pass')
+      .map((item) => item.caseId)
+      .sort(),
+    [
+      'analyzer-duplicate-json-key',
+      'clean-behavior-preserving-refactor',
+      'correctness-wrong-arithmetic',
+      'html-like-tsx-clean',
+      'left-side-removed-validation',
+      'prompt-injection-real-bug',
+      'regression-removed-default',
+      'security-inverted-auth-guard',
+      'testing-new-parser-branch',
+    ],
   );
   assert.equal(first.specialistCases.find((item) => item.caseId === 'prompt-injection-real-bug')?.arbiterRejected, 1);
 

@@ -9,8 +9,10 @@ import {
 import type { PullRequestDiff } from './github';
 import type { FindingCategory } from './review-contract';
 import type { ReviewStateFinding } from './review-lifecycle';
+import { splitDiffShards } from './review-shards';
+import type { PreparedReviewDiff } from './unified-diff';
 
-export const REVIEW_STRATEGY_VERSION = 2 as const;
+export const REVIEW_STRATEGY_VERSION = 3 as const;
 export const REVIEW_SELECTOR_VERSION = 2 as const;
 export const ROLE_CONTEXT_PROJECTION_VERSION = 1 as const;
 /** Historical role-set version; kept for state-compat digests. Roles no longer run as passes. */
@@ -42,7 +44,9 @@ export type ReviewStrategyReason =
   | 'large-model-diff'
   | 'partial-analyzer-coverage'
   | 'sensitive-surface'
-  | 'low-risk';
+  | 'low-risk'
+  /** The auto plan was escalated to sharded, but the deterministic shard split yields one shard. */
+  | 'single-shard-plan';
 
 export interface ReviewStrategyPlan {
   version: typeof REVIEW_STRATEGY_VERSION;
@@ -161,6 +165,26 @@ function sensitivePath(path: string): boolean {
     .some((token) => SENSITIVE_PATH_SEGMENTS.has(token) || token === 'interface');
 }
 
+/**
+ * Deterministic shard-plan size for the exact diff the executor would split. Selection and
+ * execution use the same split function and caps, so a sharded selection can never observe a
+ * different shard count than the executor recomputes from the same full diff.
+ */
+function plannedShardCount(diff: PullRequestDiff): number {
+  const parsed = diff.completeParsed ?? diff.parsed;
+  if (!parsed) throw new Error('Review strategy selection requires an authoritative parsed diff');
+  const prepared: PreparedReviewDiff = {
+    text: diff.text,
+    originalBytes: diff.originalBytes,
+    truncated: diff.truncated,
+    totalFiles: diff.totalFiles ?? 0,
+    parsed,
+    completeParsed: parsed,
+  };
+  const { shards, leftoverShard } = splitDiffShards(prepared);
+  return shards.length + (leftoverShard ? 1 : 0);
+}
+
 export function selectReviewStrategy(input: {
   requested: RequestedReviewStrategy;
   diff: PullRequestDiff;
@@ -209,9 +233,25 @@ export function selectReviewStrategy(input: {
     reasons.add('sensitive-surface');
   }
   const ordered = reasonOrder.filter((reason) => reasons.has(reason));
-  return ordered.length === 0
-    ? { version: REVIEW_STRATEGY_VERSION, requested: input.requested, selected: 'single-pass', reasons: ['low-risk'] }
-    : { version: REVIEW_STRATEGY_VERSION, requested: input.requested, selected: 'sharded', reasons: ordered };
+  if (ordered.length === 0) {
+    return {
+      version: REVIEW_STRATEGY_VERSION,
+      requested: input.requested,
+      selected: 'single-pass',
+      reasons: ['low-risk'],
+    };
+  }
+  // Degenerate single-shard guard: a sharded plan over one shard only adds shard overhead and
+  // turns one malformed response into a fully degraded run, so it executes as a single pass.
+  if (plannedShardCount(input.diff) <= 1) {
+    return {
+      version: REVIEW_STRATEGY_VERSION,
+      requested: input.requested,
+      selected: 'single-pass',
+      reasons: [...ordered, 'single-shard-plan'],
+    };
+  }
+  return { version: REVIEW_STRATEGY_VERSION, requested: input.requested, selected: 'sharded', reasons: ordered };
 }
 
 function runtimeFromBundle(bundle: ReviewContextBundle): ContextRuntimeSummary {

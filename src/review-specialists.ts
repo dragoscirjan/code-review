@@ -18,8 +18,16 @@ import {
   type ReviewRequest,
   type StructuredBackendRequest,
 } from './review';
-import { parseReviewResult, ReviewContractError, type ReviewResultV1 } from './review-contract';
+import {
+  MAX_SHARD_EMISSION_LINES,
+  ReviewContractError,
+  parseShardReviewOutput,
+  SHARD_EMISSION_PROTOCOL_VERSION,
+  type ParsedShardReviewOutput,
+  type ReviewResultV1,
+} from './review-contract';
 import type { ReviewStateFinding } from './review-lifecycle';
+import type { ReviewProgressEvent } from './review-progress';
 import { splitDiffShards, type DiffShard } from './review-shards';
 import {
   MAX_ARBITER_CANDIDATES,
@@ -39,6 +47,19 @@ import {
 import { parseArbiterDecision, SpecialistContractError } from './specialist-contract';
 import type { PreparedReviewDiff } from './unified-diff';
 
+/**
+ * Fixed versioned addendum appended only to sharded prompts: bounded incremental emission so a
+ * malformed tail degrades without discarding already-emitted findings. The combined finding cap
+ * matches the host-side per-shard limit, so a protocol-compliant response can never trip it.
+ */
+export const SHARD_EMISSION_PROTOCOL = `Incremental emission protocol v${SHARD_EMISSION_PROTOCOL_VERSION}:
+- Instead of one final document, you may emit each file's result as soon as you finish reviewing it.
+- Each emission is one complete JSON document with exactly the schema above, compact, on its own line, with no other text.
+- Emit at most one document per line and at most ${MAX_SHARD_EMISSION_LINES} documents.
+- The combined findings across all emissions must not exceed ${MAX_FINDINGS_PER_SHARD}.
+- A line that is not a complete valid document is ignored; every later valid line still applies.
+- Never repeat a finding you already emitted.`;
+
 export interface ReviewExecutionSummary {
   plan: ReviewStrategyPlan;
   /** Shards (or single-pass runs) attempted, including shards that failed validation. */
@@ -54,6 +75,10 @@ export interface ReviewExecutionSummary {
   degraded?: boolean;
   /** Number of queued shards that were never executed because the deadline expired. */
   notCoveredShards?: number;
+  /** Actual number of shards in the executed plan; present for every sharded run. */
+  totalShards?: number;
+  /** True when a sharded plan was downgraded to single-pass execution because it yielded one shard. */
+  singleShardFallback?: true;
 }
 
 export interface ExecutedReview {
@@ -98,6 +123,16 @@ export interface ExecuteReviewStrategyInput {
     findings: readonly ValidatedFinding[];
     degraded: boolean;
   }) => Promise<void> | void;
+  /** Invoked just before a shard's backend call; fire-and-forget (heartbeat scheduling). */
+  onShardStarted?: (info: { shardIndex: number; totalShards: number }) => void;
+  /** Invoked when a shard is reported not covered because of malformed output or the deadline. */
+  onShardSkipped?: (info: {
+    shardIndex: number;
+    totalShards: number;
+    reason: 'malformed-output' | 'aggregate-deadline';
+  }) => Promise<void> | void;
+  /** Receives bounded run-log events across the execution lifecycle (host-side only). */
+  onProgress?: (event: ReviewProgressEvent) => void;
 }
 
 export interface ShardProgress {
@@ -123,12 +158,12 @@ export function buildSpecialistPrompt(input: {
   reviewContext: ReviewContextBundle;
   priorFindings: readonly ReviewStateFinding[];
 }): string {
-  return buildReviewPrompt(
+  return `${buildReviewPrompt(
     input.pullRequest,
     { ...input.diff, text: input.shard.text, parsed: undefined, completeParsed: undefined },
     projectReviewContextForShard(input.reviewContext),
     priorFindingsForShard(input.priorFindings),
-  );
+  )}\n\n${SHARD_EMISSION_PROTOCOL}`;
 }
 
 function snapshotDigest(pullRequest: PullRequestContext, diff: PullRequestDiff): string {
@@ -390,9 +425,10 @@ export function noChangeExecutedReview(plan: ReviewStrategyPlan): ExecutedReview
 export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): Promise<ExecutedReview> {
   if (!input.diff.parsed) throw new Error('Review execution requires the validated model-visible diff');
   const now = input.now ?? performance.now.bind(performance);
-  if (input.plan.selected === 'single-pass') {
+  const runSinglePass = async (): Promise<ExecutedReview> => {
     const deadline = now() + input.timeoutMs;
     await assertFreshWithinDeadline(input.assertFresh, deadline, now, BACKEND_CLEANUP_RESERVE_MS);
+    input.onProgress?.({ phase: 'single-pass-started' });
     const review = await (input.singleRunner ?? runReview)({
       backend: input.backend,
       containerEngine: input.containerEngine,
@@ -411,8 +447,11 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
     });
     remainingTime(deadline, now);
     await assertFreshWithinDeadline(input.assertFresh, deadline, now);
+    input.onProgress?.({ phase: 'single-pass-completed' });
+    input.onProgress?.({ phase: 'review-completed' });
     return { review, summary: emptySummary(input.plan) };
-  }
+  };
+  if (input.plan.selected === 'single-pass') return runSinglePass();
 
   const prepared: PreparedReviewDiff = {
     text: input.diff.text,
@@ -438,6 +477,14 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
       ],
       text: prepared.text,
     });
+  }
+  // Degenerate single-shard guard (defense in depth for the auto plan over an incremental diff
+  // subset): one shard only adds shard overhead and turns a single malformed response into a
+  // fully degraded run, so it executes as one single pass instead. Explicitly forced sharded
+  // plans keep their sharded execution and merge pass.
+  if (shards.length <= 1 && input.plan.requested === 'auto') {
+    const executed = await runSinglePass();
+    return { review: executed.review, summary: { ...executed.summary, singleShardFallback: true } };
   }
 
   const prompts = shards.map((shard) =>
@@ -473,6 +520,7 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
 
   for (let index = 0; index < shards.length; index += 1) {
     const shard = shards[index] as DiffShard;
+    input.onProgress?.({ phase: 'shard-queued', shardIndex: shard.index, totalShards: shards.length });
     // Deadline-aware degradation: an expired aggregate deadline stops the loop instead of failing
     // the run; completed shards stay publishable as explicitly provisional partial coverage.
     // Freshness (staleness) failures are not deadline expiry and still abort the review.
@@ -483,13 +531,26 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
     } catch (error) {
       if (!isAggregateDeadlineError(error)) throw error;
       degraded = true;
-      notCoveredShards = shards.length - shardsCompleted;
+      notCoveredShards += shards.length - index;
+      await input.onShardSkipped?.({
+        shardIndex: shard.index,
+        totalShards: shards.length,
+        reason: 'aggregate-deadline',
+      });
+      input.onProgress?.({
+        phase: 'shard-skipped',
+        shardIndex: shard.index,
+        totalShards: shards.length,
+        degraded: true,
+      });
       break;
     }
     shardsAttempted += 1;
-    let review: ReviewResultV1;
+    input.onShardStarted?.({ shardIndex: shard.index, totalShards: shards.length });
+    input.onProgress?.({ phase: 'shard-started', shardIndex: shard.index, totalShards: shards.length });
+    let shardOutput: ParsedShardReviewOutput;
     try {
-      review = await run({
+      shardOutput = await run({
         backend: input.backend,
         containerEngine: input.containerEngine,
         connection: shardConnection,
@@ -503,12 +564,12 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
         prompt: prompts[index] as string,
         rejectSecretOutput: true,
         parseAssistantText: (raw) => {
-          const parsed = parseReviewResult(raw);
-          if (parsed.findings.length > MAX_FINDINGS_PER_SHARD) {
+          const parsed = parseShardReviewOutput(raw);
+          if (parsed.review.findings.length > MAX_FINDINGS_PER_SHARD) {
             throw new Error(`Shard ${shard.index} exceeded its finding limit`);
           }
           const shardPaths = new Set(shard.paths);
-          const foreign = parsed.findings.filter((finding) => !shardPaths.has(finding.location.path));
+          const foreign = parsed.review.findings.filter((finding) => !shardPaths.has(finding.location.path));
           if (foreign.length > 0) {
             throw new Error(`Shard ${shard.index} reported a finding outside its authoritative paths`);
           }
@@ -518,7 +579,18 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
     } catch (error) {
       if (isAggregateDeadlineError(error)) {
         degraded = true;
-        notCoveredShards = shards.length - shardsCompleted;
+        notCoveredShards += shards.length - index;
+        await input.onShardSkipped?.({
+          shardIndex: shard.index,
+          totalShards: shards.length,
+          reason: 'aggregate-deadline',
+        });
+        input.onProgress?.({
+          phase: 'shard-skipped',
+          shardIndex: shard.index,
+          totalShards: shards.length,
+          degraded: true,
+        });
         break;
       }
       // Deadline-aware degradation extends to strict contract-parse failures: one shard emitting a
@@ -532,8 +604,33 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
       if (!contractParseFailure && !(error instanceof ReviewContractError)) throw error;
       degraded = true;
       notCoveredShards += 1;
+      await input.onShardSkipped?.({ shardIndex: shard.index, totalShards: shards.length, reason: 'malformed-output' });
+      input.onProgress?.({
+        phase: 'shard-skipped',
+        shardIndex: shard.index,
+        totalShards: shards.length,
+        degraded: true,
+      });
       console.warn(`Shard ${shard.index} produced malformed output and is reported as not covered`);
       continue;
+    }
+    const review = shardOutput.review;
+    if (shardOutput.malformedIncrements > 0) {
+      // Incremental emission: a malformed tail degrades the shard per the strict-output policy
+      // without discarding the already-emitted, already-validated increments.
+      degraded = true;
+      notCoveredShards += 1;
+      await input.onShardSkipped?.({ shardIndex: shard.index, totalShards: shards.length, reason: 'malformed-output' });
+      input.onProgress?.({
+        phase: 'shard-partial',
+        shardIndex: shard.index,
+        totalShards: shards.length,
+        findings: review.findings.length,
+        degraded: true,
+      });
+      console.warn(
+        `Shard ${shard.index} produced ${shardOutput.malformedIncrements} malformed emission increment(s); valid increments are kept and the shard is reported as not covered`,
+      );
     }
     if (reviewContainsSecret(review, input.secrets)) throw new Error('Shard output contains forbidden secret data');
     rawCandidateCount += review.findings.length;
@@ -553,6 +650,13 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
       candidates.push({ id: candidateId(snapshot, anchorDimension, finding), role: anchorDimension, finding });
     }
     shardsCompleted += 1;
+    input.onProgress?.({
+      phase: 'shard-completed',
+      shardIndex: shard.index,
+      totalShards: shards.length,
+      findings: validated.findings.length,
+      degraded: shardOutput.malformedIncrements > 0,
+    });
     if (input.onShardCompleted) {
       await input.onShardCompleted({
         completedShards: shardsCompleted,
@@ -560,7 +664,7 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
         shardIndex: shard.index,
         shardPaths: shard.paths,
         findings: validated.findings,
-        degraded: false,
+        degraded: shardOutput.malformedIncrements > 0,
       });
     }
   }
@@ -571,6 +675,8 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
     // publication renders the explicit coverage statement instead of a silent clean result.
     // Degradation only skips unattempted shards, so completed candidates may be empty (outcome
     // clean) or carry the validated findings tuple produced by the completed shards.
+    input.onProgress?.({ phase: 'merge-pass-skipped', degraded: true });
+    input.onProgress?.({ phase: 'review-completed', degraded: true });
     const degradedFindings = candidates.map(({ finding }) => finding);
     const review: ReviewResultV1 =
       degradedFindings.length === 0
@@ -588,6 +694,7 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
         preArbiterOmittedCount: 0,
         arbiterRejectedCount: 0,
         reservedTokens,
+        totalShards: shards.length,
         ...degradedFlags,
       },
     };
@@ -621,11 +728,14 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
     preArbiterOmittedCount: mergeSelection.omitted,
     arbiterRejectedCount: 0,
     reservedTokens,
+    totalShards: shards.length,
     ...degradedFlags,
   };
   if (mergeSelection.selected.length === 0) {
     // All shards ran and none produced a publishable candidate, so there is no remaining work a
     // moved clock could truncate; the run is complete even if the deadline expired meanwhile.
+    input.onProgress?.({ phase: 'merge-pass-skipped' });
+    input.onProgress?.({ phase: 'review-completed' });
     return { review: { version: 1, outcome: 'clean', findings: [] }, summary: baseSummary };
   }
 
@@ -637,6 +747,7 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
   if (Buffer.byteLength(prompt, 'utf8') > MAX_ARBITER_PROMPT_BYTES) {
     throw new Error('Assembled merge prompt exceeds its reserved byte ceiling');
   }
+  input.onProgress?.({ phase: 'merge-pass-started' });
   try {
     await assertFreshWithinDeadline(input.assertFresh, deadline, now, BACKEND_CLEANUP_RESERVE_MS);
     remainingTime(deadline, now);
@@ -644,6 +755,8 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
     if (!isAggregateDeadlineError(error)) throw error;
     // Every shard completed but the merge pass never ran: publish the validated candidates as
     // explicitly unadjudicated partial coverage instead of failing the run.
+    input.onProgress?.({ phase: 'merge-pass-skipped', degraded: true });
+    input.onProgress?.({ phase: 'review-completed', degraded: true });
     const unadjudicated = candidates.map(({ finding }) => finding);
     const degradedReview: ReviewResultV1 =
       unadjudicated.length === 0
@@ -655,7 +768,7 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
         ...baseSummary,
         arbiterRan: false,
         degraded: true,
-        notCoveredShards: 0,
+        notCoveredShards,
       },
     };
   }
@@ -692,6 +805,8 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
       error.kind === 'malformed-output' &&
       !error.message.includes(FORBIDDEN_SECRET_OUTPUT_MESSAGE);
     if (!deadlineExpired && !mergeFailedSoftly && !(error instanceof SpecialistContractError)) throw error;
+    input.onProgress?.({ phase: 'merge-pass-skipped', degraded: true });
+    input.onProgress?.({ phase: 'review-completed', degraded: true });
     const unadjudicated = candidates.map(({ finding }) => finding);
     const degradedReview: ReviewResultV1 =
       unadjudicated.length === 0
@@ -703,7 +818,7 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
         ...baseSummary,
         arbiterRan: false,
         degraded: true,
-        notCoveredShards: 0,
+        notCoveredShards,
       },
     };
   }
@@ -726,6 +841,8 @@ export async function executeReviewStrategy(input: ExecuteReviewStrategyInput): 
     explanation: finding.explanation,
     fix: finding.fix,
   }));
+  input.onProgress?.({ phase: 'merge-pass-completed', findings: findings.length });
+  input.onProgress?.({ phase: 'review-completed' });
   return {
     review: { version: 1, outcome: findings.length === 0 ? 'clean' : 'findings', findings } as ReviewResultV1,
     summary: {

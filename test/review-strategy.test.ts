@@ -47,7 +47,7 @@ test('forced and auto strategies use fixed deterministic threshold reasons', () 
     selected: 'single-pass',
     reasons: ['low-risk'],
   });
-  assert.equal(REVIEW_STRATEGY_VERSION, 2);
+  assert.equal(REVIEW_STRATEGY_VERSION, 3);
   assert.deepEqual(selectReviewStrategy({ requested: 'single-pass', diff: low, analyzerCoverage: 'partial' }).reasons, [
     'forced-single-pass',
   ]);
@@ -68,7 +68,7 @@ test('forced and auto strategies use fixed deterministic threshold reasons', () 
   );
   assert.deepEqual(
     selectReviewStrategy({ requested: 'auto', diff: oneFile('src/value.ts', 81), analyzerCoverage: 'partial' }).reasons,
-    ['many-changed-lines', 'partial-analyzer-coverage'],
+    ['many-changed-lines', 'partial-analyzer-coverage', 'single-shard-plan'],
   );
   assert.deepEqual(
     selectReviewStrategy({
@@ -76,16 +76,16 @@ test('forced and auto strategies use fixed deterministic threshold reasons', () 
       diff: oneFile('.github/workflows/review.yml'),
       analyzerCoverage: 'complete',
     }).reasons,
-    ['sensitive-surface'],
+    ['sensitive-surface', 'single-shard-plan'],
   );
   assert.deepEqual(
     selectReviewStrategy({ requested: 'auto', diff: oneFile('src/auth/guard.ts'), analyzerCoverage: 'complete' })
       .reasons,
-    ['sensitive-surface'],
+    ['sensitive-surface', 'single-shard-plan'],
   );
   assert.deepEqual(
     selectReviewStrategy({ requested: 'auto', diff: oneFile('src/auth.ts'), analyzerCoverage: 'complete' }).reasons,
-    ['sensitive-surface'],
+    ['sensitive-surface', 'single-shard-plan'],
   );
   const threeFiles = prepareReviewedDiff(
     [0, 1, 2]
@@ -98,7 +98,7 @@ test('forced and auto strategies use fixed deterministic threshold reasons', () 
   );
   assert.deepEqual(
     selectReviewStrategy({ requested: 'auto', diff: threeFiles, analyzerCoverage: 'complete' }).reasons,
-    ['many-files'],
+    ['many-files', 'single-shard-plan'],
   );
 });
 
@@ -132,7 +132,7 @@ test('auto routes bounded sensitive path and filename classes without substring 
   for (const path of sensitive) {
     assert.deepEqual(
       selectReviewStrategy({ requested: 'auto', diff: oneFile(path), analyzerCoverage: 'complete' }).reasons,
-      ['sensitive-surface'],
+      ['sensitive-surface', 'single-shard-plan'],
       path,
     );
   }
