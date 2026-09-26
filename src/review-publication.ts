@@ -694,6 +694,10 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
     analyzerSummary: input.analyzer?.summary,
     executionSummary,
     inlineCap: input.maximumInlineComments,
+    inlinePublishedFingerprints: [
+      ...selected.map((finding) => finding.fingerprint),
+      ...[...inlineRegistry.values()].map((entry) => entry.fingerprint),
+    ],
     ...(executionSummary?.degraded
       ? {
           coverage: {
