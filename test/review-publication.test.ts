@@ -1246,17 +1246,14 @@ function inlineSpy(options: { tamper?: boolean } = {}) {
   const bodies: string[] = [];
   const leases: Array<ManagedCommentLease | undefined> = [];
   const stored = new Map<number, { body: string; path: string; side: string; line: number }>();
-  const assertOwnership = async (id: number, expectedMarker: string): Promise<void> => {
-    const entry = stored.get(id);
-    if (!entry) throw new Error(`no stored comment ${id}`);
-    if (entry.body.trimEnd().split(/\r?\n/).at(-1) !== expectedMarker) {
-      throw new Error('Inline review comment ownership check failed');
-    }
-  };
+  // The inline-comment methods read their state through `this` on purpose: a production regression
+  // that calls them detached from the client (losing `this`) must fail loudly here, exactly as it
+  // fails against the real GitHubClient ("Cannot read properties of undefined (reading 'request')").
   const client = {
     ...base.client,
+    __stored: stored,
     async listPullRequestReviewComments() {
-      return [...stored.entries()].map(([id, entry]) => ({
+      return [...this.__stored.entries()].map(([id, entry]) => ({
         id,
         body: entry.body,
         html_url: 'url',
@@ -1266,13 +1263,18 @@ function inlineSpy(options: { tamper?: boolean } = {}) {
         line: entry.line,
       }));
     },
+    async getPullRequestReviewComment(_context: PullRequestContext, id: number) {
+      const entry = this.__stored.get(id);
+      if (!entry) throw new Error(`no stored comment ${id}`);
+      return { id, body: entry.body, html_url: 'url', user: actor };
+    },
     async createPullRequestReviewComment(
       _context: PullRequestContext,
       comment: { path: string; side: 'LEFT' | 'RIGHT'; line: number; body: string },
     ) {
       const id = 300 + createdInline.length;
       const body = options.tamper ? `${comment.body}\n<!-- tampered -->` : comment.body;
-      stored.set(id, { body, path: comment.path, side: comment.side, line: comment.line });
+      this.__stored.set(id, { body, path: comment.path, side: comment.side, line: comment.line });
       createdInline.push({ id, path: comment.path, side: comment.side, line: comment.line, body: comment.body });
       return { id, body: comment.body, html_url: 'url', user: actor };
     },
@@ -1283,9 +1285,12 @@ function inlineSpy(options: { tamper?: boolean } = {}) {
       expectedMarker: string,
       body: string,
     ) {
-      await assertOwnership(id, expectedMarker);
-      const entry = stored.get(id)!;
-      stored.set(id, { ...entry, body });
+      const current = await this.getPullRequestReviewComment(_context, id);
+      if (current.body.trimEnd().split(/\r?\n/).at(-1) !== expectedMarker) {
+        throw new Error('Inline review comment ownership check failed');
+      }
+      const entry = this.__stored.get(id)!;
+      this.__stored.set(id, { ...entry, body });
       updatedInline.push({ id, body });
       return { id, body, html_url: 'url', user: actor };
     },
@@ -1295,8 +1300,11 @@ function inlineSpy(options: { tamper?: boolean } = {}) {
       id: number,
       expectedMarker: string,
     ): Promise<void> {
-      await assertOwnership(id, expectedMarker);
-      stored.delete(id);
+      const current = await this.getPullRequestReviewComment(_context, id);
+      if (current.body.trimEnd().split(/\r?\n/).at(-1) !== expectedMarker) {
+        throw new Error('Inline review comment ownership check failed');
+      }
+      this.__stored.delete(id);
       deletedInline.push(id);
     },
     async upsertManagedComment(
