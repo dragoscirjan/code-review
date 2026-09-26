@@ -6,6 +6,37 @@ export interface ActionReleaseCliEnvironment {
   GITHUB_TOKEN?: string;
 }
 
+/**
+ * Fixed, host-generated validation messages that carry no remote-derived or untrusted content.
+ * These are safe to surface verbatim so operators see why a release plan failed closed; every
+ * other error (including release-state messages that interpolate remote tag names) stays
+ * suppressed.
+ */
+const SAFE_INVALID_RELEASE_MESSAGES = new Set([
+  'commit history contains an invalid breaking-change footer',
+  'version must use canonical stable vMAJOR.MINOR.PATCH syntax',
+  'commit history must contain between 1 and 1000 commits',
+  'commit history contains an invalid message',
+  'commit history exceeded its byte limit',
+  'commit history contains a non-conventional commit',
+  'GitHub Release records must have exactly tagName, draft, and prerelease',
+  'a new target must be the current main revision; retries must remain ancestors of main',
+]);
+
+const INVALID_RELEASE_PREFIX = 'Invalid action release: ';
+
+/** Maps a thrown release error to the operator-visible message without leaking untrusted content. */
+export function safeReleaseErrorMessage(message: string): string {
+  if (message.startsWith('Action release failed:') || message.startsWith('Action release aborted:')) return message;
+  if (
+    message.startsWith(INVALID_RELEASE_PREFIX) &&
+    SAFE_INVALID_RELEASE_MESSAGES.has(message.slice(INVALID_RELEASE_PREFIX.length))
+  ) {
+    return message;
+  }
+  return 'Action release failed; details suppressed';
+}
+
 interface CliOptions {
   mode: 'plan' | 'publish';
   version?: string;
@@ -75,11 +106,7 @@ export async function main(
     return 0;
   } catch (error) {
     const message = error instanceof Error ? error.message : '';
-    const safeMessage =
-      message.startsWith('Action release failed:') || message.startsWith('Action release aborted:')
-        ? message
-        : 'Action release failed; details suppressed';
-    console.error(safeMessage);
+    console.error(safeReleaseErrorMessage(message));
     return 1;
   }
 }

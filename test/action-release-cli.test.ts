@@ -1,5 +1,6 @@
+import assert from 'node:assert/strict';
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { main } from '../src/action-release-cli';
+import { main, safeReleaseErrorMessage } from '../src/action-release-cli';
 
 const MAIN_SHA = '2222222222222222222222222222222222222222';
 const SUPPRESSED_ERROR = 'Action release failed; details suppressed';
@@ -44,12 +45,14 @@ describe('action release CLI', () => {
     expect(JSON.stringify(errors.mock.calls)).not.toContain('untrusted-token');
   });
 
-  test('suppresses release-policy validation containing untrusted input', async () => {
+  test('release-policy validation surfaces only the fixed message, never the untrusted input', async () => {
     const errors = captureErrors();
     await expect(main(['plan', '--version', 'v1.0.0-untrusted', '--repository', 'owner/repository'], {})).resolves.toBe(
       1,
     );
-    expect(errors).toHaveBeenCalledWith(SUPPRESSED_ERROR);
+    expect(errors).toHaveBeenCalledWith(
+      'Invalid action release: version must use canonical stable vMAJOR.MINOR.PATCH syntax',
+    );
     expect(JSON.stringify(errors.mock.calls)).not.toContain('v1.0.0-untrusted');
   });
 
@@ -57,5 +60,41 @@ describe('action release CLI', () => {
     const errors = captureErrors();
     await expect(main(['plan', '--version', 'v1.0.0', '--repository', 'invalid'], {})).resolves.toBe(1);
     expect(errors).toHaveBeenCalledWith('Action release failed: repository must be a canonical GitHub owner/name');
+  });
+});
+
+describe('safe release error mapping', () => {
+  test('preserves adapter failure prefixes verbatim', () => {
+    assert.equal(
+      safeReleaseErrorMessage('Action release failed: tag publication conflicted with changed remote state'),
+      'Action release failed: tag publication conflicted with changed remote state',
+    );
+    assert.equal(safeReleaseErrorMessage('Action release aborted: ...'), 'Action release aborted: ...');
+  });
+
+  test('surfaces fixed release-state validation messages without remote-derived content', () => {
+    assert.equal(
+      safeReleaseErrorMessage('Invalid action release: commit history contains a non-conventional commit'),
+      'Invalid action release: commit history contains a non-conventional commit',
+    );
+    assert.equal(
+      safeReleaseErrorMessage('Invalid action release: commit history exceeded its byte limit'),
+      'Invalid action release: commit history exceeded its byte limit',
+    );
+  });
+
+  test('suppresses release-state messages that interpolate remote-derived values', () => {
+    const untrusted = 'v1.2.3-evil<script>';
+    assert.equal(
+      safeReleaseErrorMessage(`Invalid action release: duplicate GitHub Release ${untrusted}`),
+      SUPPRESSED_ERROR,
+    );
+    assert.equal(
+      safeReleaseErrorMessage(`Invalid action release: ref ${untrusted} must point directly to a commit`),
+      SUPPRESSED_ERROR,
+    );
+    assert.equal(safeReleaseErrorMessage('Invalid action release: something unexpected'), SUPPRESSED_ERROR);
+    assert.equal(safeReleaseErrorMessage('totally unrelated'), SUPPRESSED_ERROR);
+    assert.equal(safeReleaseErrorMessage(''), SUPPRESSED_ERROR);
   });
 });
