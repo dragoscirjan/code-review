@@ -217,6 +217,8 @@ export function renderComment(input: {
   contextMetadata?: ReviewContextMetadata;
   analyzerSummary?: AnalyzerSummary;
   executionSummary?: ReviewExecutionSummary;
+  /** Effective inline-comment cap, surfaced in the report so a disabled cap is visible in the artifact. */
+  inlineCap?: number;
   /** Present when the sharded review ended before covering every shard. */
   coverage?: { degraded: boolean; notCoveredShards: number; totalShards: number; provisionalFindings: number };
   memory?: {
@@ -341,7 +343,11 @@ export function renderComment(input: {
 - Suppressed by repository memory: ${counts.memorySuppressed}
 - Inline comments published: ${counts.inlineSelected}
 - Inline comments suppressed by publication history: ${counts.inlineHistorySuppressed}
-- Accepted findings omitted from inline comments by limit: ${counts.inlineLimitOmitted}${truncation}${context}${analysis}${execution}${memory}${lifecycle}
+- Accepted findings omitted from inline comments by limit: ${counts.inlineLimitOmitted}${
+    input.inlineCap === undefined
+      ? ''
+      : `\n- Inline comment cap: ${input.inlineCap}${input.inlineCap === 0 ? ' (per-file inline publication is disabled by max-inline-comments: 0)' : ''}`
+  }${truncation}${context}${analysis}${execution}${memory}${lifecycle}
 
 </details>`;
   const details = [...input.assessment.findings];

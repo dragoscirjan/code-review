@@ -217,7 +217,7 @@ Omit `model-credentials` for keyless servers. The harness adapters use a non-sec
 | `code-index-cache-ttl`    | `24h`                  | Maximum cache age (`ms`, `s`, `m`, `h`, `d`).                                                     |
 | `max-diff-bytes`          | `120000`               | Maximum model-visible diff bytes; only complete diff hunks are included.                          |
 | `minimum-confidence`      | `0`                    | Inclusive confidence threshold from `0` through `1`.                                              |
-| `max-inline-comments`     | `0`                    | Inline comment cap from `0` through `10`; `0` keeps summary-only behavior.                        |
+| `max-inline-comments`     | `10`                   | Per-file inline comment cap from `0` through `10`; `0` disables inline publication.               |
 | `deterministic-analyzers` | `none`                 | `none` or `base-config`; trusted workflow gate for fixed parse-only checks.                       |
 | `review-memory`           | `none`                 | `none` or `base-config`; exact-base reviewer memory gate.                                         |
 | `review-strategy`         | `auto`                 | `single-pass`, `specialists` (sharded review), or deterministic `auto` selection.                 |

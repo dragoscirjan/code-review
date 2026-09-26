@@ -693,6 +693,7 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
     contextMetadata: input.contextMetadata,
     analyzerSummary: input.analyzer?.summary,
     executionSummary,
+    inlineCap: input.maximumInlineComments,
     ...(executionSummary?.degraded
       ? {
           coverage: {

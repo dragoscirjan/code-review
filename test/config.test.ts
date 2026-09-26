@@ -40,7 +40,7 @@ test('loads explicit model config and safe action defaults', () => {
   assert.equal(config.codeIndexCacheTtlMs, 86_400_000);
   assert.equal(config.maxDiffBytes, 120_000);
   assert.equal(config.minimumConfidence, 0);
-  assert.equal(config.maxInlineComments, 0);
+  assert.equal(config.maxInlineComments, 10);
   assert.equal(config.deterministicAnalyzers, 'none');
   assert.equal(config.reviewMemory, 'none');
   assert.equal(config.reviewStrategy, 'auto');

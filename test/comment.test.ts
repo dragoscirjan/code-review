@@ -306,3 +306,26 @@ test('keeps mandatory lifecycle metadata and final ownership marker under detail
   assert.equal(lines.at(-1), marker);
   assert.match(comment, /detailed finding block/u);
 });
+
+test('the analysis report surfaces the effective inline-comment cap', () => {
+  const base = {
+    assessment: assessment([finding()], 'findings'),
+    backend: 'opencode' as const,
+    model: 'model',
+    headSha: '1'.repeat(40),
+    actor: 'reviewer',
+    diffTruncated: false,
+    originalDiffBytes: 1,
+    marker: '<!-- managed -->',
+  };
+  const disabled = renderComment({ ...base, inlineCap: 0 });
+  assert.match(
+    disabled,
+    /Inline comment cap: 0 \(per-file inline publication is disabled by max-inline-comments: 0\)/u,
+  );
+  const enabled = renderComment({ ...base, inlineCap: 10 });
+  assert.match(enabled, /Inline comment cap: 10$/mu);
+  assert.ok(!enabled.includes('inline publication is disabled'));
+  const absent = renderComment(base);
+  assert.ok(!absent.includes('Inline comment cap:'));
+});
