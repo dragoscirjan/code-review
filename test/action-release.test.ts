@@ -159,6 +159,18 @@ describe('resolveActionReleaseVersion', () => {
       bump: 'patch',
       nonConventionalCommits: 1,
     });
+    // A valid BREAKING CHANGE footer selects major even under a non-conventional subject, and an
+    // uninterpretable footer fails closed regardless of the subject's conventionality.
+    expect(deriveActionReleaseBump(['Update docs\n\nBREAKING CHANGE: drops the legacy contract'])).toEqual({
+      bump: 'major',
+      nonConventionalCommits: 0,
+    });
+    expect(() => deriveActionReleaseBump(['Update docs\n\nBREAKING CHANGE:'])).toThrow(
+      'invalid breaking-change footer',
+    );
+    expect(() => deriveActionReleaseBump(['Update docs\n\nBREAKING CHANGE: bad\tcontrol'])).toThrow(
+      'invalid breaking-change footer',
+    );
     expect(() => deriveActionReleaseBump(['fix(#57): change\n\nBREAKING CHANGE: bad\tcontrol'])).toThrow(
       'invalid breaking-change footer',
     );

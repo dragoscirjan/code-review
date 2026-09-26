@@ -277,9 +277,10 @@ export interface CommitBumpSummary {
  * Derives the release increment from the commit history. Strict Conventional Commits drive the
  * bump (breaking → major, feat → minor, otherwise patch). A non-conventional subject — for
  * example a quick administrative workflow edit merged through the forge UI — contributes no
- * increment and is only counted; it can never raise the increment and can never silently turn a
- * conventional breaking change into a smaller release. Structurally invalid breaking-change
- * footers still fail closed: an uninterpretable BREAKING CHANGE marker must never be downgraded.
+ * increment through its subject and is only counted. Breaking change signals are honored
+ * regardless of the subject: a valid BREAKING CHANGE footer selects major, and an uninterpretable
+ * one (control characters, empty value) fails closed, so an intended major bump is never
+ * silently downgraded.
  */
 export function deriveActionReleaseBump(commitMessages: readonly string[]): CommitBumpSummary {
   if (!Array.isArray(commitMessages) || commitMessages.length === 0 || commitMessages.length > MAX_RELEASE_COMMITS) {
@@ -294,15 +295,21 @@ export function deriveActionReleaseBump(commitMessages: readonly string[]): Comm
     }
     totalBytes += Buffer.byteLength(message, 'utf8');
     if (totalBytes > MAX_COMMIT_HISTORY_BYTES) throw releaseError('commit history exceeded its byte limit');
+    // Footer validation runs for every message, conventional or not: an uninterpretable BREAKING
+    // CHANGE footer must fail closed regardless of the subject's conventionality, and a valid
+    // breaking footer still selects major even under a non-conventional subject so an intended
+    // major bump can never be silently downgraded to patch.
+    const footerBreaking = hasBreakingChangeFooter(message);
     const header = message.split('\n', 1)[0] as string;
     const match = CONVENTIONAL_COMMIT_PATTERN.exec(header);
     const conventional =
       match && (match[2] === undefined || !containsAsciiControl(match[2])) && !containsAsciiControl(match[4] as string);
     if (!conventional) {
-      nonConventionalCommits += 1;
+      if (footerBreaking) bump = 'major';
+      else nonConventionalCommits += 1;
       continue;
     }
-    if (match[3] || hasBreakingChangeFooter(message)) {
+    if (match[3] || footerBreaking) {
       bump = 'major';
     } else if (match[1] === 'feat' && bump === 'patch') {
       bump = 'minor';
