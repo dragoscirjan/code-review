@@ -122,6 +122,10 @@ test('renders accepted counts and keeps Markdown, HTML, mentions, bidi, and mark
   assert.match(comment, /Duplicates removed: 1/);
   assert.match(comment, /Below confidence threshold: 1/);
   assert.match(comment, /complete diff-hunk boundaries/);
+  assert.match(comment, /<summary>👀 Analysis report<\/summary>/u);
+  assert.match(comment, /- Review status: ✅ complete/u);
+  assert.match(comment, /### 🐛 Findings \(1\)/u);
+  assert.match(comment, /<summary>1\. 🔴 Critical 🛡️ Security — /u);
   assert.doesNotMatch(comment, /<script>/);
   assert.doesNotMatch(comment, /@team/);
   for (const code of ['061C', '200B', '202E', '206A', '206F']) assert.ok(comment.includes(`\\u{${code}}`));
@@ -169,7 +173,12 @@ test('renders a bounded inline comment with all format controls visible and the 
     }),
     '<!-- inline -->',
   );
-  assert.match(comment, /Critical Security/);
+  assert.match(comment, /_🛡️ Security_ \| _🔴 Critical_/u);
+  assert.match(comment, /<summary>🔎 Evidence & analysis<\/summary>/u);
+  assert.match(comment, /<summary>🤖 Follow-up prompt \(v1\)<\/summary>/u);
+  assert.match(comment, /Please fix the critical security finding at/u);
+  assert.ok(comment.indexOf('🔎 Evidence & analysis') < comment.indexOf('unsafe();'));
+  assert.ok(comment.indexOf('🤖 Follow-up prompt') < comment.indexOf('<!-- inline -->'));
   for (const code of ['061C', '200B', '206A', '206F']) assert.ok(comment.includes(`\\u{${code}}`));
   assert.doesNotMatch(comment, /[\u061C\u200B\u206A\u206F]/u);
   assert.equal(comment.trimEnd().split(/\r?\n/).at(-1), '<!-- inline -->');

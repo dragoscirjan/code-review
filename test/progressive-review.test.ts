@@ -57,7 +57,7 @@ test('progress summary shows running status, shard counts, and collapsible provi
     provisionalFindings: [],
     marker,
   });
-  assert.match(body, /review in progress/u);
+  assert.match(body, /👀 Review in progress/u);
   assert.match(body, /shards completed 2 \/ 5/u);
   assert.ok(body.trimEnd().endsWith(marker));
   assert.ok(Buffer.byteLength(body, 'utf8') <= 65_536);
@@ -76,7 +76,7 @@ test('progress summary shows running status, shard counts, and collapsible provi
   assert.match(withFindings, /<details>/u);
   assert.match(
     withFindings,
-    /<summary>High Correctness — <pre><code>src\/file\.ts<\/code><\/pre>:1 \(RIGHT\)<\/summary>/u,
+    /<summary>🟠 High 🎯 Correctness — <pre><code>src\/file\.ts<\/code><\/pre>:1 \(RIGHT\)<\/summary>/u,
   );
   assert.ok(withFindings.indexOf('<details>') < withFindings.indexOf('Unsafe behavior.'));
 });
@@ -190,6 +190,6 @@ test('deterministic phase-0 findings render in the progress summary', () => {
     provisionalFindings: [],
     marker,
   });
-  assert.match(body, /review in progress/u);
-  assert.match(body, /shards completed 0 \/ 4/u);
+  assert.match(body, /👋 Hola! We're doing code review, yo! Have a bit of patience!/u);
+  assert.doesNotMatch(body, /Review in progress/u);
 });
