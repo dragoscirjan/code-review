@@ -163,7 +163,7 @@ describe('resolveActionReleaseVersion', () => {
     // uninterpretable footer fails closed regardless of the subject's conventionality.
     expect(deriveActionReleaseBump(['Update docs\n\nBREAKING CHANGE: drops the legacy contract'])).toEqual({
       bump: 'major',
-      nonConventionalCommits: 0,
+      nonConventionalCommits: 1,
     });
     expect(() => deriveActionReleaseBump(['Update docs\n\nBREAKING CHANGE:'])).toThrow(
       'invalid breaking-change footer',

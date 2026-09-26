@@ -305,8 +305,10 @@ export function deriveActionReleaseBump(commitMessages: readonly string[]): Comm
     const conventional =
       match && (match[2] === undefined || !containsAsciiControl(match[2])) && !containsAsciiControl(match[4] as string);
     if (!conventional) {
+      // The count classifies the subject independently of the bump decision: a non-conventional
+      // subject is reported even when its breaking footer drives the major bump.
+      nonConventionalCommits += 1;
       if (footerBreaking) bump = 'major';
-      else nonConventionalCommits += 1;
       continue;
     }
     if (match[3] || footerBreaking) {
