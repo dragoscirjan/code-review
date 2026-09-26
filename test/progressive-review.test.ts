@@ -74,7 +74,7 @@ test('progress summary shows running status, shard counts, and collapsible provi
     marker,
   });
   assert.match(withFindings, /<details>/u);
-  assert.match(withFindings, /#### 🟠 High 🎯 Correctness — <pre><code>src\/file\.ts<\/code><\/pre>:1 \(RIGHT\)/u);
+  assert.match(withFindings, /#### 🟠 High 🎯 Correctness — <code>src\/file\.ts<\/code>\n/u);
   // The concise explanation stays visible; only secondary evidence collapses.
   assert.ok(withFindings.indexOf('Unsafe behavior.') < withFindings.indexOf('<details>'));
 });

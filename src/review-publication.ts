@@ -418,7 +418,9 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
 
   /** Publishes provisional per-file inline comments for one completed shard, cap and dedup enforced. */
   const publishProvisionalInline = async (findings: readonly ValidatedFinding[]): Promise<void> => {
-    const createInline = input.client.createPullRequestReviewComment;
+    // Bound explicitly: a detached method call would lose `this` inside GitHubClient and crash
+    // on the private request helper ("Cannot read properties of undefined (reading 'request')").
+    const createInline = input.client.createPullRequestReviewComment?.bind(input.client);
     if (!progressive || !createInline) return;
     for (const finding of orderAcceptedFindingsForInline(findings, input.memory)) {
       if (inlineRegistry.size >= input.maximumInlineComments) return;
@@ -447,8 +449,8 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
    * must never influence history suppression, which only matches final inline markers.
    */
   const sweepAbandonedProvisionalInline = async (): Promise<void> => {
-    const listComments = input.client.listPullRequestReviewComments;
-    const deleteInline = input.client.deletePullRequestReviewComment;
+    const listComments = input.client.listPullRequestReviewComments?.bind(input.client);
+    const deleteInline = input.client.deletePullRequestReviewComment?.bind(input.client);
     if (!progressive || !listComments || !deleteInline) return;
     const pattern = new RegExp(
       `^<!-- code-review-inline-provisional:${input.backend}:v1:([A-Za-z0-9_-]{43}) -->$`,
@@ -608,9 +610,10 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
   // rejected, deduplicated, or beyond the run-wide cap are deleted. Ownership is verified against
   // the provisional marker the comment was created with (expected author plus trailing machine
   // marker); a mismatch fails publication closed.
-  const createInline = input.client.createPullRequestReviewComment;
-  const updateInline = input.client.updatePullRequestReviewComment;
-  const deleteInline = input.client.deletePullRequestReviewComment;
+  // Bound explicitly: detached calls lose `this` inside GitHubClient (see publishProvisionalInline).
+  const createInline = input.client.createPullRequestReviewComment?.bind(input.client);
+  const updateInline = input.client.updatePullRequestReviewComment?.bind(input.client);
+  const deleteInline = input.client.deletePullRequestReviewComment?.bind(input.client);
   if (progressive && createInline && updateInline && deleteInline) {
     const acceptedFingerprints = new Set(assessment.findings.map((finding) => finding.fingerprint));
     for (const [anchor, entry] of [...inlineRegistry]) {
@@ -694,6 +697,10 @@ export async function executeAndPublishReview(input: ExecuteAndPublishReviewInpu
     analyzerSummary: input.analyzer?.summary,
     executionSummary,
     inlineCap: input.maximumInlineComments,
+    inlinePublishedFingerprints: [
+      ...selected.map((finding) => finding.fingerprint),
+      ...[...inlineRegistry.values()].map((entry) => entry.fingerprint),
+    ],
     ...(executionSummary?.degraded
       ? {
           coverage: {
