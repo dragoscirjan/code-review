@@ -403,3 +403,21 @@ GITHUB_TOKEN=... CODE_INDEXER=gitnexus npm run test:indexers
 ```
 
 The live test environment variable is only a test convenience, not a restored action input. See `CONTRIBUTING.md`.
+
+## Scheduled live contract checks
+
+The `live-contract-drift` workflow runs the opt-in integration suites against trusted `main` revisions on a daily schedule (`17 3 * * *` UTC) and on manual dispatch. Pull-request CI stays offline and authoritative; this workflow is an additional release and operations gate that detects upstream drift (provider protocol changes, harness CLI changes, container engine changes, indexer tool changes) before a production review fails.
+
+Dimensions covered by one scheduled run:
+
+- **Sandbox and protocol contracts** — both backends (`opencode`, `pi`) against controlled local endpoints for every supported provider API (`openai-completions`, `openai-responses`, `anthropic-messages`) on Podman and Docker. Credential-free; failures classify as product or sandbox regressions.
+- **Indexer contracts** — `cgc` and `gitnexus` install, index the exact base revision, and answer the fixed query categories against the real upstream tools. Uses only the ephemeral `GITHUB_TOKEN`.
+- **Live provider evaluation** — the recorded evaluation corpus replays against the configured real provider endpoint through the production sandbox. Bounded by the fixed corpus, `single-pass` strategy, and a 600-second timeout; expect a small, capped provider charge per run.
+
+### Operational rules
+
+- **Secrets and rotation:** the only live credential is `REVIEW_MODEL_CREDENTIALS` (the same secret the review workflow uses). It is consumed only by the `live-provider` job, never logged, and never written to artifacts. Rotate it through the provider console on provider guidance or after any suspected exposure; no workflow reads or stores it beyond the run.
+- **Charges and budgets:** scheduled runs are the cost surface. Costs are bounded by the fixed corpus size, `single-pass` strategy, per-job timeouts (30 minutes for live and indexer jobs), and the single-flight concurrency group. Reruns are not automatically bounded — rerun deliberately, after diagnosing, per the rerun policy below.
+- **Rerun policy:** identify the changed upstream first (release diff of the provider, harness package, engine, or indexer). Rerun once against the unchanged `main` revision. A green rerun closes the incident; a second consecutive failure is treated as an incident.
+- **Incident response:** if the triage summary classifies the failure as provider-side drift or outage, verify against the provider's status page, pin or update the affected version, and record the decision in the Wiki before merging adapter changes. If credential exposure is ever suspected, rotate `REVIEW_MODEL_CREDENTIALS` immediately.
+- **Diagnostics:** the live evaluation publishes only its aggregate metrics report (`review-evaluation.json`, 14-day retention). Raw prompts, provider responses, and credentials are never stored, logged, or attached.
