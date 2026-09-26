@@ -44,3 +44,4 @@ jobs:
               }
             }
           model-credentials: ${{ secrets.REVIEW_MODEL_CREDENTIALS }}
+          max-inline-comment: 10
