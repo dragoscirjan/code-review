@@ -1,0 +1,170 @@
+# Owner-controlled drift detection for live integrations: provider protocols, backend CLIs,
+# container engines, and code indexers. Pull-request CI stays offline and credential-free; these
+# checks run only on trusted main revisions or explicit owner dispatch and never publish anything.
+# See README "Scheduled live contract drift checks" for secret rotation, spend, and rerun policy.
+name: Live contract drift checks
+
+'on':
+  schedule:
+    # 03:17 UTC daily; an off-hour slot avoids the top-of-the-hour provider rate-limit surge.
+    - cron: '17 3 * * *'
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: live-contract-drift
+  cancel-in-progress: false
+
+jobs:
+  # Both backends against controlled local protocol endpoints for each supported provider API and
+  # container engine. No provider credentials are used; a failure is a product or sandbox
+  # regression (CLI, protocol, or container change), never a provider outage.
+  sandbox-contract:
+    if: github.event_name == 'workflow_dispatch' || github.event.repository.fork == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [opencode, pi]
+        engine: [podman, docker]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Contract-test ${{ matrix.backend }} against controlled ${{ matrix.engine }} endpoints
+        env:
+          REVIEW_TEST_BACKEND: ${{ matrix.backend }}
+          CONTAINER_ENGINE: ${{ matrix.engine }}
+        run: npm run test:models
+
+  # Indexer adapters against the real upstream tools on the exact main revision. Uses only the
+  # ephemeral GITHUB_TOKEN with contents read; nothing about the run is PR-controlled.
+  indexer-contract:
+    if: github.event_name == 'workflow_dispatch' || github.event.repository.fork == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        indexer: [cgc, gitnexus]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-python@v6
+        if: matrix.indexer == 'cgc'
+        with:
+          python-version: '3.12'
+      - run: npm ci
+      - name: Install and run ${{ matrix.indexer }} against the exact base revision
+        env:
+          CODE_INDEXER: ${{ matrix.indexer }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: npm run test:indexers
+
+  # Real provider protocol through the production sandbox. Cost is bounded by the fixed seeded
+  # corpus, single-pass strategy, and a hard job timeout; every run consumes a bounded amount of
+  # provider credit. Credentials stay in the step environment and are never logged or published.
+  live-provider:
+    if: github.event_name == 'workflow_dispatch' || github.event.repository.fork == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Bounded live evaluation against the configured provider
+        env:
+          REVIEW_EVALUATION_MODEL_CONFIG: |
+            {
+              "version": 1,
+              "provider": {
+                "api": "openai-completions",
+                "baseUrl": "https://openrouter.ai/api/v1",
+                "network": "remote",
+                "credential": "review-provider"
+              },
+              "model": {
+                "id": "z-ai/glm-5.3-flash",
+                "contextWindow": 1048576,
+                "maxOutputTokens": 8192
+              }
+            }
+          REVIEW_EVALUATION_MODEL_CREDENTIALS: ${{ secrets.REVIEW_MODEL_CREDENTIALS }}
+          REVIEW_EVALUATION_BACKEND: pi
+          REVIEW_EVALUATION_STRATEGY: single-pass
+          REVIEW_EVALUATION_TIMEOUT_SECONDS: '600'
+          REVIEW_EVALUATION_OUTPUT_DIR: ${{ runner.temp }}/live-evaluation
+        run: npm run evaluation:live
+      - name: Upload bounded aggregate evaluation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-evaluation-report
+          path: ${{ runner.temp }}/live-evaluation/reports/review-evaluation.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Turns raw job results into an actionable classification: product regression, indexer drift,
+  # or provider outage. Stores no secrets and no raw diagnostics, only conclusions.
+  triage:
+    needs: [sandbox-contract, indexer-contract, live-provider]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Classify failures and write the operator summary
+        env:
+          SANDBOX_RESULT: ${{ needs.sandbox-contract.result }}
+          INDEXER_RESULT: ${{ needs.indexer-contract.result }}
+          LIVE_RESULT: ${{ needs.live-provider.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            echo "## Live contract drift check — $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo ''
+            echo "| Dimension | Result |"
+            echo "| --- | --- |"
+            echo "| Sandbox and protocol contracts (controlled endpoints) | ${SANDBOX_RESULT} |"
+            echo "| Indexer contracts (cgc, gitnexus) | ${INDEXER_RESULT} |"
+            echo "| Live provider protocol | ${LIVE_RESULT} |"
+            echo ''
+            if [ "$SANDBOX_RESULT" != success ] && [ "$LIVE_RESULT" = failure ]; then
+              echo '**Likely product regression:** the credential-free controlled-endpoint contracts failed too. Compare with the last green run and treat as a code or sandbox regression.'
+            elif [ "$SANDBOX_RESULT" = success ] && [ "$INDEXER_RESULT" = success ] && [ "$LIVE_RESULT" = failure ]; then
+              echo '**Likely provider-side drift or outage.** Controlled-endpoint contracts passed; only the live provider path failed. Check the provider status page and pinned CLI/protocol versions before rerunning.'
+            elif [ "$INDEXER_RESULT" != success ]; then
+              echo '**Indexer tool drift.** The upstream indexer CLI, install path, or archive format changed; update the pinned version or the adapter and record the change in the Wiki.'
+            elif [ "$SANDBOX_RESULT" = success ] && [ "$INDEXER_RESULT" = success ] && [ "$LIVE_RESULT" = success ]; then
+              echo 'All live contract dimensions passed.'
+            else
+              echo '**Mixed result.** Inspect the failed matrix legs; each leg names its backend, engine, or indexer.'
+            fi
+            echo ''
+            echo "Run: ${RUN_URL}"
+            echo ''
+            echo 'Rerun policy: identify the changed upstream first, then rerun once. A green rerun closes the incident; a second consecutive failure is an incident (rotate the model credential if the provider confirms credential risk).'
+          } >> "$GITHUB_STEP_SUMMARY"
