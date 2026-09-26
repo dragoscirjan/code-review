@@ -53,9 +53,9 @@ inputs:
     required: false
     default: '0'
   max-inline-comments:
-    description: Maximum validated findings published in one inline review batch (0 disables inline publication)
+    description: Maximum validated findings published as per-file inline comments (0 through 10; 0 disables inline publication and keeps summary-only behavior)
     required: false
-    default: '0'
+    default: '10'
   deterministic-analyzers:
     description: Fixed in-process analyzers. Accepted values are none and base-config
     required: false

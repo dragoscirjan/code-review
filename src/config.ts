@@ -186,7 +186,7 @@ export function loadActionConfig(environment: NodeJS.ProcessEnv = process.env): 
   );
   const minimumConfidence = parseConfidence(getActionInput('minimum-confidence', environment) ?? '0');
   const maxInlineComments = parseInteger(
-    getActionInput('max-inline-comments', environment) ?? '0',
+    getActionInput('max-inline-comments', environment) ?? '10',
     'max-inline-comments',
     0,
     10,
