@@ -46,6 +46,12 @@ export interface ActionReleasePlan {
   updateMajorTag: boolean;
   createGitHubRelease: boolean;
   noop: boolean;
+  /**
+   * Number of commits since the last release whose subject is not a strict Conventional Commit.
+   * They contribute no increment (the plan stays at least a patch), and the count is surfaced so
+   * quick administrative commits can never silently mask the release increment.
+   */
+  nonConventionalCommits: number;
 }
 
 export interface PlanActionReleaseInput extends ActionReleaseState {
@@ -53,6 +59,7 @@ export interface PlanActionReleaseInput extends ActionReleaseState {
   targetSha: string;
   mainSha: string;
   targetIsMainAncestor: boolean;
+  nonConventionalCommits: number;
 }
 
 interface ParsedVersion extends ActionReleaseVersion {
@@ -260,12 +267,27 @@ export function inspectActionReleaseBaseline(input: ActionReleaseState & { targe
   };
 }
 
-export function deriveActionReleaseBump(commitMessages: readonly string[]): ActionReleaseBump {
+export interface CommitBumpSummary {
+  bump: ActionReleaseBump;
+  /** Commits whose subject is not a strict Conventional Commit; they contribute no increment. */
+  nonConventionalCommits: number;
+}
+
+/**
+ * Derives the release increment from the commit history. Strict Conventional Commits drive the
+ * bump (breaking → major, feat → minor, otherwise patch). A non-conventional subject — for
+ * example a quick administrative workflow edit merged through the forge UI — contributes no
+ * increment and is only counted; it can never raise the increment and can never silently turn a
+ * conventional breaking change into a smaller release. Structurally invalid breaking-change
+ * footers still fail closed: an uninterpretable BREAKING CHANGE marker must never be downgraded.
+ */
+export function deriveActionReleaseBump(commitMessages: readonly string[]): CommitBumpSummary {
   if (!Array.isArray(commitMessages) || commitMessages.length === 0 || commitMessages.length > MAX_RELEASE_COMMITS) {
     throw releaseError(`commit history must contain between 1 and ${MAX_RELEASE_COMMITS} commits`);
   }
   let totalBytes = 0;
   let bump: ActionReleaseBump = 'patch';
+  let nonConventionalCommits = 0;
   for (const message of commitMessages) {
     if (typeof message !== 'string' || message.length === 0 || message.includes('\0')) {
       throw releaseError('commit history contains an invalid message');
@@ -274,12 +296,11 @@ export function deriveActionReleaseBump(commitMessages: readonly string[]): Acti
     if (totalBytes > MAX_COMMIT_HISTORY_BYTES) throw releaseError('commit history exceeded its byte limit');
     const header = message.split('\n', 1)[0] as string;
     const match = CONVENTIONAL_COMMIT_PATTERN.exec(header);
-    if (
-      !match ||
-      (match[2] !== undefined && containsAsciiControl(match[2])) ||
-      containsAsciiControl(match[4] as string)
-    ) {
-      throw releaseError('commit history contains a non-conventional commit');
+    const conventional =
+      match && (match[2] === undefined || !containsAsciiControl(match[2])) && !containsAsciiControl(match[4] as string);
+    if (!conventional) {
+      nonConventionalCommits += 1;
+      continue;
     }
     if (match[3] || hasBreakingChangeFooter(message)) {
       bump = 'major';
@@ -287,16 +308,23 @@ export function deriveActionReleaseBump(commitMessages: readonly string[]): Acti
       bump = 'minor';
     }
   }
-  return bump;
+  return { bump, nonConventionalCommits };
 }
 
-export function resolveActionReleaseVersion(input: ResolveActionReleaseVersionInput): ActionReleaseVersion {
+export interface ResolvedActionReleaseVersion {
+  version: ActionReleaseVersion;
+  /** Count of non-conventional commit subjects since the last release (see deriveActionReleaseBump). */
+  nonConventionalCommits: number;
+}
+
+export function resolveActionReleaseVersion(input: ResolveActionReleaseVersionInput): ResolvedActionReleaseVersion {
   assertCommitSha(input.targetSha, 'targetSha');
   const state = readValidatedState(input);
   const releasedForTarget = state.releasedVersions
     .filter((entry) => entry.targetSha === input.targetSha)
     .sort((left, right) => compareVersions(left.version, right.version));
   let version = releasedForTarget.at(-1)?.version;
+  let nonConventionalCommits = 0;
 
   if (!version) {
     const latest = [...state.releasedVersions]
@@ -305,13 +333,14 @@ export function resolveActionReleaseVersion(input: ResolveActionReleaseVersionIn
     if (!latest) {
       version = parseVersion('v1.0.0');
     } else {
-      const bump = deriveActionReleaseBump(input.commitMessages);
+      const summary = deriveActionReleaseBump(input.commitMessages);
+      nonConventionalCommits = summary.nonConventionalCommits;
       let [major, minor, patch] = latest.version.numbers;
-      if (bump === 'major') {
+      if (summary.bump === 'major') {
         major += 1n;
         minor = 0n;
         patch = 0n;
-      } else if (bump === 'minor') {
+      } else if (summary.bump === 'minor') {
         minor += 1n;
         patch = 0n;
       } else {
@@ -322,11 +351,14 @@ export function resolveActionReleaseVersion(input: ResolveActionReleaseVersionIn
   }
 
   assertNoUnexpectedOrphans(state, version.tag);
-  return publicVersion(version);
+  return { version: publicVersion(version), nonConventionalCommits };
 }
 
 export function planActionRelease(input: PlanActionReleaseInput): ActionReleasePlan {
   const version = parseVersion(input.version);
+  if (!Number.isSafeInteger(input.nonConventionalCommits) || input.nonConventionalCommits < 0) {
+    throw releaseError('non-conventional commit count must be a nonnegative integer');
+  }
   assertCommitSha(input.targetSha, 'targetSha');
   assertCommitSha(input.mainSha, 'mainSha');
 
@@ -379,5 +411,6 @@ export function planActionRelease(input: PlanActionReleaseInput): ActionReleaseP
     updateMajorTag,
     createGitHubRelease,
     noop: !createVersionTag && !updateMajorTag && !createGitHubRelease,
+    nonConventionalCommits: input.nonConventionalCommits,
   };
 }
