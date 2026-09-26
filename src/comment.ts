@@ -44,43 +44,32 @@ function renderSuggestionBlock(replacement: string): string {
   return `${fence}suggestion\n${replacement}${finalNewline}${fence}`;
 }
 
-/** Visible body shared by every finding presentation: provenance, explanation, and the fix. */
-function renderFindingBody(finding: ValidatedFinding, includeSuggestion: boolean): string {
+/** Actionable part kept visible in every finding presentation: explanation and the fix. */
+function renderFindingActionable(finding: ValidatedFinding, includeSuggestion: boolean): string {
   const fix =
     includeSuggestion && finding.suggestion
       ? `- **Suggested change:**\n${renderSuggestionBlock(finding.suggestion.replacement)}`
       : `- **Suggested fix:**\n${renderModelTextLiteral(finding.fix)}`;
-  return `- **Line:** ${finding.location.line} (${finding.location.side})
+  return `- **Explanation:**\n${renderModelTextLiteral(finding.explanation)}\n${fix}`;
+}
+
+/** Secondary provenance and high-volume evidence collapsed by default in every finding presentation. */
+function renderFindingEvidence(finding: ValidatedFinding): string {
+  return `<details>
+<summary>🔎 Evidence & analysis</summary>
+
+- **Line:** ${finding.location.line} (${finding.location.side})
 - **Confidence:** ${Math.round(finding.confidence * 100)}%
 ${
   finding.origin?.kind === 'analyzer'
     ? `- **Deterministic analyzer:** ${finding.origin.analyzer} (${finding.origin.analyzerVersion}), rule ${finding.origin.ruleId} r${finding.origin.ruleRevision}\n`
     : ''
-}- **Explanation:**
-${renderModelTextLiteral(finding.explanation)}
-${fix}`;
-}
-
-/** Secondary, high-volume evidence collapsed by default in every finding presentation. */
-function renderFindingEvidence(finding: ValidatedFinding): string {
-  return `<details>
-<summary>🔎 Evidence & analysis</summary>
-
-- **Path:**
+}- **Path:**
 ${renderModelTextLiteral(finding.location.path)}
 - **Evidence:**
 ${renderModelTextLiteral(finding.evidence)}
 
 </details>`;
-}
-
-function renderFinding(finding: ValidatedFinding, index?: number, includeSuggestion = false): string {
-  const prefix = index === undefined ? '###' : `### ${index}.`;
-  return `${prefix} ${findingHeading(finding)}
-
-${renderFindingBody(finding, includeSuggestion)}
-
-${renderFindingEvidence(finding)}`;
 }
 
 /** Fixed, versioned prompt template so authors can hand one finding to an AI agent for follow-up. */
@@ -118,9 +107,7 @@ function assertCommentSize(comment: string, label: string): string {
 export function renderInlineComment(finding: ValidatedFinding, marker: string): string {
   const comment = `${findingBadgeLine(finding)}
 
-- **Explanation:**
-${renderModelTextLiteral(finding.explanation)}
-${renderFindingBody(finding, true)}
+${renderFindingActionable(finding, true)}
 
 ${renderFindingEvidence(finding)}
 
@@ -130,11 +117,15 @@ ${marker}`;
   return assertCommentSize(comment, 'Rendered inline review comment');
 }
 
-/** Collapsible presentation used for deterministic, provisional, and final findings in summaries. */
+/**
+ * Collapsible presentation used for deterministic, provisional, and final findings: the heading,
+ * explanation, and suggested fix stay visible so key findings never hide behind an expansion;
+ * only secondary evidence and analysis collapse.
+ */
 function renderCollapsibleFinding(finding: ValidatedFinding, index?: number): string {
   const title = index === undefined ? findingHeading(finding) : `${index}. ${findingHeading(finding)}`;
-  const summary = `${title} — ${renderModelTextLiteral(finding.location.path)}:${finding.location.line} (${finding.location.side})`;
-  return `<details>\n<summary>${summary}</summary>\n\n${renderFinding(finding)}\n\n</details>`;
+  const heading = `#### ${title} — ${renderModelTextLiteral(finding.location.path)}:${finding.location.line} (${finding.location.side})`;
+  return `${heading}\n\n${renderFindingActionable(finding, false)}\n\n${renderFindingEvidence(finding)}`;
 }
 
 /** Greeting and running status shown in the managed summary until the review finishes. */
